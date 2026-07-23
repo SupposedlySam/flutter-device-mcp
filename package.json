@@ -1,0 +1,74 @@
+{
+  "name": "flutter-device-mcp",
+  "version": "0.1.0",
+  "description": "Model Context Protocol (MCP) server AND CLI that build, deploy, launch, and drive Flutter apps across iOS, Android, Tizen, tvOS, and webOS — capturing the Dart VM Service URI so a driver (e.g. Marionette) can connect.",
+  "type": "module",
+  "license": "MIT",
+  "author": "SupposedlySam",
+  "homepage": "https://github.com/SupposedlySam/flutter-device-mcp#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SupposedlySam/flutter-device-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/SupposedlySam/flutter-device-mcp/issues"
+  },
+  "main": "dist/index.js",
+  "bin": {
+    "flutter-device-mcp": "dist/index.js",
+    "flutter-device": "dist/bin/flutter-device.js"
+  },
+  "files": [
+    "dist",
+    "scripts/run.mjs",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc && chmod +x dist/index.js dist/bin/flutter-device.js",
+    "start": "node dist/index.js",
+    "cli": "node dist/bin/flutter-device.js",
+    "dev": "tsx watch src/index.ts",
+    "test": "node --experimental-vm-modules ./node_modules/jest/bin/jest.js",
+    "lint": "eslint src/",
+    "inspector": "npx @modelcontextprotocol/inspector dist/index.js"
+  },
+  "keywords": [
+    "flutter",
+    "mcp",
+    "model-context-protocol",
+    "ios",
+    "android",
+    "tizen",
+    "tvos",
+    "webos",
+    "flutter-tizen",
+    "devicectl",
+    "simctl",
+    "adb",
+    "sdb",
+    "marionette",
+    "vm-service",
+    "ai-agent"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "winston": "^3.11.0",
+    "ws": "^8.21.0"
+  },
+  "devDependencies": {
+    "@types/jest": "^29.5.11",
+    "@types/node": "^20.11.24",
+    "@types/ws": "^8.18.1",
+    "@typescript-eslint/eslint-plugin": "^7.0.2",
+    "@typescript-eslint/parser": "^7.0.2",
+    "eslint": "^8.56.0",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.1.1",
+    "tsx": "^4.7.1",
+    "typescript": "^5.3.3"
+  }
+}
