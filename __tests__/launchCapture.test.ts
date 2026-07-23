@@ -1,0 +1,245 @@
+import fs from "fs";
+import {
+  buildPtyCaptureCommand,
+  createLogPath,
+  evaluateLaunchLog,
+  pollLogForUri,
+} from "../src/launchCapture.js";
+import { isLaunchFailure } from "../src/types.js";
+import { TIZEN_FAILURE_SIGNATURES } from "../src/adapters/tizen.js";
+import { mockBuildPtyCaptureCommand } from "./support/mockBuildPtyCaptureCommand.js";
+
+// The neutral launch core takes the failure signatures as input. We exercise it
+// with the Tizen signature set so the extracted-core behavior is asserted to be
+// identical to the former deploy.ts.
+const SIGS = TIZEN_FAILURE_SIGNATURES;
+
+// flutter-tizen prints this while enumerating devices even when the sdb device
+// is attached and found moments later. It must never be treated as terminal.
+const TRANSIENT_NO_DEVICES =
+  "No devices found yet. Checking for wireless devices...\n";
+
+const DEVICES_FOUND =
+  "The following devices were found:\n" +
+  "Tizen ExampleTizenTV (mobile) • 192.0.2.7:26101 • flutter-tester • Tizen 6.5\n";
+
+const URI_LINE =
+  "A Dart VM Service on Tizen ExampleTizenTV is available at: " +
+  "http://127.0.0.1:51182/tys47XX1iAw=/\n";
+
+const NO_MATCHING_DEVICE =
+  "No supported devices found with name or id matching '192.0.2.6:26101'.\n" +
+  "The following devices were found:\n" +
+  "Tizen ExampleTizenTV (mobile) • 192.0.2.7:26101 • flutter-tester • Tizen 6.5\n";
+
+describe("evaluateLaunchLog", () => {
+  it("keeps polling on the transient 'No devices found yet' progress line", () => {
+    expect(evaluateLaunchLog(TRANSIENT_NO_DEVICES, SIGS).kind).toBe("pending");
+    expect(
+      evaluateLaunchLog(TRANSIENT_NO_DEVICES + DEVICES_FOUND, SIGS).kind
+    ).toBe("pending");
+  });
+
+  it("returns the URI when it arrives after the transient line", () => {
+    const evaluation = evaluateLaunchLog(
+      TRANSIENT_NO_DEVICES + DEVICES_FOUND + URI_LINE,
+      SIGS
+    );
+    expect(evaluation).toEqual({
+      kind: "uri",
+      uri: {
+        http: "http://127.0.0.1:51182/tys47XX1iAw=/",
+        ws: "ws://127.0.0.1:51182/tys47XX1iAw=/ws",
+      },
+    });
+  });
+
+  it("fails on a genuine terminal failure after the transient line", () => {
+    const evaluation = evaluateLaunchLog(
+      TRANSIENT_NO_DEVICES + "Unable to find suitable devices.\n",
+      SIGS
+    );
+    expect(evaluation.kind).toBe("failure");
+  });
+
+  it("fails on an immediate terminal 'No devices found.' line", () => {
+    expect(evaluateLaunchLog("No devices found.\n", SIGS).kind).toBe("failure");
+    expect(evaluateLaunchLog("No devices connected.\n", SIGS).kind).toBe(
+      "failure"
+    );
+  });
+
+  it("fails on the terminal 'no matching device' output (stale -d target)", () => {
+    expect(evaluateLaunchLog(NO_MATCHING_DEVICE, SIGS).kind).toBe("failure");
+    expect(
+      evaluateLaunchLog(TRANSIENT_NO_DEVICES + NO_MATCHING_DEVICE, SIGS).kind
+    ).toBe("failure");
+  });
+
+  it("fails on install errors regardless of device chatter", () => {
+    const evaluation = evaluateLaunchLog(
+      TRANSIENT_NO_DEVICES + DEVICES_FOUND + "Install failed: -12\n",
+      SIGS
+    );
+    expect(evaluation.kind).toBe("failure");
+  });
+
+  it("stays pending on empty or unremarkable output", () => {
+    expect(evaluateLaunchLog("", SIGS).kind).toBe("pending");
+    expect(evaluateLaunchLog("Installing TPK...\n", SIGS).kind).toBe("pending");
+  });
+
+  it("stays pending when no signatures are supplied and no URI present", () => {
+    expect(evaluateLaunchLog("No devices found.\n", []).kind).toBe("pending");
+  });
+});
+
+describe("buildPtyCaptureCommand", () => {
+  // Standardized on `/bin/sh -c` for ALL platforms so the bare-vs-compound-inner
+  // distinction (the historical bug class) disappears. `platform` is injected so
+  // no assertion depends on the host's process.platform.
+  const SIMPLE = "flutter run --no-build --debug -d 'SIM-1'";
+  const COMPOUND = "export PATH='/opt/bin:'\"$PATH\"; ares-launch -d 'tv1' && echo ok";
+
+  it("uses the darwin `script -q /dev/null /bin/sh -c '<inner>'` form", () => {
+    expect(buildPtyCaptureCommand({ inner: SIMPLE, platform: "darwin" })).toBe(
+      `exec script -q /dev/null /bin/sh -c '${SIMPLE.replace(/'/g, "'\\''")}'`
+    );
+  });
+
+  it("uses the util-linux `script -q -c '<inner>' /dev/null` form on linux", () => {
+    expect(buildPtyCaptureCommand({ inner: SIMPLE, platform: "linux" })).toBe(
+      `exec script -q -c '${SIMPLE.replace(/'/g, "'\\''")}' /dev/null`
+    );
+  });
+
+  it("prepends `cd <quoted cwd> &&` only when cwd is supplied", () => {
+    expect(
+      buildPtyCaptureCommand({ inner: SIMPLE, cwd: "/repo/app", platform: "darwin" })
+    ).toBe(
+      `cd '/repo/app' && exec script -q /dev/null /bin/sh -c '${SIMPLE.replace(/'/g, "'\\''")}'`
+    );
+    // No cwd → no leading `cd`.
+    expect(buildPtyCaptureCommand({ inner: SIMPLE, platform: "darwin" })).not.toContain(
+      "cd "
+    );
+  });
+
+  it("survives a compound inner on darwin (single `/bin/sh -c` payload)", () => {
+    const cmd = buildPtyCaptureCommand({ inner: COMPOUND, platform: "darwin" });
+    // The whole compound is one `/bin/sh -c` argument — `export` is NOT handed to
+    // `script` as argv[0] (the historical BSD defect).
+    expect(cmd).toBe(
+      `exec script -q /dev/null /bin/sh -c '${COMPOUND.replace(/'/g, "'\\''")}'`
+    );
+    expect(cmd).not.toContain("/dev/null export PATH");
+  });
+
+  it("survives a compound inner on linux (quoted `-c` payload)", () => {
+    const cmd = buildPtyCaptureCommand({ inner: COMPOUND, platform: "linux" });
+    expect(cmd).toBe(
+      `exec script -q -c '${COMPOUND.replace(/'/g, "'\\''")}' /dev/null`
+    );
+  });
+
+  it("always preserves the leading `exec` (pty owner outlives the poll)", () => {
+    expect(
+      buildPtyCaptureCommand({ inner: SIMPLE, platform: "darwin" }).startsWith("exec ")
+    ).toBe(true);
+    expect(
+      buildPtyCaptureCommand({ inner: SIMPLE, platform: "linux" }).startsWith("exec ")
+    ).toBe(true);
+    // With a cwd the exec follows the `cd … &&`.
+    expect(
+      buildPtyCaptureCommand({ inner: SIMPLE, cwd: "/x", platform: "linux" })
+    ).toContain("&& exec script -q");
+  });
+
+  // Drift guard for the adapter tests. Those suites mock the whole
+  // launchCapture.js module (to stub the side-effecting launchAndCaptureUri), and
+  // this jest 29 native-ESM setup has no requireActual/importActual for ES modules
+  // (an in-factory dynamic import of the mocked specifier re-enters the factory),
+  // so the pure buildPtyCaptureCommand cannot be pulled from source inside the
+  // mock. They therefore share ONE stand-in
+  // (__tests__/support/mockBuildPtyCaptureCommand). This test — which imports the
+  // REAL helper (this file does NOT mock launchCapture.js) — pins that stand-in
+  // byte-for-byte against the real implementation across every input shape, so any
+  // future drift in the source fails HERE loudly instead of silently in the mock.
+  it("the shared adapter-test stand-in matches the real buildPtyCaptureCommand", () => {
+    const platforms: NodeJS.Platform[] = ["darwin", "linux"];
+    const inners = [SIMPLE, COMPOUND];
+    const cwds: (string | undefined)[] = [undefined, "/repo/app"];
+    const fifos: (string | undefined)[] = [undefined, "/tmp/ctl.fifo"];
+    for (const platform of platforms) {
+      for (const inner of inners) {
+        for (const cwd of cwds) {
+          for (const controlFifoPath of fifos) {
+            expect(
+              mockBuildPtyCaptureCommand({ inner, cwd, platform, controlFifoPath })
+            ).toBe(
+              buildPtyCaptureCommand({ inner, cwd, platform, controlFifoPath })
+            );
+          }
+        }
+      }
+    }
+  });
+
+  it("wires the flutter runner's stdin to the control FIFO when supplied", () => {
+    const cmd = buildPtyCaptureCommand({
+      inner: SIMPLE,
+      platform: "darwin",
+      controlFifoPath: "/tmp/ctl.fifo",
+    });
+    // The inner is redirected from a read-write fd on the FIFO (`exec 3<>…; … <&3`)
+    // so `r`/`R` can be appended later without EOF-killing the reader. The FIFO
+    // path is single-quoted inside the outer `/bin/sh -c` layer, so its quotes
+    // appear escaped (`'\''`) — assert on the fd-redirect tokens, which survive.
+    expect(cmd).toContain("exec 3<>");
+    expect(cmd).toContain("/tmp/ctl.fifo");
+    expect(cmd).toContain("<&3");
+  });
+});
+
+describe("createLogPath", () => {
+  it("produces a unique .log path under a temp dir", () => {
+    const a = createLogPath();
+    expect(a.endsWith(".log")).toBe(true);
+    expect(a).toContain("flutter-device-mcp-launch-");
+  });
+});
+
+describe("pollLogForUri", () => {
+  it("resolves with the URI once it appears in the log file", async () => {
+    const logPath = createLogPath();
+    fs.writeFileSync(logPath, TRANSIENT_NO_DEVICES + DEVICES_FOUND + URI_LINE);
+    const outcome = await pollLogForUri(logPath, 2000, 1234, SIGS);
+    expect(isLaunchFailure(outcome)).toBe(false);
+    if (!isLaunchFailure(outcome)) {
+      expect(outcome.vmServiceUriWs).toBe(
+        "ws://127.0.0.1:51182/tys47XX1iAw=/ws"
+      );
+      expect(outcome.pid).toBe(1234);
+    }
+    fs.rmSync(logPath, { force: true });
+  });
+
+  it("fails fast on a terminal failure signature", async () => {
+    const logPath = createLogPath();
+    fs.writeFileSync(logPath, "Install failed: -12\n");
+    const outcome = await pollLogForUri(logPath, 2000, 99, SIGS);
+    expect(isLaunchFailure(outcome)).toBe(true);
+    fs.rmSync(logPath, { force: true });
+  });
+
+  it("times out when neither a URI nor a failure appears", async () => {
+    const logPath = createLogPath();
+    fs.writeFileSync(logPath, "Installing...\n");
+    const outcome = await pollLogForUri(logPath, 200, undefined, SIGS);
+    expect(isLaunchFailure(outcome)).toBe(true);
+    if (isLaunchFailure(outcome)) {
+      expect(outcome.reason).toContain("Timed out");
+    }
+    fs.rmSync(logPath, { force: true });
+  });
+});
