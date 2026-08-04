@@ -51,6 +51,11 @@ import {
   resolveIosTarget,
 } from "../iosDeviceTarget.js";
 import {
+  parseSimulatorDestinations,
+  resolveSimDestination,
+  SimCandidate,
+} from "../iosSimDestination.js";
+import {
   BuildOptions,
   BuildResult,
   DeviceResolution,
@@ -522,11 +527,102 @@ export class IosAdapter implements PlatformAdapter {
     if (resolution.warning) {
       logger.warn("Stale FLUTTER_DEVICE_IOS_DEVICE pin", resolution);
     }
-    this.lastKind = resolution.kind;
+    // SIMULATOR destination validation (learned on-device): a simulator being
+    // BOOTED does not mean the build can target it. Confirm the resolved
+    // simulator is a scheme destination; pick+boot a valid one otherwise.
+    const validated =
+      resolution.kind === "simulator"
+        ? await this.validateSimulatorDestination(resolution, simulators)
+        : resolution;
+    this.lastKind = validated.kind;
     // Cache the flutter→devicectl mapping so uninstall/lifecycle (handed the
     // flutter id by the neutral server) can translate to the devicectl id.
-    this.rememberDevicectlId(resolution);
-    return resolution;
+    this.rememberDevicectlId(validated);
+    return validated;
+  }
+
+  /**
+   * Ensure the resolved SIMULATOR is a valid Runner-scheme destination.
+   *
+   * Runs `xcodebuild -showdestinations` for the Runner scheme and, via
+   * {@link resolveSimDestination}, keeps the target if it is eligible, else
+   * picks a booted-first valid destination (booting it when needed) and appends
+   * a warning explaining the substitution.
+   *
+   * Best-effort by design: if xcodebuild cannot be run or lists no simulator
+   * destinations, the original resolution is returned unchanged. Refusing to
+   * deploy because a VALIDATION step failed would be a worse failure than the
+   * one being prevented — the deploy then either works, or surfaces
+   * xcodebuild's own error.
+   */
+  private async validateSimulatorDestination(
+    resolution: IosDeviceResolution,
+    simulators: ReturnType<typeof parseSimctlDevices>
+  ): Promise<IosDeviceResolution> {
+    const workspace = path.join(
+      this.config.appDir,
+      "ios",
+      "Runner.xcworkspace"
+    );
+    const shown = await runShell(
+      `xcodebuild -workspace ${quote(workspace)} -scheme Runner ` +
+        `-showdestinations 2>&1`,
+      { cwd: path.join(this.config.appDir, "ios"), timeoutMs: 120000 }
+    );
+    const destinations = parseSimulatorDestinations(shown.combined);
+    if (destinations.length === 0) {
+      logger.warn(
+        "Could not enumerate iOS simulator scheme destinations; skipping validation",
+        { tail: tail(shown.combined, 10) }
+      );
+      return resolution;
+    }
+    const candidates: SimCandidate[] = simulators.map((s) => ({
+      udid: s.udid,
+      name: s.name,
+      booted: s.available,
+    }));
+    const picked = resolveSimDestination(
+      destinations,
+      candidates,
+      resolution.target
+    );
+    if (!picked) return resolution;
+
+    if (picked.needsBoot) {
+      logger.warn("Booting valid iOS simulator destination", {
+        udid: picked.udid,
+        name: picked.name,
+      });
+      await runShell(`xcrun simctl boot ${quote(picked.udid)}`, {
+        timeoutMs: 60000,
+      });
+    }
+
+    // Same UDID and eligible — nothing changed.
+    if (
+      picked.udid.toLowerCase() === resolution.target.toLowerCase() &&
+      !picked.warning
+    ) {
+      return resolution;
+    }
+
+    if (picked.warning) {
+      logger.warn("Substituted a valid iOS simulator destination", {
+        requested: resolution.target,
+        chosen: picked.udid,
+      });
+    }
+    const mergedWarning = [resolution.warning, picked.warning]
+      .filter(Boolean)
+      .join(" ");
+    return {
+      ...resolution,
+      target: picked.udid,
+      devicectlId: picked.udid, // simulator: flutter id == simctl id
+      name: picked.name ?? resolution.name,
+      ...(mergedWarning ? { warning: mergedWarning } : {}),
+    };
   }
 
   /** Record the resolved target's flutter→devicectl id mapping for translation. */

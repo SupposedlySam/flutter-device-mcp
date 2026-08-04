@@ -256,6 +256,146 @@ describe("IosAdapter.discoverDevice", () => {
   });
 });
 
+describe("IosAdapter.discoverDevice validates the SIMULATOR destination", () => {
+  // A booted simulator is not necessarily a target the build can use: the
+  // Runner scheme lists only a subset as valid destinations, and one that is
+  // not listed fails with "Unable to find a destination matching id:<udid>".
+  // Realistic UUID-shaped simulator ids. This matters: the destination parser
+  // only accepts hex-and-hyphen ids, which is exactly what makes it skip
+  // Xcode's `id:dvtdevice-...placeholder` rows. A made-up id like "SIM-UDID-1"
+  // is correctly dropped by that rule and would exercise the wrong branch here.
+  const BOOTED_SIM = "AAAA1111-1111-1111-1111-111111111111";
+  const OTHER_SIM = "BBBB2222-2222-2222-2222-222222222222";
+
+  /** A simulator host with exactly one BOOTED simulator, `BOOTED_SIM`. */
+  function mockBootedSim() {
+    runShell.mockImplementation(async (cmd: string) => {
+      if (cmd.includes("simctl list devices --json")) {
+        return {
+          ...okResult,
+          stdout: JSON.stringify({
+            devices: {
+              "com.apple.CoreSimulator.SimRuntime.iOS-18-0": [
+                {
+                  udid: BOOTED_SIM,
+                  name: "iPhone 15",
+                  state: "Booted",
+                  isAvailable: true,
+                },
+              ],
+            },
+          }),
+        };
+      }
+      if (cmd.includes("devicectl list devices")) return { ...okResult, stdout: "" };
+      if (cmd.includes("devices --machine")) return { ...okResult, stdout: "[]" };
+      return okResult;
+    });
+  }
+
+  /**
+   * Layer a scheme-destination list over the current mock. Passing a list that
+   * omits `BOOTED_SIM` reproduces the booted-but-ineligible case.
+   */
+  function mockScheme(destinationUdids: string[]) {
+    const rows = destinationUdids
+      .map(
+        (id, i) =>
+          `{ platform:iOS Simulator, id:${id}, OS:17.5, name:iPhone 1${i} }`
+      )
+      .join("\n");
+    const base = runShell.getMockImplementation()!;
+    runShell.mockImplementation(async (cmd: string, opts?: unknown) => {
+      if (cmd.includes("-showdestinations")) {
+        return {
+          ...okResult,
+          combined: `Available destinations for the "Runner" scheme:\n${rows}\n`,
+        };
+      }
+      return base(cmd, opts);
+    });
+  }
+
+  it("keeps a booted simulator that IS a valid destination, and boots nothing", async () => {
+    mockBootedSim();
+    mockScheme([BOOTED_SIM, OTHER_SIM]);
+    const r = await ios().discoverDevice();
+    expect(r.target).toBe(BOOTED_SIM);
+    expect(r.warning).toBeUndefined();
+    expect(
+      runShell.mock.calls.some(([c]) => (c as string).includes("simctl boot"))
+    ).toBe(false);
+  });
+
+  it("substitutes a valid destination when the booted sim is ineligible", async () => {
+    mockBootedSim();
+    mockScheme([OTHER_SIM]); // the BOOTED simulator is NOT listed
+    const r = await ios().discoverDevice();
+    expect(r.target).toBe(OTHER_SIM);
+    // The substitution is surfaced, not silent -- the caller asked for one
+    // simulator and is getting another.
+    expect(r.warning).toMatch(/not a valid Runner-scheme destination/);
+    expect(r.warning).toMatch(BOOTED_SIM);
+    // The substitute was not booted, so it has to be booted before use.
+    expect(
+      runShell.mock.calls.some(([c]) =>
+        (c as string).includes(`simctl boot '${OTHER_SIM}'`)
+      )
+    ).toBe(true);
+  });
+
+  it("keeps devicectlId in step with the substituted target", async () => {
+    // simctl and flutter share one UUID for a simulator; leaving devicectlId on
+    // the OLD udid would send uninstall/lifecycle to a different simulator.
+    mockBootedSim();
+    mockScheme([OTHER_SIM]);
+    const r = (await ios().discoverDevice()) as { devicectlId?: string };
+    expect(r.devicectlId).toBe(OTHER_SIM);
+  });
+
+  it("leaves the resolution alone when xcodebuild lists no destinations", async () => {
+    // Best-effort: refusing to deploy because a VALIDATION step failed would be
+    // a worse failure than the one being prevented.
+    mockBootedSim();
+    mockScheme([]);
+    const r = await ios().discoverDevice();
+    expect(r.target).toBe(BOOTED_SIM);
+    expect(r.warning).toBeUndefined();
+  });
+
+  it("ignores the placeholder row Xcode always prints", async () => {
+    // `id:dvtdevice-DVTiOSDeviceSimulatorPlaceholder-...` is not a simulator; if
+    // it were parsed as a destination the booted sim would look ineligible and
+    // get substituted for a target that does not exist.
+    mockBootedSim();
+    const base = runShell.getMockImplementation()!;
+    runShell.mockImplementation(async (cmd: string, opts?: unknown) => {
+      if (cmd.includes("-showdestinations")) {
+        return {
+          ...okResult,
+          combined:
+            'Available destinations for the "Runner" scheme:\n' +
+            "{ platform:iOS Simulator, id:dvtdevice-DVTiOSDeviceSimulatorPlaceholder-iphonesimulator:placeholder, name:Any iOS Simulator Device }\n",
+        };
+      }
+      return base(cmd, opts);
+    });
+    const r = await ios().discoverDevice();
+    expect(r.target).toBe(BOOTED_SIM);
+    expect(r.warning).toBeUndefined();
+  });
+
+  it("does not run the scheme check for a PHYSICAL device", async () => {
+    mockDiscovery("device");
+    await ios().discoverDevice();
+    expect(
+      runShell.mock.calls.some(([c]) =>
+        (c as string).includes("-showdestinations")
+      )
+    ).toBe(false);
+  });
+});
+
 describe("IosAdapter.launchAndCaptureUri", () => {
   it("feeds the neutral core the pty-wrapped flutter run + iOS signatures + appDir", async () => {
     await ios().launchAndCaptureUri("SIM-UDID-1", 4242);
