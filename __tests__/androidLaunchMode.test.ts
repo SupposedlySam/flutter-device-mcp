@@ -4,6 +4,7 @@ import {
   parseAndroidLaunchModeEnv,
   resolveAndroidLaunchMode,
 } from "../src/androidLaunchMode.js";
+import { resolveBuildMode } from "../src/types.js";
 
 describe("ANDROID_DEFAULT_LAUNCH_MODE", () => {
   it("is debug so a plain Android deploy comes up Marionette-drivable", () => {
@@ -64,5 +65,41 @@ describe("resolveAndroidLaunchMode precedence", () => {
   it("falls through to the debug default when both are absent", () => {
     expect(resolveAndroidLaunchMode({})).toBe("debug");
     expect(resolveAndroidLaunchMode({ explicitDebug: undefined })).toBe("debug");
+  });
+
+  it("an explicit 3-way mode outranks the debug boolean and the env pin", () => {
+    // `mode` is the only input that can ask for release, so it has to win over
+    // a `debug` boolean that would otherwise force debug/profile.
+    expect(
+      resolveAndroidLaunchMode({
+        explicitMode: "release",
+        explicitDebug: true,
+        envMode: "debug",
+      })
+    ).toBe("release");
+    expect(
+      resolveAndroidLaunchMode({ explicitMode: "profile", explicitDebug: true })
+    ).toBe("profile");
+  });
+});
+
+describe("resolveBuildMode (the neutral 3-way resolver)", () => {
+  it("an explicit mode always wins over the legacy debug boolean", () => {
+    expect(resolveBuildMode({ mode: "profile", debug: true })).toBe("profile");
+    expect(resolveBuildMode({ mode: "release", debug: true })).toBe("release");
+    expect(resolveBuildMode({ mode: "debug", debug: false })).toBe("debug");
+  });
+
+  it("without a mode, debug keeps its historical 2-way meaning", () => {
+    expect(resolveBuildMode({ debug: true })).toBe("debug");
+    expect(resolveBuildMode({ debug: false })).toBe("release");
+    expect(resolveBuildMode({})).toBe("release");
+  });
+
+  it("cannot reach profile through the debug boolean alone", () => {
+    // The whole reason `mode` exists: profile is the only mode that is BOTH
+    // realistically-timed and drivable, and a boolean cannot name three things.
+    expect(resolveBuildMode({ debug: true })).not.toBe("profile");
+    expect(resolveBuildMode({ debug: false })).not.toBe("profile");
   });
 });

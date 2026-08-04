@@ -285,10 +285,11 @@ export class AndroidAdapter implements PlatformAdapter {
       };
     }
 
-    // Mode precedence matches the launch: explicit `debug` arg > env pin >
-    // default `debug`. A `simulator`-style profile has no Android meaning, so
-    // only debug/profile/release are honored here.
+    // Mode precedence matches the launch: explicit `mode` > explicit `debug`
+    // arg > env pin > default `debug`. A `simulator`-style profile has no
+    // Android meaning, so only debug/profile/release are honored here.
     const mode = resolveAndroidLaunchMode({
+      explicitMode: opts.mode,
       explicitDebug: opts.debug,
       envMode: this.config.launchMode,
     });
@@ -367,6 +368,7 @@ export class AndroidAdapter implements PlatformAdapter {
    */
   async install(device: string, opts: InstallOptions): Promise<CommandResult> {
     this.launchMode = resolveAndroidLaunchMode({
+      explicitMode: opts.mode,
       explicitDebug: opts.debug,
       envMode: this.config.launchMode,
     });

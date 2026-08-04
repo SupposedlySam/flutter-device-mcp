@@ -12,7 +12,7 @@
 import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import { logger } from "../logger.js";
 import { CommandResult, tail } from "../cli.js";
-import { InputMode, isLaunchFailure } from "../types.js";
+import { BuildMode, InputMode, isLaunchFailure } from "../types.js";
 import { AdapterRegistry } from "../adapters/registry.js";
 import { PlatformAdapter } from "../adapters/platformAdapter.js";
 import { ResolvedConfig } from "../config/config.js";
@@ -167,6 +167,7 @@ export class CommandCore {
   async build(
     args: CommonArgs & {
       profile?: string;
+      mode?: BuildMode;
       debug?: boolean;
       skip_rust?: boolean;
       skip_flutter?: boolean;
@@ -183,6 +184,7 @@ export class CommandCore {
           : args.profile;
       const build = await adapter.build({
         profile,
+        mode: args.mode,
         debug: args.debug,
         skip_rust: args.skip_rust,
         skip_flutter: args.skip_flutter,
@@ -205,6 +207,7 @@ export class CommandCore {
     args: CommonArgs & {
       no_launch?: boolean;
       timeout_ms?: number;
+      mode?: BuildMode;
       debug?: boolean;
       target?: "simulator" | "device";
       device_udid?: string;
@@ -228,6 +231,7 @@ export class CommandCore {
       // 2. Install the already-built package (install-only).
       let install = await adapter.install(device, {
         noLaunch: true,
+        mode: args.mode,
         debug: args.debug,
       });
 
@@ -243,6 +247,7 @@ export class CommandCore {
         recovered = true;
         install = await adapter.install(device, {
           noLaunch: true,
+          mode: args.mode,
           debug: args.debug,
         });
       }
@@ -282,7 +287,14 @@ export class CommandCore {
 
       // 4. Launch through a pty, backgrounded, and capture the VM Service URI.
       const timeoutMs = args.timeout_ms ?? 180000;
-      let outcome = await adapter.launchAndCaptureUri(device, timeoutMs);
+      // The launch must name the mode of what was just installed (Tizen's
+      // `--no-build` reuses only a TPK of the named mode).
+      const launchMode = args.mode ?? (args.debug ? "debug" : undefined);
+      let outcome = await adapter.launchAndCaptureUri(
+        device,
+        timeoutMs,
+        launchMode
+      );
 
       // 4a. Reactive launch-failure recovery (iOS first-time provisioning).
       let launchRecovery: { recovered: boolean; note?: string } | undefined;
@@ -292,7 +304,11 @@ export class CommandCore {
           outcome.logTail ?? outcome.reason ?? ""
         );
         if (launchRecovery.recovered) {
-          outcome = await adapter.launchAndCaptureUri(device, timeoutMs);
+          outcome = await adapter.launchAndCaptureUri(
+            device,
+            timeoutMs,
+            launchMode
+          );
         }
       }
 

@@ -58,6 +58,7 @@ import {
   InputMode,
   LaunchOutcome,
   Platform,
+  resolveBuildMode,
   UnsupportedInputError,
 } from "../types.js";
 import {
@@ -428,7 +429,11 @@ export class IosAdapter implements PlatformAdapter {
 
     const forSimulator = opts.profile === "simulator";
     const flags = ["build", forSimulator ? "ios --simulator" : "ios"];
-    flags.push(opts.debug ? "--debug" : "--release");
+    // 3-way mode, `mode` winning over the legacy `debug` boolean. Honored here
+    // rather than ignored so `mode: "profile"` means the same thing on iOS as
+    // everywhere else — an arg that is silently dropped on one platform is
+    // worse than one that is unsupported loudly.
+    flags.push(`--${resolveBuildMode({ mode: opts.mode, debug: opts.debug })}`);
     // `flutter build ios` does not code-sign by default; keep it that way for a
     // plain artifact build (install/run handle signing at deploy time).
     if (!forSimulator) flags.push("--no-codesign");

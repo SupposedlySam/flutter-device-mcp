@@ -152,6 +152,16 @@ describe("AndroidAdapter.build", () => {
     expect(cmd).toBe("flutter build apk --profile");
   });
 
+  it("builds the apk named by an explicit 3-way mode, which outranks debug", async () => {
+    await android().build({ mode: "release", debug: true });
+    expect(runShell.mock.calls[0][0]).toBe("flutter build apk --release");
+
+    runShell.mockClear();
+    // release is unreachable via the debug boolean; mode is the only way there.
+    await android().build({ mode: "profile" });
+    expect(runShell.mock.calls[0][0]).toBe("flutter build apk --profile");
+  });
+
   it("honors a launchMode env pin (profile) when debug is omitted", async () => {
     const adapter = new AndroidAdapter(
       {

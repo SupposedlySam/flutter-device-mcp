@@ -66,10 +66,16 @@ function buildFlutterTools(): ToolDefinition[] {
             type: "string",
             description: "Device profile (tv, mobile, wearable). Defaults to tv.",
           },
+          mode: {
+            type: "string",
+            enum: ["release", "profile", "debug"],
+            description:
+              "The 3-way build mode, and the PREFERRED way to ask for one. 'release' = AOT, NO Dart VM service (not drivable). 'profile' = AOT with REALISTIC timing but the VM service stays OPEN — the mode to use for any measurement, since a debug build's JIT slowdown makes its numbers meaningless and a release build cannot be connected to at all. 'debug' = JIT, VM service open (the classic Marionette path). Wins over the legacy `debug` boolean when both are given; when omitted, falls back to `debug` (true→debug, else release). Honored on Tizen, Android, and iOS.",
+          },
           debug: {
             type: "boolean",
             description:
-              "Build in debug mode. When false/omitted, builds release (Tizen/iOS). ANDROID: the mode follows the same resolution as the launch — explicit true→debug, false→profile; when OMITTED it uses FLUTTER_DEVICE_ANDROID_LAUNCH_MODE (debug|profile|release), defaulting to DEBUG so the built apk is coherent with the debug launch a plain flutter_deploy performs (Marionette is gated on kDebugMode).",
+              "Build in debug mode. Legacy 2-way shorthand for `mode` (which wins when both are set); it cannot express `profile`. When false/omitted, builds release (Tizen/iOS). ANDROID: the mode follows the same resolution as the launch — explicit true→debug, false→profile; when OMITTED it uses FLUTTER_DEVICE_ANDROID_LAUNCH_MODE (debug|profile|release), defaulting to DEBUG so the built apk is coherent with the debug launch a plain flutter_deploy performs (Marionette is gated on kDebugMode).",
           },
           skip_rust: {
             type: "boolean",
@@ -111,10 +117,16 @@ function buildFlutterTools(): ToolDefinition[] {
             description:
               "Install only; do not launch and do not capture a URI.",
           },
+          mode: {
+            type: "string",
+            enum: ["release", "profile", "debug"],
+            description:
+              "The 3-way mode of the artifact to redeploy, and the PREFERRED way to ask for one. On Tizen this reinstalls the EXISTING package of that mode (skipping the long native/TPK rebuild) and relaunches via `flutter-tizen run --no-build --<mode>` — so `mode` MUST match the package you built, or --no-build has nothing of that mode to reuse. 'profile' = AOT with realistic timing AND the VM service open, so this STILL captures and returns the ws://…/ws URI — the point of a profile deploy. 'debug' = JIT, VM service open. 'release' = no VM service, so no URI is captured. Wins over the legacy `debug` boolean.",
+          },
           debug: {
             type: "boolean",
             description:
-              "Reinstall the DEBUG artifact instead of release. On Tizen this redeploys the existing debug TPK (skipping the long native/TPK rebuild) so a debug build can be relaunched for Marionette. On ANDROID this selects the `flutter run` launch mode: explicit true→--debug, false→--profile; when OMITTED it uses FLUTTER_DEVICE_ANDROID_LAUNCH_MODE (debug|profile|release), defaulting to DEBUG so a plain deploy comes up Marionette-drivable (Marionette is gated on kDebugMode — a profile/release launch registers no ext.flutter.marionette.* extension, matching the iOS debug default). Inert on platforms that don't distinguish a debug install artifact.",
+              "Reinstall the DEBUG artifact instead of release. Legacy 2-way shorthand for `mode` (which wins when both are set); it cannot express `profile`. On Tizen this redeploys the existing debug TPK (skipping the long native/TPK rebuild) so a debug build can be relaunched for Marionette. On ANDROID this selects the `flutter run` launch mode: explicit true→--debug, false→--profile; when OMITTED it uses FLUTTER_DEVICE_ANDROID_LAUNCH_MODE (debug|profile|release), defaulting to DEBUG so a plain deploy comes up Marionette-drivable (Marionette is gated on kDebugMode — a profile/release launch registers no ext.flutter.marionette.* extension, matching the iOS debug default). Inert on platforms that don't distinguish a debug install artifact.",
           },
           timeout_ms: {
             type: "number",

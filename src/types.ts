@@ -34,9 +34,49 @@ export interface CommandResult {
 }
 
 // =========== BUILD ==========
+/**
+ * The three Flutter compilation modes, as a platform-neutral type.
+ *
+ * The distinction that matters for driving an app is NOT speed, it is whether
+ * the Dart VM service is open:
+ *   - `debug`   — JIT, VM service OPEN. The classic Marionette path.
+ *   - `profile` — AOT, so timing is REALISTIC, and the VM service is still
+ *                 OPEN. This is the mode for measuring anything: a debug build's
+ *                 JIT slowdown makes its numbers meaningless, and a release
+ *                 build cannot be connected to at all.
+ *   - `release` — AOT, NO VM service. Not drivable, not measurable.
+ *
+ * Every platform here compiles with these same three modes, so the type is
+ * neutral even though the CLI flag that carries it differs per adapter.
+ */
+export type BuildMode = "release" | "profile" | "debug";
+
+/**
+ * Resolve the effective {@link BuildMode} from the 3-way `mode` option and the
+ * legacy 2-way `debug` boolean.
+ *
+ * An explicit `mode` always wins — it is strictly more expressive, and a caller
+ * that names a mode means it. Otherwise `debug` maps to its historical meaning
+ * (`true` → debug, absent/false → release), so every pre-`mode` caller keeps the
+ * behavior it had.
+ */
+export function resolveBuildMode(opts: {
+  mode?: BuildMode;
+  debug?: boolean;
+}): BuildMode {
+  if (opts.mode) return opts.mode;
+  return opts.debug ? "debug" : "release";
+}
+
 /** Options for a build (mirrors the `flutter-tizen build` flags). */
 export interface BuildOptions {
   profile?: string;
+  /**
+   * The 3-way build mode. Wins over the legacy `debug` boolean — see
+   * {@link resolveBuildMode}. Prefer this: `debug` cannot express `profile`,
+   * the only mode that is both realistically-timed AND drivable.
+   */
+  mode?: BuildMode;
   debug?: boolean;
   skip_rust?: boolean;
   skip_flutter?: boolean;

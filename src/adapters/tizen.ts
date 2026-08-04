@@ -39,12 +39,14 @@ import {
 import { hostFromSdbTarget } from "../input/samsungToken.js";
 import { TizenInputController } from "../input/tizenInputController.js";
 import {
+  BuildMode,
   BuildOptions,
   BuildResult,
   DeviceResolution,
   InputController,
   LaunchOutcome,
   Platform,
+  resolveBuildMode,
 } from "../types.js";
 import { InstallOptions, PlatformAdapter } from "./platformAdapter.js";
 import { ScreenshotResult } from "../screenshot.js";
@@ -84,9 +86,15 @@ const DEFAULT_DEVICE_PROFILE = "tv";
  * Compose the flutter-tizen launch and delegate the pty wrapping to
  * {@link buildPtyCaptureCommand} so flutter-tizen sees a pty and line-flushes
  * (its VM-service URI line is buffered under a plain pipe). This adapter owns
- * only the flutter-tizen invocation (`--no-build --debug -d <target>`) + the
+ * only the flutter-tizen invocation (`--no-build --<mode> -d <target>`) + the
  * appDir cwd; the `script`/`/bin/sh -c` cross-platform wrapping is the shared
  * helper's concern.
+ *
+ * The `--<mode>` flag must match the mode of the INSTALLED TPK, or `--no-build`
+ * has nothing of that mode to reuse and flutter-tizen rebuilds — throwing away
+ * the point of `--no-build` and launching something other than what was
+ * installed. Both `debug` and `profile` keep the VM service open, so the URI is
+ * captured either way; `mode` defaults to `debug` for back-compat.
  *
  * `platform` defaults to the running host (`process.platform`) and is injectable
  * for tests.
@@ -94,9 +102,10 @@ const DEFAULT_DEVICE_PROFILE = "tv";
 export function buildPtyLaunchCommand(
   appDir: string,
   deviceTarget: string,
+  mode: BuildMode = "debug",
   platform: NodeJS.Platform = process.platform
 ): string {
-  const inner = `flutter-tizen run --no-build --debug -d ${quote(deviceTarget)}`;
+  const inner = `flutter-tizen run --no-build --${mode} -d ${quote(deviceTarget)}`;
   return buildPtyCaptureCommand({ inner, cwd: appDir, platform });
 }
 
@@ -328,7 +337,13 @@ export class TizenAdapter implements PlatformAdapter {
     }
 
     const flags = ["--device-profile", quote(this.profile)];
-    if (opts.debug) flags.push("--debug");
+    // The 3-way build mode (`mode` wins over the legacy `debug` boolean), always
+    // passed EXPLICITLY so the TPK's mode is a stated fact rather than
+    // flutter-tizen's default — the launch's `--no-build --<mode>` has to name
+    // the same mode to reuse this artifact. NB `--device-profile` above is the
+    // tv/mobile device profile; `--profile` here is the compilation mode.
+    const mode = resolveBuildMode({ mode: opts.mode, debug: opts.debug });
+    flags.push(`--${mode}`);
     if (this.config.securityProfile) {
       flags.push("-s", quote(this.config.securityProfile));
     }
@@ -427,9 +442,18 @@ export class TizenAdapter implements PlatformAdapter {
 
   async launchAndCaptureUri(
     device: string,
-    timeoutMs: number
+    timeoutMs: number,
+    mode?: BuildMode
   ): Promise<LaunchOutcome> {
-    const command = buildPtyLaunchCommand(this.config.appDir, device);
+    // The launch mode must name the mode of the TPK that was installed, or
+    // `--no-build` finds nothing of that mode to reuse. debug/profile both keep
+    // the VM service open, so the URI is captured either way; default debug.
+    const launchMode: BuildMode = mode ?? "debug";
+    const command = buildPtyLaunchCommand(
+      this.config.appDir,
+      device,
+      launchMode
+    );
     return neutralLaunchAndCaptureUri(
       command,
       this.config.appDir,

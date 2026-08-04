@@ -8,6 +8,7 @@
  * surface, so the server holds zero platform conditionals.
  */
 import {
+  BuildMode,
   BuildOptions,
   BuildResult,
   CommandResult,
@@ -39,11 +40,17 @@ export interface InstallOptions {
   /** Install only; do not launch. (Present for parity with future modes.) */
   noLaunch?: boolean;
   /**
-   * Reinstall the DEBUG artifact rather than the default (release) one. On Tizen
-   * this maps to `flutter-tizen deploy --debug`, which reinstalls the existing
-   * debug TPK (skipping the long Rust/TPK rebuild) so a debug build can be
-   * redeployed + relaunched for Marionette. Inert on platforms where install
-   * does not distinguish a debug artifact.
+   * The 3-way build mode of the artifact to reinstall. Reinstalls the existing
+   * package of that mode (skipping the long rebuild) so a debug OR profile
+   * build can be redeployed + relaunched for a driver. `mode` wins over the
+   * legacy `debug` boolean. Inert on platforms where install does not
+   * distinguish an artifact mode.
+   */
+  mode?: BuildMode;
+  /**
+   * Reinstall the DEBUG artifact rather than the default (release) one. Legacy
+   * shorthand for `mode: "debug"`; `mode` wins when both are given. Inert on
+   * platforms where install does not distinguish a debug artifact.
    */
   debug?: boolean;
 }
@@ -186,10 +193,22 @@ export interface PlatformAdapter {
   installFailureDiagnostic?(combined: string): string | null;
 
   /**
-   * Launch the app in debug through a pty and capture the Dart VM Service URI
-   * for Marionette. The launch process is left running to hold the URI open.
+   * Launch the app through a pty and capture the Dart VM Service URI for
+   * Marionette. The launch process is left running to hold the URI open.
+   *
+   * OPTIONAL `mode` names the compilation mode to launch, for adapters whose
+   * launch reuses an already-installed artifact (Tizen: `flutter-tizen run
+   * --no-build --<mode>`, which must name the installed TPK's mode or it has
+   * nothing to reuse). `debug` and `profile` both keep the VM service open, so
+   * the URI is captured either way; a Tizen launch defaults to `debug` when
+   * omitted, preserving the historical behavior. Adapters whose launch builds
+   * from source and already carries its own mode ignore it.
    */
-  launchAndCaptureUri(device: string, timeoutMs: number): Promise<LaunchOutcome>;
+  launchAndCaptureUri(
+    device: string,
+    timeoutMs: number,
+    mode?: BuildMode
+  ): Promise<LaunchOutcome>;
 
   /**
    * OPTIONAL reactive recovery for a FAILED launch. The deploy handler calls this

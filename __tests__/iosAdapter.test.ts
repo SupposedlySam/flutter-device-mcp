@@ -1008,6 +1008,18 @@ describe("IosAdapter preflight (pod drift + provisioning)", () => {
     expect(podInstall).toBeDefined();
   });
 
+  it("build() honors the 3-way mode, which outranks the debug boolean", async () => {
+    const adapter = iosDevice();
+    runShell.mockResolvedValue(okResult);
+    await adapter.build({ mode: "profile", debug: true });
+    const built = runShell.mock.calls
+      .map(([c]) => c as string)
+      .find((c) => c.includes("flutter build ios"))!;
+    // Silently dropping `mode` on one platform is worse than not supporting it.
+    expect(built).toContain("--profile");
+    expect(built).not.toContain("--debug");
+  });
+
   it("build() repairs pod drift BEFORE running flutter build", async () => {
     const adapter = iosDevice();
     runShell.mockImplementation(async (cmd: string) => {

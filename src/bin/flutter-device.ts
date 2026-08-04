@@ -90,8 +90,8 @@ Usage:
 Commands:
   info                Device + environment status and resolved config (with provenance)
   setup               Prepare the device for development (--device-ip <host>)
-  build               Build the app package (--profile, --debug, --target, --install, --run)
-  deploy              Install + launch in debug, capture the VM Service URI (THE key command)
+  build               Build the app package (--mode release|profile|debug, --profile, --target, --install, --run)
+  deploy              Install + launch, capture the VM Service URI (THE key command; --mode to match the built artifact)
   uninstall           Remove the app from the device
   kill-stale          Kill stale launch/driver processes holding the device lock
   terminate           Force-quit the app (mobile)

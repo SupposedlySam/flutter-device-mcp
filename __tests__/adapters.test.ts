@@ -160,10 +160,25 @@ describe("TizenAdapter delegates to the shared shell (flutter-tizen)", () => {
     expect(build.enospc).toBe(true);
   });
 
-  it("build without debug keeps the release (no --debug) command", async () => {
+  it("build with neither mode nor debug states --release EXPLICITLY", async () => {
+    // The mode is never left to flutter-tizen's default: the launch's
+    // `--no-build --<mode>` has to name the same mode to reuse this artifact,
+    // so the artifact's mode must be a stated fact.
     await tizen().build({});
     const cmd = runShell.mock.calls[0][0] as string;
-    expect(cmd).toBe("flutter-tizen build tpk --device-profile 'tv'");
+    expect(cmd).toBe("flutter-tizen build tpk --device-profile 'tv' --release");
+    expect(cmd).not.toContain("--debug");
+  });
+
+  it("build honors the 3-way mode, which wins over the legacy debug boolean", async () => {
+    await tizen().build({ mode: "profile" });
+    expect(runShell.mock.calls[0][0]).toContain("--profile");
+
+    runShell.mockClear();
+    // `mode` wins: debug:true would have produced --debug on its own.
+    await tizen().build({ mode: "release", debug: true });
+    const cmd = runShell.mock.calls[0][0] as string;
+    expect(cmd).toContain("--release");
     expect(cmd).not.toContain("--debug");
   });
 
@@ -182,7 +197,7 @@ describe("TizenAdapter delegates to the shared shell (flutter-tizen)", () => {
     await adapter.build({});
     expect(runShell.mock.calls[0][0]).toBe("echo prep");
     expect(runShell.mock.calls[1][0]).toBe(
-      "flutter-tizen build tpk --device-profile 'tv'"
+      "flutter-tizen build tpk --device-profile 'tv' --release"
     );
   });
 
@@ -333,6 +348,7 @@ describe("buildPtyLaunchCommand (Tizen-supplied launch command)", () => {
     const cmd = buildPtyLaunchCommand(
       "/repo/app",
       "192.0.2.6:26101",
+      "debug",
       "darwin"
     );
     expect(cmd).toContain("cd '/repo/app'");
@@ -358,16 +374,43 @@ describe("buildPtyLaunchCommand (Tizen-supplied launch command)", () => {
     const produced = buildPtyLaunchCommand(
       "/repo/app",
       "192.0.2.6:26101",
+      "debug",
       "darwin"
     );
     expect(produced).toBe(after);
     expect(produced).not.toBe(before);
   });
 
+  it("names the launch mode so `--no-build` reuses the TPK of that mode", () => {
+    // THE BUG THIS FIXES: the mode was hardcoded `--debug`, so relaunching a
+    // profile TPK with `--no-build` found no debug artifact to reuse and
+    // flutter-tizen rebuilt -- discarding the point of --no-build and launching
+    // something other than what was installed. profile keeps the VM service
+    // open, so the URI is still captured.
+    const profile = buildPtyLaunchCommand(
+      "/repo/app",
+      "192.0.2.6:26101",
+      "profile",
+      "linux"
+    );
+    expect(profile).toContain("flutter-tizen run --no-build --profile -d");
+    expect(profile).not.toContain("--debug");
+
+    // Omitted -> debug, preserving the historical launch.
+    const fallback = buildPtyLaunchCommand(
+      "/repo/app",
+      "192.0.2.6:26101",
+      undefined,
+      "linux"
+    );
+    expect(fallback).toContain("--no-build --debug -d");
+  });
+
   it("delegates the linux wrap to buildPtyCaptureCommand's util-linux `-c` form", () => {
     const cmd = buildPtyLaunchCommand(
       "/repo/app",
       "192.0.2.6:26101",
+      "debug",
       "linux"
     );
     expect(cmd).toBe(

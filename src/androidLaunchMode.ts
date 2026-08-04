@@ -15,13 +15,22 @@
  * `--debug`).
  *
  * Precedence (highest first):
- *   1. an explicit tool arg (`flutter_deploy`/`flutter_build`'s `debug` flag),
- *   2. the `FLUTTER_DEVICE_ANDROID_LAUNCH_MODE` env var (`debug` | `profile` | `release`),
- *   3. the new default, `debug`.
+ *   1. an explicit 3-way tool arg (`flutter_deploy`/`flutter_build`'s `mode`),
+ *   2. an explicit tool arg (`flutter_deploy`/`flutter_build`'s `debug` flag),
+ *   3. the `FLUTTER_DEVICE_ANDROID_LAUNCH_MODE` env var (`debug` | `profile` | `release`),
+ *   4. the new default, `debug`.
  */
+import { BuildMode } from "./types.js";
 
-/** The three Flutter compilation modes the Android adapter can launch/build. */
-export type AndroidLaunchMode = "debug" | "profile" | "release";
+/**
+ * The three Flutter compilation modes the Android adapter can launch/build.
+ *
+ * An alias of the neutral {@link BuildMode} — Android does not have its own set
+ * of modes, only its own DEFAULT (`debug`, so a plain deploy is Marionette-
+ * drivable) and its own env pin. The name is kept because those two things are
+ * Android policy; the mode vocabulary itself is not.
+ */
+export type AndroidLaunchMode = BuildMode;
 
 /** The launch/build default when nothing else selects a mode (Marionette-drivable). */
 export const ANDROID_DEFAULT_LAUNCH_MODE: AndroidLaunchMode = "debug";
@@ -48,15 +57,21 @@ export function parseAndroidLaunchModeEnv(
 }
 
 /**
- * Resolve the effective Android launch/build mode from the three precedence
- * sources. `explicitDebug` is the tri-state tool arg: `true` → debug, `false` →
- * profile (an explicit non-debug request; release is only reachable via env),
- * `undefined` → fall through to the env pin, then the default.
+ * Resolve the effective Android launch/build mode from the precedence sources.
+ *
+ * `explicitMode` is the 3-way tool arg and wins outright when given — it is the
+ * only input that can ask for `release`, and a caller that names a mode means it.
+ *
+ * `explicitDebug` is the legacy tri-state boolean: `true` → debug, `false` →
+ * profile (an explicit non-debug request; via this input release is
+ * unreachable), `undefined` → fall through to the env pin, then the default.
  */
 export function resolveAndroidLaunchMode(opts: {
+  explicitMode?: AndroidLaunchMode;
   explicitDebug?: boolean;
   envMode?: AndroidLaunchMode;
 }): AndroidLaunchMode {
+  if (opts.explicitMode) return opts.explicitMode;
   if (opts.explicitDebug === true) return "debug";
   if (opts.explicitDebug === false) return "profile";
   return opts.envMode ?? ANDROID_DEFAULT_LAUNCH_MODE;
