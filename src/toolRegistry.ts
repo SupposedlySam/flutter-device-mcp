@@ -30,13 +30,31 @@ const platformProp = {
   },
 };
 
+/**
+ * The per-call project override, advertised on the tools that operate on a
+ * Flutter project (build/deploy/info/uninstall/kill_stale/hot_reload/hot_restart).
+ * Input and device-driving tools are left off it deliberately: they act on a
+ * DEVICE, not a checkout, and re-resolving a project for them would only invite
+ * a caller to think it mattered.
+ */
+const appDirProp = {
+  app_dir: {
+    type: "string",
+    description:
+      "Optional absolute path to a Flutter app (the directory containing pubspec.yaml) to operate on for THIS call — for building/deploying/inspecting a DIFFERENT project or git worktree while a running server would otherwise stay pinned to the one it resolved at startup, with no host restart. Overrides the env var, the flutter-device.config.json file, and the derived app dir (precedence: this arg > env > config file > derived). Must be an existing Flutter app or the call fails with a clear error — it never silently falls back to the server's own project. The whole request runs against it: device resolution, install, VM-service capture, kill-stale.",
+  },
+};
+
 function buildFlutterTools(): ToolDefinition[] {
   return [
     {
       name: "flutter_info",
       description:
         "Run the platform info command and return device/environment status (flutter-tizen, sdb, Docker, connected devices, .tizen-target config, and the REST-sourced device summary). GUARDRAIL: sdb shell is never invoked (it is disabled/unreliable on Samsung devices); device facts come from the Samsung REST API on port 8001, which the CLI already handles.",
-      inputSchema: { type: "object", properties: { ...platformProp } },
+      inputSchema: {
+        type: "object",
+        properties: { ...platformProp, ...appDirProp },
+      },
     },
     {
       name: "flutter_setup",
@@ -62,6 +80,7 @@ function buildFlutterTools(): ToolDefinition[] {
         type: "object",
         properties: {
           ...platformProp,
+          ...appDirProp,
           profile: {
             type: "string",
             description: "Device profile (tv, mobile, wearable). Defaults to tv.",
@@ -112,6 +131,7 @@ function buildFlutterTools(): ToolDefinition[] {
         type: "object",
         properties: {
           ...platformProp,
+          ...appDirProp,
           no_launch: {
             type: "boolean",
             description:
@@ -151,13 +171,19 @@ function buildFlutterTools(): ToolDefinition[] {
       name: "flutter_uninstall",
       description:
         "Uninstall the app (`sdb -s <device> uninstall <app_id>` on Tizen) to free device space or reset to a clean state. Soft-succeeds when the app is not installed.",
-      inputSchema: { type: "object", properties: { ...platformProp } },
+      inputSchema: {
+        type: "object",
+        properties: { ...platformProp, ...appDirProp },
+      },
     },
     {
       name: "flutter_kill_stale",
       description:
         "Kill any stale launch/driver processes (pkill -f). On Tizen: `flutter-tizen`. On iOS/Android: `flutter run` and the Dart `frontend_server`. Use to clear a wedged device lock before deploying. This is also run automatically at the start of flutter_deploy.",
-      inputSchema: { type: "object", properties: { ...platformProp } },
+      inputSchema: {
+        type: "object",
+        properties: { ...platformProp, ...appDirProp },
+      },
     },
     {
       name: "flutter_terminate",
@@ -185,6 +211,7 @@ function buildFlutterTools(): ToolDefinition[] {
         type: "object",
         properties: {
           ...platformProp,
+          ...appDirProp,
           device: {
             type: "string",
             description:
@@ -206,6 +233,7 @@ function buildFlutterTools(): ToolDefinition[] {
         type: "object",
         properties: {
           ...platformProp,
+          ...appDirProp,
           device: {
             type: "string",
             description:

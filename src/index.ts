@@ -22,12 +22,25 @@ import { CommandCore, CommonArgs } from "./core/commandCore.js";
 import { routeTool } from "./toolRouting.js";
 import { buildAdvertisedTools } from "./toolRegistry.js";
 import { resolvePlatform } from "./handlerLogic.js";
+import {
+  resolveAppDirWith,
+  validateExplicitAppDir,
+} from "./config/appDir.js";
 import { InputMode } from "./types.js";
 
 class FlutterDeviceServer {
   private readonly server: Server;
   private readonly core: CommandCore;
   private readonly defaultPlatform: string;
+
+  /**
+   * Runtimes for per-call `app_dir` overrides, keyed by the RESOLVED absolute
+   * path. Building one resolves config and constructs every adapter, so a
+   * caller iterating over one project would otherwise pay that on every call;
+   * the key is the validated path, so two spellings of the same directory share
+   * one entry.
+   */
+  private readonly runtimeByAppDir = new Map<string, CommandCore>();
 
   constructor() {
     this.server = new Server(
@@ -39,6 +52,34 @@ class FlutterDeviceServer {
     this.defaultPlatform = config.defaultPlatform;
     this.setupToolHandlers();
     this.server.onerror = (error) => logger.error("[MCP Error]", error);
+  }
+
+  /**
+   * The CommandCore this call runs against, honoring a per-call `app_dir`.
+   *
+   * A long-running server otherwise resolves its app ONCE at startup and is
+   * pinned to it for the process's life — so operating on a second checkout (a
+   * git worktree, a second project) meant restarting the MCP host. An explicit
+   * `app_dir` re-resolves config for THIS call only; everything downstream —
+   * device resolution, install, VM-service capture, kill-stale — then runs
+   * against that project.
+   */
+  private coreFor(appDir: unknown): CommandCore {
+    const resolved = resolveAppDirWith(
+      typeof appDir === "string" ? appDir : undefined,
+      {
+        validateOverride: validateExplicitAppDir,
+        // No override: the server's own startup-resolved app.
+        fromConfig: () => "",
+      }
+    );
+    if (!resolved) return this.core;
+    const cached = this.runtimeByAppDir.get(resolved);
+    if (cached) return cached;
+    const { registry, config } = buildRuntime({ appDir: resolved });
+    const core = new CommandCore(registry, config);
+    this.runtimeByAppDir.set(resolved, core);
+    return core;
   }
 
   private json(result: unknown) {
@@ -66,7 +107,7 @@ class FlutterDeviceServer {
       }
 
       const common: CommonArgs = { platform: resolvePlatform(route, args) };
-      const core = this.core;
+      const core = this.coreFor(args.app_dir);
 
       switch (route.canonical) {
         case "flutter_info":
