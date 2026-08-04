@@ -292,7 +292,7 @@ function buildFlutterTools(): ToolDefinition[] {
     {
       name: "flutter_key",
       description:
-        "Send a navigation/remote key over the Samsung remote channel. Accepts short names (UP/DOWN/LEFT/RIGHT/ENTER/RETURN/BACK/HOME) or full Samsung KEY_* names (e.g. KEY_VOLUP). BACK maps to KEY_RETURN. This is the D-pad input plane; it works irrespective of the recorded input mode.",
+        "Send a navigation/remote key, or type a text string, on the resolved device. Accepts short names (UP/DOWN/LEFT/RIGHT/ENTER/RETURN/BACK/HOME) on every wired platform. TIZEN: sent over the Samsung remote channel; also accepts full Samsung KEY_* names (e.g. KEY_VOLUP); BACK maps to KEY_RETURN. ANDROID: injected via `adb shell input keyevent` (device AND emulator) — short names map to Android keycodes (arrows→DPAD, ENTER/OK/SELECT→KEYCODE_DPAD_CENTER which activates the focused element, RETURN/BACK→KEYCODE_BACK, HOME→KEYCODE_HOME); also accepts full KEYCODE_* names and bare numeric keycodes. `text` (instead of `key`) types into the focused field via `adb shell input text` (Android only today). NOTE: adb input is the OS-LEVEL plane — raw system input injection that bypasses Flutter's gesture-arena semantics; a driver over the Dart VM service remains the primary in-app path, and this covers what it cannot reach (OS UI outside the Flutter view, non-debug builds, D-pad navigation on Android TV). iOS reports {supported:false}. This is the D-pad input plane; it works irrespective of the recorded input mode.",
       inputSchema: {
         type: "object",
         properties: {
@@ -300,10 +300,14 @@ function buildFlutterTools(): ToolDefinition[] {
           key: {
             type: "string",
             description:
-              "Key to send: a short name (UP/DOWN/LEFT/RIGHT/ENTER/RETURN/BACK/HOME) or a full KEY_* name.",
+              "Key to send: a short name (UP/DOWN/LEFT/RIGHT/ENTER/RETURN/BACK/HOME), a full Samsung KEY_* name (Tizen), or a full KEYCODE_* name / bare numeric keycode (Android). Provide exactly one of `key` or `text`.",
+          },
+          text: {
+            type: "string",
+            description:
+              "A string to TYPE into the currently-focused field (Android: `adb shell input text`). Cannot carry newlines/tabs — send those as key events (KEYCODE_ENTER / KEYCODE_TAB). Platforms without an OS-level text channel return {supported:false}. Provide exactly one of `key` or `text`.",
           },
         },
-        required: ["key"],
       },
     },
     {

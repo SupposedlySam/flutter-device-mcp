@@ -102,7 +102,7 @@ Commands:
   screenshot          Capture the screen to a PNG (--output-path, --include-base64)
   record              Record a bounded screen clip (--duration-s, --fps, --format mp4|gif)
   set-input-mode      Select the input plane (--mode dpad|pointer) — TV
-  key                 Send a remote/navigation key (--key UP|DOWN|ENTER|…) — TV
+  key                 Send a remote/navigation key (--key UP|DOWN|ENTER|…) or type text (--text "hi")
   pointer             Drive the pointer (--action move|click|scroll, --x --y --dy) — TV
   system-prompt       Detect/tap OS-level dialogs (--action detect|tap|dismiss) — iOS
 
@@ -175,7 +175,11 @@ async function run(): Promise<number> {
       result = await core.setInputMode({ ...common, mode: f.mode as InputMode });
       break;
     case "key":
-      result = await core.key({ ...common, key: f.key as string });
+      result = await core.key({
+        ...common,
+        key: f.key as string | undefined,
+        text: f.text as string | undefined,
+      });
       break;
     case "pointer":
       result = await core.pointer(merge(f) as never);

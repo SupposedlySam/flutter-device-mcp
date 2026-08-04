@@ -155,7 +155,11 @@ class FlutterDeviceServer {
           );
         case "flutter_key":
           return this.json(
-            await core.key({ ...common, key: args.key as string })
+            await core.key({
+              ...common,
+              key: args.key as string | undefined,
+              text: args.text as string | undefined,
+            })
           );
         case "flutter_pointer":
           return this.json(

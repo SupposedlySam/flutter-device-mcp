@@ -50,6 +50,7 @@ import {
   flutterModeFlag,
   resolveAndroidLaunchMode,
 } from "../androidLaunchMode.js";
+import { AndroidInputController } from "../input/androidInputController.js";
 import {
   buildAdbScreencapCommand,
   defaultScreenshotPath,
@@ -77,10 +78,8 @@ import {
   BuildResult,
   DeviceResolution,
   InputController,
-  InputMode,
   LaunchOutcome,
   Platform,
-  UnsupportedInputError,
 } from "../types.js";
 import {
   AppLifecycle,
@@ -688,59 +687,25 @@ export class AndroidAdapter implements PlatformAdapter {
   };
 
   /**
-   * Android input controller. In-app taps/gestures are Marionette's job over the
-   * VM service, so this MCP does not drive them for v1. Every send reports
-   * unsupported (throws {@link UnsupportedInputError}, surfaced by the server as
-   * `{supported:false}`). `mode` is tracked to satisfy the neutral interface.
-   * (FUTURE: adb `input tap`/`input keyevent` could back a real path if wanted.)
+   * Android input controller: the OS-level `adb shell input` plane
+   * ({@link AndroidInputController}) — keyevent for D-pad/remote keys, tap/swipe
+   * for the pointer verbs, and text injection. Raw system input that bypasses
+   * Flutter's gesture-arena semantics; a driver over the VM service remains the
+   * primary in-app path, and this covers what it cannot reach: OS UI outside the
+   * Flutter view, non-debug builds, and D-pad navigation (Android TV).
+   *
+   * The serial is resolved lazily per send through the normal device resolution
+   * (pin/self-heal), so a multi-device host targets the same device as
+   * deploy/lifecycle. Cached so the selected mode and the staged pointer
+   * position survive across tool calls.
    */
   input(): InputController {
     if (!this.inputController) {
-      this.inputController = new AndroidInputStub();
+      this.inputController = new AndroidInputController(
+        async () => (await this.discoverDevice()).target
+      );
     }
     return this.inputController;
   }
 }
 
-/**
- * Android input stub: physical-remote/cursor input is not the Android driving
- * model for v1. Navigation and taps are performed by Marionette over the Dart VM
- * service, so this controller intentionally reports every input path as
- * unsupported rather than duplicating Marionette. `mode` is tracked only for
- * interface parity.
- */
-class AndroidInputStub implements InputController {
-  readonly platform: Platform = "android";
-  private _mode: InputMode = "dpad";
-  get mode(): InputMode {
-    return this._mode;
-  }
-  setMode(mode: InputMode): void {
-    this._mode = mode;
-  }
-  async key(): Promise<void> {
-    throw new UnsupportedInputError(
-      "Remote/D-pad keys are not wired on Android (v1). Drive the app with " +
-        "Marionette (tap/enter_text/scroll) over the Dart VM service instead. " +
-        "(adb input keyevent is a possible future addition.)"
-    );
-  }
-  async pointerMove(): Promise<void> {
-    throw new UnsupportedInputError(
-      "Free-cursor pointer move is unsupported on Android (a touch device has " +
-        "no cursor). Use Marionette tap-by-coordinate/element over the VM service."
-    );
-  }
-  async pointerClick(): Promise<void> {
-    throw new UnsupportedInputError(
-      "Pointer click is unsupported on Android (v1). Use Marionette tap over the " +
-        "VM service. (adb input tap is a possible future addition.)"
-    );
-  }
-  async pointerScroll(): Promise<void> {
-    throw new UnsupportedInputError(
-      "Free-cursor scroll is unsupported on Android. Use Marionette scroll/swipe " +
-        "over the VM service."
-    );
-  }
-}

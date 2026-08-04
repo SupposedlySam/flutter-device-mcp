@@ -498,37 +498,77 @@ describe("AndroidAdapter.lifecycle (OS-level, mobile capability, adb)", () => {
   });
 });
 
-describe("AndroidAdapter input is unsupported (Marionette owns in-app gestures, v1)", () => {
-  it("returns a cached controller that reports every send unsupported", async () => {
+describe("AndroidAdapter input drives the OS-level adb `input` plane", () => {
+  it("returns a cached controller so mode + staged position survive tool calls", () => {
     const adapter = android();
     const input = adapter.input();
     expect(input.platform).toBe("android");
-    expect(adapter.input()).toBe(input); // cached / session-sticky
-    await expect(input.key("UP")).rejects.toThrow(UnsupportedInputError);
-    await expect(input.pointerMove(0, 0)).rejects.toThrow(UnsupportedInputError);
-    await expect(input.pointerClick()).rejects.toThrow(UnsupportedInputError);
-    await expect(input.pointerScroll(0)).rejects.toThrow(UnsupportedInputError);
+    expect(adapter.input()).toBe(input);
   });
 
-  it("key/click map to a non-fatal supported:false result instead of throwing", async () => {
-    const { mapUnsupportedInput } = await import("../src/handlerLogic.js");
+  it("sends a D-pad key as an adb keyevent against the resolved serial", async () => {
+    mockDiscovery();
+    runShell.mockClear();
+    mockDiscovery();
+    await android().input().key("UP");
+    const sent = runShell.mock.calls
+      .map(([c]) => c as string)
+      .find((c) => c.includes("input keyevent"))!;
+    // 19 = KEYCODE_DPAD_UP. The serial comes from the SAME resolution deploy
+    // and lifecycle use, so a multi-device host stays on one device.
+    expect(sent).toBe(`adb -s '${SERIAL}' shell input keyevent 19`);
+  });
+
+  it("taps at the staged position (move stages, click sends)", async () => {
+    mockDiscovery();
     const input = android().input();
+    await input.pointerMove(120, 340);
+    // Android has no visible cursor, so `move` sends nothing at all.
+    expect(
+      runShell.mock.calls.some(([c]) => (c as string).includes("input tap"))
+    ).toBe(false);
+    await input.pointerClick();
+    const tap = runShell.mock.calls
+      .map(([c]) => c as string)
+      .find((c) => c.includes("input tap"))!;
+    expect(tap).toBe(`adb -s '${SERIAL}' shell input tap 120 340`);
+  });
 
-    const keyError = await input.key("UP").catch((e) => e);
-    expect(mapUnsupportedInput(keyError, "android", "key")).toMatchObject({
-      platform: "android",
-      action: "key",
-      sent: false,
-      supported: false,
-    });
+  it("refuses a click with no staged position rather than tapping somewhere", async () => {
+    mockDiscovery();
+    await expect(android().input().pointerClick()).rejects.toThrow(
+      /No pointer position staged/
+    );
+  });
 
-    const clickError = await input.pointerClick().catch((e) => e);
-    expect(mapUnsupportedInput(clickError, "android", "click")).toMatchObject({
-      platform: "android",
-      action: "click",
-      sent: false,
-      supported: false,
+  it("types into the focused field via `input text`", async () => {
+    mockDiscovery();
+    await android().input().text!("hello world");
+    const sent = runShell.mock.calls
+      .map(([c]) => c as string)
+      .find((c) => c.includes("input text"))!;
+    // `input text` encodes a space as %s.
+    expect(sent).toBe(`adb -s '${SERIAL}' shell input text 'hello%sworld'`);
+  });
+
+  it("surfaces a failed adb send as an error instead of reporting sent", async () => {
+    runShell.mockImplementation(async (cmd: string) => {
+      if (cmd.includes("adb devices -l")) {
+        return {
+          ...okResult,
+          stdout: `List of devices attached\n${SERIAL}  device\n`,
+        };
+      }
+      return {
+        ...okResult,
+        success: false,
+        code: 1,
+        combined: "error: device offline",
+      };
     });
+    await expect(android().input().key("UP")).rejects.toThrow(
+      /adb input send failed/
+    );
   });
 });
 

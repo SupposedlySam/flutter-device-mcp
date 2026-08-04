@@ -12,7 +12,12 @@
 import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import { logger } from "../logger.js";
 import { CommandResult, tail } from "../cli.js";
-import { BuildMode, InputMode, isLaunchFailure } from "../types.js";
+import {
+  BuildMode,
+  InputMode,
+  isLaunchFailure,
+  UnsupportedInputError,
+} from "../types.js";
 import { AdapterRegistry } from "../adapters/registry.js";
 import { PlatformAdapter } from "../adapters/platformAdapter.js";
 import { ResolvedConfig } from "../config/config.js";
@@ -778,18 +783,61 @@ export class CommandCore {
   }
 
   // =========== key ==========
-  async key(args: CommonArgs & { key: string }): Promise<CommandOutput> {
+  async key(
+    args: CommonArgs & { key?: string; text?: string }
+  ): Promise<CommandOutput> {
     const adapter = this.adapterFor(args);
     return this.guard(
       "flutter_key",
-      { platform: adapter.platform, key: args.key },
+      { platform: adapter.platform, key: args.key, text: args.text },
       async () => {
-        if (!args.key || args.key.trim().length === 0) {
-          throw new McpError(ErrorCode.InvalidParams, "key is required.");
+        const hasKey =
+          typeof args.key === "string" && args.key.trim().length > 0;
+        const hasText =
+          typeof args.text === "string" && args.text.length > 0;
+        // Exactly one: they are different channels (`input keyevent` vs
+        // `input text`), and silently preferring one would drop the other.
+        if (hasKey === hasText) {
+          throw new McpError(
+            ErrorCode.InvalidParams,
+            "Provide exactly one of `key` (a navigation/remote key) or `text` " +
+              "(a string to type into the focused field)."
+          );
         }
         const input = adapter.input();
+
+        if (hasText) {
+          // Text injection is an OPTIONAL controller capability (Android's
+          // `adb shell input text` today). Absence — or a controller that
+          // throws UnsupportedInputError — is surfaced as a clear, non-fatal
+          // {supported:false} result rather than an internal error.
+          try {
+            if (!input.text) {
+              throw new UnsupportedInputError(
+                `Text input is not wired on ${adapter.platform}. Use a driver ` +
+                  "over the Dart VM service to type into the app instead."
+              );
+            }
+            await input.text(args.text as string);
+          } catch (error) {
+            const notSupported = mapUnsupportedInput(
+              error,
+              adapter.platform,
+              "text"
+            );
+            if (notSupported) return notSupported;
+            throw error;
+          }
+          return {
+            platform: adapter.platform,
+            mode: input.mode,
+            text: args.text,
+            sent: true,
+          };
+        }
+
         try {
-          await input.key(args.key);
+          await input.key(args.key as string);
         } catch (error) {
           const notSupported = mapUnsupportedInput(error, adapter.platform, "key");
           if (notSupported) return notSupported;

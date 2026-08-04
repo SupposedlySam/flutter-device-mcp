@@ -192,6 +192,13 @@ export interface InputController {
    * have no free cursor — use {@link key} for navigation there instead.
    */
   pointerScroll(dy: number): Promise<void>;
+  /**
+   * Type a text string into the currently-focused field. OPTIONAL — implemented
+   * where the platform has an OS-level text-injection channel (Android:
+   * `adb shell input text`); absence means text input is not wired on the
+   * platform and is surfaced as `{ supported: false }`.
+   */
+  text?(value: string): Promise<void>;
 }
 
 // =========== ERRORS ==========
