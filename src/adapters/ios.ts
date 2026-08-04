@@ -55,7 +55,9 @@ import {
   resolveSimDestination,
   SimCandidate,
 } from "../iosSimDestination.js";
+import { dartDefineArgs } from "../dartDefine.js";
 import {
+  BuildMode,
   BuildOptions,
   BuildResult,
   DeviceResolution,
@@ -166,7 +168,8 @@ export function buildIosPtyLaunchCommand(
   udid: string,
   flutterCommand = "flutter",
   platform: NodeJS.Platform = process.platform,
-  controlFifoPath?: string
+  controlFifoPath?: string,
+  extraArgs: string[] = []
 ): string {
   // FULL `flutter run` pipeline — deliberately NOT --no-build (learned on-device):
   // the reliable iOS install+launch path is the full pipeline, which builds,
@@ -178,7 +181,11 @@ export function buildIosPtyLaunchCommand(
   // --debug keeps the Dart VM service (and its URI) available for Marionette.
   // `udid` MUST be the FLUTTER id (ECID for a physical device), not the
   // devicectl UUID — the latter is not a valid `flutter run -d` target.
-  const inner = `${flutterCommand} run --debug -d ${quote(udid)}`;
+  // `extraArgs` carries already-quoted --dart-define tokens. The full pipeline
+  // BUILDS here, so defines spliced in are what the installed app is compiled
+  // with -- splicing them only into `flutter build ios` would miss the deploy.
+  const suffix = extraArgs.length > 0 ? ` ${extraArgs.join(" ")}` : "";
+  const inner = `${flutterCommand} run --debug -d ${quote(udid)}` + suffix;
   return buildPtyCaptureCommand({ inner, cwd: appDir, platform, controlFifoPath });
 }
 
@@ -439,6 +446,7 @@ export class IosAdapter implements PlatformAdapter {
     // everywhere else — an arg that is silently dropped on one platform is
     // worse than one that is unsupported loudly.
     flags.push(`--${resolveBuildMode({ mode: opts.mode, debug: opts.debug })}`);
+    for (const token of dartDefineArgs(opts.dartDefine)) flags.push(quote(token));
     // `flutter build ios` does not code-sign by default; keep it that way for a
     // plain artifact build (install/run handle signing at deploy time).
     if (!forSimulator) flags.push("--no-codesign");
@@ -834,7 +842,9 @@ export class IosAdapter implements PlatformAdapter {
    */
   async launchAndCaptureUri(
     device: string,
-    timeoutMs: number
+    timeoutMs: number,
+    _mode?: BuildMode,
+    dartDefine?: Record<string, string>
   ): Promise<LaunchOutcome> {
     // Allocate a durable control FIFO so flutter_hot_reload/flutter_hot_restart
     // can drive `r`/`R` on this running daemon over the flutter tool's own stdin
@@ -847,7 +857,8 @@ export class IosAdapter implements PlatformAdapter {
       device,
       this.flutter,
       process.platform,
-      controlFifoPath
+      controlFifoPath,
+      dartDefineArgs(dartDefine).map(quote)
     );
     return neutralLaunchAndCaptureUri(
       command,

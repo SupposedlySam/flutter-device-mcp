@@ -81,6 +81,12 @@ function buildFlutterTools(): ToolDefinition[] {
         properties: {
           ...platformProp,
           ...appDirProp,
+          dart_define: {
+            type: "object",
+            additionalProperties: { type: "string" },
+            description:
+              "`--dart-define` compile-time constants as a {KEY: VALUE} map — how an app is pointed at a different environment (a local backend, a staging API, a build-time flag). Each pair becomes `--dart-define=KEY=VALUE`. On iOS/Android the install happens INSIDE `flutter run`, so these are spliced into the LAUNCH as well as the build; without that the app that actually runs would be compiled without them. On Tizen the launch reuses an already-built package, so defines apply at BUILD time only — build with the same defines you deploy. Keys cannot contain '=' or whitespace or start with '-' (they would be re-parsed as different arguments) and are rejected with a clear error.",
+          },
           profile: {
             type: "string",
             description: "Device profile (tv, mobile, wearable). Defaults to tv.",
@@ -132,6 +138,12 @@ function buildFlutterTools(): ToolDefinition[] {
         properties: {
           ...platformProp,
           ...appDirProp,
+          dart_define: {
+            type: "object",
+            additionalProperties: { type: "string" },
+            description:
+              "`--dart-define` compile-time constants as a {KEY: VALUE} map — how an app is pointed at a different environment (a local backend, a staging API, a build-time flag). Each pair becomes `--dart-define=KEY=VALUE`. On iOS/Android the install happens INSIDE `flutter run`, so these are spliced into the LAUNCH as well as the build; without that the app that actually runs would be compiled without them. On Tizen the launch reuses an already-built package, so defines apply at BUILD time only — build with the same defines you deploy. Keys cannot contain '=' or whitespace or start with '-' (they would be re-parsed as different arguments) and are rejected with a clear error.",
+          },
           no_launch: {
             type: "boolean",
             description:

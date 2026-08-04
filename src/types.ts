@@ -78,6 +78,11 @@ export interface BuildOptions {
    */
   mode?: BuildMode;
   debug?: boolean;
+  /**
+   * `--dart-define` compile-time constants to pass to the build (e.g. pointing
+   * the app at a local backend). See {@link ../dartDefine}.
+   */
+  dartDefine?: Record<string, string>;
   skip_rust?: boolean;
   skip_flutter?: boolean;
   install?: boolean;

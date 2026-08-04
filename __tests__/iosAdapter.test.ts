@@ -235,6 +235,29 @@ describe("IosAdapter.build", () => {
   });
 });
 
+describe("IosAdapter --dart-define passthrough", () => {
+  it("splices defines into `flutter build ios`", async () => {
+    await ios().build({ dartDefine: { API: "staging" } });
+    const cmd = runShell.mock.calls[0][0] as string;
+    expect(cmd).toContain("'--dart-define=API=staging'");
+  });
+
+  it("ALSO splices them into the launch, because the full pipeline builds", async () => {
+    // iOS deploys via the FULL `flutter run` pipeline (build+sign+install+
+    // launch), so the launch is where the app being installed is compiled.
+    await ios().launchAndCaptureUri("SIM-UDID-1", 1000, undefined, {
+      API: "staging",
+    });
+    const [command] = neutralLaunchAndCaptureUri.mock.calls[0];
+    expect(command).toContain("--dart-define=API=staging");
+  });
+
+  it("leaves the command untouched when no defines are given", async () => {
+    await ios().build({});
+    expect(runShell.mock.calls[0][0] as string).not.toContain("--dart-define");
+  });
+});
+
 describe("IosAdapter.discoverDevice", () => {
   it("resolves a booted simulator via simctl JSON", async () => {
     mockDiscovery("simulator");

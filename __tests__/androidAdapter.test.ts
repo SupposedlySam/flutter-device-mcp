@@ -572,6 +572,31 @@ describe("AndroidAdapter input drives the OS-level adb `input` plane", () => {
   });
 });
 
+describe("AndroidAdapter --dart-define passthrough", () => {
+  it("splices defines into `flutter build apk`", async () => {
+    await android().build({ dartDefine: { USE_LOCAL_ENV: "true", HOST: "10.0.2.2" } });
+    const cmd = runShell.mock.calls[0][0] as string;
+    expect(cmd).toContain("'--dart-define=HOST=10.0.2.2'");
+    expect(cmd).toContain("'--dart-define=USE_LOCAL_ENV=true'");
+  });
+
+  it("ALSO splices them into the launch, because the launch is the build", async () => {
+    // On Android `flutter run` compiles + installs + launches. Defines applied
+    // only to `flutter build apk` would never reach the apk a deploy runs.
+    mockDiscovery();
+    await android().launchAndCaptureUri(SERIAL, 1000, undefined, {
+      USE_LOCAL_ENV: "true",
+    });
+    const [command] = neutralLaunchAndCaptureUri.mock.calls[0];
+    expect(command).toContain("--dart-define=USE_LOCAL_ENV=true");
+  });
+
+  it("leaves the command untouched when no defines are given", async () => {
+    await android().build({});
+    expect(runShell.mock.calls[0][0] as string).not.toContain("--dart-define");
+  });
+});
+
 describe("AndroidAdapter.geometry (the dpr nothing used to report)", () => {
   /** Layer `wm size` / `wm density` answers over the device-discovery mock. */
   function mockGeometry(size: string, density: string) {

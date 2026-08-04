@@ -189,6 +189,7 @@ export class CommandCore {
       profile?: string;
       mode?: BuildMode;
       debug?: boolean;
+      dart_define?: Record<string, string>;
       skip_rust?: boolean;
       skip_flutter?: boolean;
       install?: boolean;
@@ -206,6 +207,7 @@ export class CommandCore {
         profile,
         mode: args.mode,
         debug: args.debug,
+        dartDefine: args.dart_define,
         skip_rust: args.skip_rust,
         skip_flutter: args.skip_flutter,
         install: args.install,
@@ -229,6 +231,7 @@ export class CommandCore {
       timeout_ms?: number;
       mode?: BuildMode;
       debug?: boolean;
+      dart_define?: Record<string, string>;
       target?: "simulator" | "device";
       device_udid?: string;
     }
@@ -253,6 +256,7 @@ export class CommandCore {
         noLaunch: true,
         mode: args.mode,
         debug: args.debug,
+        dartDefine: args.dart_define,
       });
 
       // 3. ENOSPC recovery: uninstall + retry the install once.
@@ -269,6 +273,7 @@ export class CommandCore {
           noLaunch: true,
           mode: args.mode,
           debug: args.debug,
+          dartDefine: args.dart_define,
         });
       }
 
@@ -313,7 +318,8 @@ export class CommandCore {
       let outcome = await adapter.launchAndCaptureUri(
         device,
         timeoutMs,
-        launchMode
+        launchMode,
+        args.dart_define
       );
 
       // 4a. Reactive launch-failure recovery (iOS first-time provisioning).
@@ -327,7 +333,8 @@ export class CommandCore {
           outcome = await adapter.launchAndCaptureUri(
             device,
             timeoutMs,
-            launchMode
+            launchMode,
+            args.dart_define
           );
         }
       }

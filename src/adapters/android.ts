@@ -82,6 +82,7 @@ import {
   runTimedRecorder,
 } from "../recordingRun.js";
 import {
+  BuildMode,
   BuildOptions,
   BuildResult,
   DeviceResolution,
@@ -89,6 +90,7 @@ import {
   LaunchOutcome,
   Platform,
 } from "../types.js";
+import { dartDefineArgs } from "../dartDefine.js";
 import {
   AppLifecycle,
   DeviceTargetPreference,
@@ -152,9 +154,16 @@ export function buildAndroidPtyLaunchCommand(
   flutterCommand = "flutter",
   platform: NodeJS.Platform = process.platform,
   mode: AndroidLaunchMode = ANDROID_DEFAULT_LAUNCH_MODE,
-  controlFifoPath?: string
+  controlFifoPath?: string,
+  extraArgs: string[] = []
 ): string {
-  const inner = `${flutterCommand} run ${flutterModeFlag(mode)} -d ${quote(serial)}`;
+  // `extraArgs` carries already-quoted --dart-define tokens: on Android the
+  // launch IS the build, so defines have to be spliced HERE to reach the apk
+  // that actually runs.
+  const suffix = extraArgs.length > 0 ? ` ${extraArgs.join(" ")}` : "";
+  const inner =
+    `${flutterCommand} run ${flutterModeFlag(mode)} -d ${quote(serial)}` +
+    suffix;
   return buildPtyCaptureCommand({ inner, cwd: appDir, platform, controlFifoPath });
 }
 
@@ -311,7 +320,10 @@ export class AndroidAdapter implements PlatformAdapter {
       explicitDebug: opts.debug,
       envMode: this.config.launchMode,
     });
-    const command = `${this.flutter} build apk ${flutterModeFlag(mode)}`;
+    const defines = dartDefineArgs(opts.dartDefine).map(quote).join(" ");
+    const command =
+      `${this.flutter} build apk ${flutterModeFlag(mode)}` +
+      (defines ? ` ${defines}` : "");
     const result = await runShell(command, {
       cwd: this.config.appDir,
       timeoutMs: 1800000, // 30 min — a clean Android build can be slow.
@@ -469,7 +481,9 @@ export class AndroidAdapter implements PlatformAdapter {
    */
   async launchAndCaptureUri(
     device: string,
-    timeoutMs: number
+    timeoutMs: number,
+    _mode?: BuildMode,
+    dartDefine?: Record<string, string>
   ): Promise<LaunchOutcome> {
     // Allocate a durable control FIFO so flutter_hot_reload/flutter_hot_restart
     // can drive `r`/`R` on this running `flutter run` daemon over its own stdin
@@ -477,13 +491,16 @@ export class AndroidAdapter implements PlatformAdapter {
     // interactive keys on Android as on iOS). Undefined when mkfifo is
     // unavailable — the launch still proceeds; reload falls back to the VM service.
     const controlFifoPath = allocateControlFifo();
+    // The launch mode is the one the deploy resolved and recorded in install()
+    // (`_mode` is already folded into it there), so it is not re-read here.
     const command = buildAndroidPtyLaunchCommand(
       this.config.appDir,
       device,
       this.flutter,
       process.platform,
       this.launchMode,
-      controlFifoPath
+      controlFifoPath,
+      dartDefineArgs(dartDefine).map(quote)
     );
     return neutralLaunchAndCaptureUri(
       command,

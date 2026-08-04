@@ -48,6 +48,7 @@ import {
   Platform,
   resolveBuildMode,
 } from "../types.js";
+import { dartDefineArgs } from "../dartDefine.js";
 import { InstallOptions, PlatformAdapter } from "./platformAdapter.js";
 import { ScreenshotResult } from "../screenshot.js";
 import { RecordResult } from "../recording.js";
@@ -344,6 +345,10 @@ export class TizenAdapter implements PlatformAdapter {
     // tv/mobile device profile; `--profile` here is the compilation mode.
     const mode = resolveBuildMode({ mode: opts.mode, debug: opts.debug });
     flags.push(`--${mode}`);
+    // Tizen's launch reuses an already-built TPK (`--no-build`), so compile-time
+    // defines can only be applied HERE -- at launch there is nothing left to
+    // compile them into.
+    for (const token of dartDefineArgs(opts.dartDefine)) flags.push(quote(token));
     if (this.config.securityProfile) {
       flags.push("-s", quote(this.config.securityProfile));
     }

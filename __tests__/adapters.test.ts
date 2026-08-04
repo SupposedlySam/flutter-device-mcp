@@ -182,6 +182,15 @@ describe("TizenAdapter delegates to the shared shell (flutter-tizen)", () => {
     expect(cmd).not.toContain("--debug");
   });
 
+  it("applies --dart-define at BUILD time (the launch has nothing to compile)", async () => {
+    // Tizen relaunches an already-built TPK with `--no-build`, so a define
+    // supplied at launch time could not reach the compiled artifact.
+    await tizen().build({ dartDefine: { API: "staging" } });
+    expect(runShell.mock.calls[0][0] as string).toContain(
+      "'--dart-define=API=staging'"
+    );
+  });
+
   it("build runs any configured preBuild hooks first (in order, cwd=appDir)", async () => {
     const adapter = new TizenAdapter({
       appDir: APP_DIR,

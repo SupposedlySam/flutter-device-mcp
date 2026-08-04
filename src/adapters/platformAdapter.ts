@@ -54,6 +54,14 @@ export interface InstallOptions {
    * platforms where install does not distinguish a debug artifact.
    */
   debug?: boolean;
+  /**
+   * `--dart-define` constants for this deploy. On the platforms where install
+   * and launch are ONE `flutter run` (iOS/Android), this is threaded to
+   * {@link PlatformAdapter.launchAndCaptureUri} so the defines reach the build
+   * that actually runs. Platforms that launch a pre-built artifact apply them
+   * at build time instead and ignore this.
+   */
+  dartDefine?: Record<string, string>;
 }
 
 /**
@@ -208,7 +216,8 @@ export interface PlatformAdapter {
   launchAndCaptureUri(
     device: string,
     timeoutMs: number,
-    mode?: BuildMode
+    mode?: BuildMode,
+    dartDefine?: Record<string, string>
   ): Promise<LaunchOutcome>;
 
   /**

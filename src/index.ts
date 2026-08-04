@@ -125,6 +125,9 @@ class FlutterDeviceServer {
               ...common,
               profile: args.profile as string | undefined,
               debug: args.debug as boolean | undefined,
+              dart_define: args.dart_define as
+                | Record<string, string>
+                | undefined,
               skip_rust: args.skip_rust as boolean | undefined,
               skip_flutter: args.skip_flutter as boolean | undefined,
               install: args.install as boolean | undefined,
@@ -138,6 +141,9 @@ class FlutterDeviceServer {
               ...common,
               no_launch: args.no_launch as boolean | undefined,
               timeout_ms: args.timeout_ms as number | undefined,
+              dart_define: args.dart_define as
+                | Record<string, string>
+                | undefined,
               debug: args.debug as boolean | undefined,
               target: args.target as "simulator" | "device" | undefined,
               device_udid: args.device_udid as string | undefined,
