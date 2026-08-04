@@ -15,13 +15,13 @@ shared command core, so every guardrail behaves identically no matter who calls.
 Rows are platforms, columns are capabilities. ✅ full · ⚠️ partial / experimental ·
 ❌ not supported.
 
-| Platform | Deploy + VM URI | Hot reload/restart | Lifecycle (bg/fg/kill) | Screenshot | Record | System prompt | TV input (key/pointer) |
-|----------|:---------------:|:------------------:|:----------------------:|:----------:|:------:|:-------------:|:----------------------:|
-| **iOS** | ✅ | ✅ | ✅ | ✅ ¹ | ✅ ² | ✅ ³ | ❌ ⁴ |
-| **Android** | ✅ | ✅ | ✅ | ✅ | ✅ ⁵ | ❌ | ❌ ⁴ |
-| **Tizen** (Samsung) | ✅ ⁶ | ✅ | ❌ | ❌ ⁷ | ❌ ⁷ | ❌ | ✅ ⁸ |
-| **tvOS** (Apple TV) | ✅ ⁹ | ✅ | ✅ | ⚠️ ¹⁰ | ❌ | ❌ | ❌ ¹¹ |
-| **webOS** (LG) | ⚠️ ¹² | ⚠️ | ❌ | ❌ | ❌ | ❌ | ⚠️ ¹³ |
+| Platform | Deploy + VM URI | Hot reload/restart | Lifecycle (bg/fg/kill) | Screenshot | Record | System prompt | OS input (key/pointer) | Screen geometry |
+|----------|:---------------:|:------------------:|:----------------------:|:----------:|:------:|:-------------:|:----------------------:|:---------------:|
+| **iOS** | ✅ | ✅ | ✅ | ✅ ¹ | ✅ ² | ✅ ³ | ❌ ⁴ | ❌ |
+| **Android** | ✅ | ✅ | ✅ | ✅ | ✅ ⁵ | ❌ | ✅ ¹⁴ | ✅ ¹⁵ |
+| **Tizen** (Samsung) | ✅ ⁶ | ✅ | ❌ | ❌ ⁷ | ❌ ⁷ | ❌ | ✅ ⁸ | ❌ |
+| **tvOS** (Apple TV) | ✅ ⁹ | ✅ | ✅ | ⚠️ ¹⁰ | ❌ | ❌ | ❌ ¹¹ | ❌ |
+| **webOS** (LG) | ⚠️ ¹² | ⚠️ | ❌ | ❌ | ❌ | ❌ | ⚠️ ¹³ | ❌ |
 
 **iOS is the most mature, best-tested path; Android is well-supported.** Both use
 standard Flutter / `adb` / `xcrun` tooling. **Tizen, tvOS, and webOS depend on
@@ -32,7 +32,7 @@ contributions are very welcome.**
 ¹ Simulator natively; physical devices need `pymobiledevice3`.
 ² Simulator produces an mp4; physical capture is a choppy (~1–3 fps) screenshot burst.
 ³ Simulator only, via `idb` over the accessibility tree.
-⁴ Not a TV/focus platform — drive the app with Marionette over the VM service instead.
+⁴ No OS-level input channel — drive the app with Marionette over the VM service instead.
 ⁵ Native mp4 via `adb`.
 ⁶ Via `flutter-tizen run` (the launch that captures the VM URI); build/install is reimplemented on `flutter-tizen` and still needs on-device verification.
 ⁷ `sdb shell` is disabled on Samsung devices — use the driver's screenshot over the VM service.
@@ -42,6 +42,8 @@ contributions are very welcome.**
 ¹¹ Siri-remote / focus-driven — drive via Marionette.
 ¹² Packaging requires a user-provided `preBuild` hook; there is no standard `flutter-webos build`.
 ¹³ Input over `ssap` is wired but currently device-blocked.
+¹⁴ `adb shell input` (keyevent/tap/swipe/text), on devices and emulators. This is the OS-LEVEL plane: raw system input that bypasses Flutter's gesture arena, so a VM-service driver remains the primary in-app path. It reaches what that driver cannot — OS UI outside the Flutter view, non-debug builds, and D-pad navigation on Android TV.
+¹⁵ `adb shell wm size` + `wm density` — the device pixel ratio `flutter_pointer` needs for logical coordinates and refuses to guess.
 </sub>
 
 ## Why
@@ -289,7 +291,7 @@ platform from your config.
 |------|---------|
 | `flutter_info` | Device + environment status and resolved config with provenance |
 | `flutter_setup` | Prepare the device for development |
-| `flutter_build` | Build the app package |
+| `flutter_build` | Build the app package. `mode` picks release/profile/debug — reach for `profile` when measuring, since it is AOT-timed *and* keeps the VM service open. `dart_define` passes compile-time constants |
 | `flutter_deploy` | **Install + launch through a pty and return the captured `ws://…/ws` VM Service URI** to hand to a driver. Runs the guardrails: kills stale drivers first, recovers from `ENOSPC`, records the launch for hot reload/restart, and probes whether the build is Marionette-drivable |
 | `flutter_uninstall` | Remove the app from the device |
 | `flutter_kill_stale` | Kill stale launch/driver processes holding the device lock |
@@ -301,8 +303,9 @@ platform from your config.
 | `flutter_background` | Background the app without killing it (mobile) |
 | `flutter_foreground` | Foreground the app again (mobile) |
 | `flutter_set_input_mode` | Select the input plane (dpad/pointer) — TV |
-| `flutter_key` | Send a remote/navigation key — TV |
-| `flutter_pointer` | Drive the pointer (move/click/scroll) — TV |
+| `flutter_key` | Send a remote/navigation key, or type text into the focused field — TV + Android |
+| `flutter_pointer` | Drive the pointer (move/click/scroll) — TV + Android |
+| `flutter_geometry` | **Report the screen's real size and device pixel ratio** so `flutter_pointer`'s logical coordinates are read rather than guessed. Optionally cross-checks a supplied Flutter view size and warns when the ratio cannot be right — Android |
 | `flutter_system_prompt` | Detect/tap OS-level dialogs — iOS |
 
 ## Per-platform prerequisites
