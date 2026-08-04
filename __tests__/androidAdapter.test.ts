@@ -369,6 +369,86 @@ describe("AndroidAdapter.install / uninstall", () => {
   });
 });
 
+describe("AndroidAdapter out-of-storage recovery (fires at LAUNCH, not install)", () => {
+  it("the deploy's install-side ENOSPC retry can never fire on Android", async () => {
+    // This is WHY the recovery has to live on the launch seam: the deploy
+    // retries the INSTALL when install output looks like ENOSPC, but Android's
+    // install step never runs an install at all -- `flutter run` does, at launch.
+    // A storage-starved device therefore produces a SUCCESSFUL install step.
+    const install = await android().install(SERIAL, { noLaunch: true });
+    expect(install.success).toBe(true);
+    expect(runShell).not.toHaveBeenCalled();
+  });
+
+  it("uninstalls to free space and asks for a retry on a storage launch failure", async () => {
+    const adapter = android();
+    runShell.mockClear();
+    runShell.mockResolvedValue(okResult);
+    const rec = await adapter.recoverLaunchFailure!(
+      SERIAL,
+      "adb: failed to install app.apk: Failure [INSTALL_FAILED_INSUFFICIENT_STORAGE]"
+    );
+    expect(rec.recovered).toBe(true);
+    expect(rec.note).toMatch(/out of storage/i);
+    expect(runShell.mock.calls[0][0]).toBe(
+      `adb -s '${SERIAL}' uninstall '${ANDROID_APP_ID}'`
+    );
+  });
+
+  it("recognizes the other two storage wordings adb/the filesystem emit", async () => {
+    for (const logTail of [
+      "Failure [INSUFFICIENT_STORAGE]",
+      "Error: No space left on device",
+    ]) {
+      const adapter = android();
+      runShell.mockClear();
+      runShell.mockResolvedValue(okResult);
+      const rec = await adapter.recoverLaunchFailure!(SERIAL, logTail);
+      expect(rec.recovered).toBe(true);
+    }
+  });
+
+  it("does NOT retry when the space-freeing uninstall itself fails", async () => {
+    // Nothing was freed, so a retry would hit the same wall -- report the real
+    // blocker instead of burning the one retry.
+    const adapter = android();
+    runShell.mockClear();
+    runShell.mockResolvedValue({
+      ...okResult,
+      success: false,
+      code: 1,
+      combined: "adb: device offline",
+    });
+    const rec = await adapter.recoverLaunchFailure!(
+      SERIAL,
+      "INSTALL_FAILED_INSUFFICIENT_STORAGE"
+    );
+    expect(rec.recovered).toBe(false);
+    expect(rec.note).toMatch(/device offline/);
+  });
+
+  it("is a no-op for a launch failure that is not about storage", async () => {
+    const adapter = android();
+    runShell.mockClear();
+    const rec = await adapter.recoverLaunchFailure!(
+      SERIAL,
+      "Gradle task assembleDebug failed with exit code 1"
+    );
+    expect(rec.recovered).toBe(false);
+    // No uninstall on an unrelated failure -- that would destroy app state.
+    expect(runShell).not.toHaveBeenCalled();
+  });
+
+  it("classifies storage wordings through the install-failure seam too", () => {
+    const adapter = android();
+    expect(
+      adapter.isInstallFailure!("Failure [INSTALL_FAILED_INSUFFICIENT_STORAGE]")
+    ).toBe(true);
+    expect(adapter.isInstallFailure!("No space left on device")).toBe(true);
+    expect(adapter.isInstallFailure!("some unrelated error")).toBe(false);
+  });
+});
+
 describe("AndroidAdapter.killStale", () => {
   it("pkills BOTH flutter run modes and the dart frontend server", async () => {
     const killed = await android().killStale();

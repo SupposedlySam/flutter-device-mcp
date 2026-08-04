@@ -111,6 +111,16 @@ export const ANDROID_FAILURE_SIGNATURES: RegExp[] = [
 ];
 
 /**
+ * Storage-exhaustion signature across the places Android surfaces it: the
+ * package manager's INSTALL_FAILED_INSUFFICIENT_STORAGE (also seen as a bare
+ * INSUFFICIENT_STORAGE in some adb wordings) and the generic filesystem
+ * "No space left on device". Freeing space by uninstalling the app and retrying
+ * once is the recovery for all of them.
+ */
+export const ANDROID_STORAGE_FAILURE_SIGNATURE =
+  /INSTALL_FAILED_INSUFFICIENT_STORAGE|INSUFFICIENT_STORAGE|No space left on device/i;
+
+/**
  * Compose the `flutter run` launch and delegate the pty wrapping to
  * {@link buildPtyCaptureCommand} so the Flutter tool sees a pty and line-flushes
  * its VM-service URI (buffered under a plain pipe otherwise). This adapter owns
@@ -383,6 +393,53 @@ export class AndroidAdapter implements PlatformAdapter {
       combined: message,
       success: true,
       timedOut: false,
+    };
+  }
+
+  /**
+   * True when a captured install output signals an out-of-storage install
+   * failure ({@link ANDROID_STORAGE_FAILURE_SIGNATURE}). On Android the real apk
+   * install happens inside `flutter run` at LAUNCH time (install here is a
+   * no-op), so the launch path — {@link recoverLaunchFailure} — is where this
+   * signature actually fires; it is exposed on the install seam too so the
+   * Android wording is recognized wherever install output is classified.
+   */
+  isInstallFailure(combined: string): boolean {
+    return ANDROID_STORAGE_FAILURE_SIGNATURE.test(combined);
+  }
+
+  /**
+   * Reactive launch-failure recovery (the {@link PlatformAdapter} seam).
+   *
+   * Because the Android deploy installs at LAUNCH time (`flutter run` performs
+   * the apk install), an out-of-storage install failure surfaces as a FAILED
+   * launch, never as a failed install step — which is why the deploy's own
+   * ENOSPC retry, which only wraps the install call, can never fire here. When
+   * the captured launch output carries a storage signature, uninstall the app to
+   * free space and report `recovered: true` so the launch is retried once. If
+   * the space-freeing uninstall ITSELF fails there is nothing left to free, so
+   * the failure is reported as-is rather than burning a retry on the same wall.
+   * Any non-storage failure is not recovered.
+   */
+  async recoverLaunchFailure(
+    device: string,
+    logTail: string
+  ): Promise<{ recovered: boolean; note?: string }> {
+    if (!ANDROID_STORAGE_FAILURE_SIGNATURE.test(logTail)) {
+      return { recovered: false };
+    }
+    const uninstall = await this.uninstall(device, this.appId);
+    if (!uninstall.success) {
+      return {
+        recovered: false,
+        note:
+          "Device is out of storage and the space-freeing `adb uninstall` failed, " +
+          `so a launch retry would hit the same wall: ${tail(uninstall.combined, 5)}`,
+      };
+    }
+    return {
+      recovered: true,
+      note: "Device was out of storage — uninstalled the app to free space; retrying the launch.",
     };
   }
 
