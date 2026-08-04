@@ -311,9 +311,40 @@ function buildFlutterTools(): ToolDefinition[] {
       },
     },
     {
+      name: "flutter_geometry",
+      description:
+        "REPORT THE DEVICE'S REAL SCREEN GEOMETRY so nothing is assumed: display size in DEVICE pixels, the density buckets (physical vs an active override), the device pixel ratio and where it came from, and the logical display size that follows. This is the ratio flutter_pointer requires for `coordinateSpace: \"logical\"` and refuses to guess — read it here instead of eyeballing a screenshot. OS-LEVEL: it describes the DISPLAY, so it needs no app installed, no debug build, and no Dart VM service. The Flutter VIEW is a different, smaller box — on a device whose display is 1440x2960 at density 640 (dpr 4.0, logical display 360x740) the Flutter view can be 360x725 logical, because the 60px navigation bar is outside the view; dividing the DISPLAY height by the dpr gives 740 and is WRONG for anything view-derived. Pass the view's own numbers (`view_width`/`view_height` in Flutter LOGICAL px, and optionally `view_dpr`) — from a VM-service driver, since this server never reads the app — to have them cross-checked: a WIDTH mismatch comes back as a warning (it means the dpr is wrong and every derived tap will mis-land), a height shortfall as an expected note naming the system chrome. `device_udid` targets a specific device (geometry differs per device); otherwise the target resolves exactly as it does for deploy/lifecycle. ANDROID ONLY (`adb shell wm size` + `wm density`, preferring the Override density line — the density actually in force); other platforms return {supported:false} rather than a guess.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          ...platformProp,
+          device_udid: {
+            type: "string",
+            description:
+              "Pin the device to report on for THIS call (Android: the adb serial or model name; overrides the FLUTTER_DEVICE_ANDROID_DEVICE env pin). Omit to resolve the same target deploy/lifecycle use. Screen geometry differs per device, so a multi-device host should say which one it means.",
+          },
+          view_width: {
+            type: "number",
+            description:
+              "The Flutter view's width in LOGICAL px, to cross-check against the display. Must be supplied together with view_height. Width is the reliable axis (no system chrome takes horizontal space in portrait), so a mismatch here is reported as a WARNING: the dpr is wrong and every derived tap will mis-land.",
+          },
+          view_height: {
+            type: "number",
+            description:
+              "The Flutter view's height in LOGICAL px, to cross-check against the display. Must be supplied together with view_width. A shortfall here is EXPECTED (navigation/status bars) and comes back as a note naming how many device px are system chrome — not a warning.",
+          },
+          view_dpr: {
+            type: "number",
+            description:
+              "The view's own reported devicePixelRatio, to compare against the platform density. A disagreement is surfaced as a warning; taps are always scaled with the PLATFORM value.",
+          },
+        },
+      },
+    },
+    {
       name: "flutter_pointer",
       description:
-        "Drive the TV pointer. action 'click' activates the currently-focused element (KEY_ENTER) — on the focus/D-pad-driven Tizen TV this is the working 'click', so use flutter_key to move focus first, then flutter_pointer click. action 'move'/'scroll' is a free-cursor primitive reserved for pointer-native platforms (webOS Magic Remote); on Tizen it is unsupported (the native Samsung touchpad channel has no observable effect) and returns a clear {supported:false} result. Coordinates default to DEVICE pixels; pass coordinateSpace 'logical' together with the device's dpr to send Marionette-style LOGICAL coordinates (e.g. 1200x675) — they are converted to device pixels before sending. dpr is never assumed; it must be supplied for logical space. NOTE: this exposes the logical→device pointer primitive only; element-geometry→tap orchestration lives in the agent/skill layer (this MCP does not call Marionette).",
+        "Drive the TV pointer. action 'click' activates the currently-focused element (KEY_ENTER) — on the focus/D-pad-driven Tizen TV this is the working 'click', so use flutter_key to move focus first, then flutter_pointer click. action 'move'/'scroll' is a free-cursor primitive reserved for pointer-native platforms (webOS Magic Remote); on Tizen it is unsupported (the native Samsung touchpad channel has no observable effect) and returns a clear {supported:false} result. Coordinates default to DEVICE pixels; pass coordinateSpace 'logical' together with the device's dpr to send Marionette-style LOGICAL coordinates (e.g. 1200x675) — they are converted to device pixels before sending. dpr is never assumed; it must be supplied for logical space — but it no longer has to be GUESSED: flutter_geometry reports the device's real ratio and screen sizes. NOTE: this exposes the logical→device pointer primitive only; element-geometry→tap orchestration lives in the agent/skill layer (this MCP does not call Marionette).",
       inputSchema: {
         type: "object",
         properties: {

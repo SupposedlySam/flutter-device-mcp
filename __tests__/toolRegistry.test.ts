@@ -5,9 +5,9 @@ describe("buildToolList (ListTools advertisement)", () => {
   const { flutter } = buildToolList();
   const advertised = buildAdvertisedTools();
 
-  it("advertises exactly 17 flutter_ tools", () => {
-    expect(flutter).toHaveLength(17);
-    expect(advertised).toHaveLength(17);
+  it("advertises exactly 18 flutter_ tools", () => {
+    expect(flutter).toHaveLength(18);
+    expect(advertised).toHaveLength(18);
   });
 
   it("names every tool with the flutter_ prefix", () => {

@@ -50,7 +50,15 @@ import {
   flutterModeFlag,
   resolveAndroidLaunchMode,
 } from "../androidLaunchMode.js";
-import { AndroidInputController } from "../input/androidInputController.js";
+import {
+  AndroidInputController,
+  parseWmSize,
+} from "../input/androidInputController.js";
+import {
+  deriveAndroidGeometry,
+  DeviceGeometryReading,
+  parseWmDensity,
+} from "../deviceGeometry.js";
 import {
   buildAdbScreencapCommand,
   defaultScreenshotPath,
@@ -83,6 +91,7 @@ import {
 } from "../types.js";
 import {
   AppLifecycle,
+  DeviceTargetPreference,
   InstallOptions,
   PlatformAdapter,
 } from "./platformAdapter.js";
@@ -328,8 +337,16 @@ export class AndroidAdapter implements PlatformAdapter {
    * Resolve the Android target from `adb devices -l`. A pin self-heals to the
    * first online device with a warning, mirroring the Tizen/iOS stale-pin
    * fallback. Throws an McpError when nothing is listed at all.
+   *
+   * `preference.udid` pins a specific target for THIS call — on Android the adb
+   * serial IS the id every consumer uses, so a serial (or model name) is matched
+   * exactly like the `FLUTTER_DEVICE_ANDROID_DEVICE` pin it overrides, self-heal
+   * and all. `preference.kind` has no Android meaning (there is no
+   * device-vs-simulator id split here) and is ignored.
    */
-  async discoverDevice(): Promise<DeviceResolution> {
+  async discoverDevice(
+    preference: DeviceTargetPreference = {}
+  ): Promise<DeviceResolution> {
     const devicesOut = await runShell("adb devices -l", { timeoutMs: 15000 });
     // Distinguish "adb not installed" from "adb ran but found no devices": adb
     // missing fails to spawn (code null) or the shell reports command-not-found,
@@ -347,7 +364,7 @@ export class AndroidAdapter implements PlatformAdapter {
       );
     }
     const resolution = resolveAndroidTarget(
-      this.config.device,
+      preference.udid ?? this.config.device,
       devicesOut.stdout
     );
     if (!resolution) {
@@ -685,6 +702,42 @@ export class AndroidAdapter implements PlatformAdapter {
         { timeoutMs: 60000 }
       ),
   };
+
+  /**
+   * Report the screen geometry from `adb shell wm size` + `wm density`.
+   *
+   * Both are read against ONE resolved device — the same resolution every other
+   * verb uses, honoring an explicit `preference.udid` — so the numbers describe
+   * the target the caller meant rather than whichever device adb happens to
+   * list first. `wm density` is what yields the device pixel ratio the pointer
+   * plane needs but has never been able to state; its OVERRIDE line, when
+   * present, is the density actually in force (on a device whose panel is 480
+   * but whose override is 640, reading only the physical line would mis-scale
+   * every tap by a third).
+   *
+   * Undefined when either command's output cannot be parsed: a half-known
+   * geometry would just be a guess wearing a result's clothes.
+   */
+  async geometry(
+    preference: DeviceTargetPreference = {}
+  ): Promise<DeviceGeometryReading | undefined> {
+    const resolution = await this.discoverDevice(preference);
+    const serial = quote(resolution.target);
+    const [sizeResult, densityResult] = await Promise.all([
+      runShell(`adb -s ${serial} shell wm size`, { timeoutMs: 15000 }),
+      runShell(`adb -s ${serial} shell wm density`, { timeoutMs: 15000 }),
+    ]);
+    const geometry = deriveAndroidGeometry(
+      parseWmSize(sizeResult.combined),
+      parseWmDensity(densityResult.combined)
+    );
+    if (!geometry) return undefined;
+    return {
+      ...geometry,
+      device: resolution.target,
+      deviceWarning: resolution.warning,
+    };
+  }
 
   /**
    * Android input controller: the OS-level `adb shell input` plane

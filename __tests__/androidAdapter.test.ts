@@ -572,6 +572,60 @@ describe("AndroidAdapter input drives the OS-level adb `input` plane", () => {
   });
 });
 
+describe("AndroidAdapter.geometry (the dpr nothing used to report)", () => {
+  /** Layer `wm size` / `wm density` answers over the device-discovery mock. */
+  function mockGeometry(size: string, density: string) {
+    mockDiscovery();
+    const base = runShell.getMockImplementation()!;
+    runShell.mockImplementation(async (cmd: string, opts?: unknown) => {
+      if (cmd.includes("wm size")) return { ...okResult, combined: size };
+      if (cmd.includes("wm density")) return { ...okResult, combined: density };
+      return base(cmd, opts);
+    });
+  }
+
+  it("derives the dpr from density and reports the device it read", async () => {
+    mockGeometry("Physical size: 1440x2960", "Physical density: 640");
+    const g = (await android().geometry!())!;
+    expect(g.displaySize).toEqual({ width: 1440, height: 2960 });
+    expect(g.dpr).toBe(4);
+    expect(g.logicalDisplaySize).toEqual({ width: 360, height: 740 });
+    // The reading names its device: a multi-device host has several geometries
+    // and an unattributed one can silently be the wrong device's.
+    expect(g.device).toBe(SERIAL);
+  });
+
+  it("prefers the OVERRIDE density — the one actually in force", async () => {
+    // Reading only "Physical density" here would give dpr 3.0 instead of 4.0
+    // and mis-scale every derived tap by a third.
+    mockGeometry(
+      "Physical size: 1440x2960",
+      "Physical density: 480\nOverride density: 640"
+    );
+    const g = (await android().geometry!())!;
+    expect(g.dpr).toBe(4);
+    expect(g.density).toEqual({ physical: 480, override: 640, effective: 640 });
+    expect(g.dprSource).toMatch(/Override/);
+  });
+
+  it("reads both numbers from ONE resolved device, honoring an explicit udid", async () => {
+    mockGeometry("Physical size: 1080x2400", "Physical density: 440");
+    await android().geometry!({ udid: SERIAL });
+    const shelled = runShell.mock.calls.map(([c]) => c as string);
+    expect(shelled).toContain(`adb -s '${SERIAL}' shell wm size`);
+    expect(shelled).toContain(`adb -s '${SERIAL}' shell wm density`);
+  });
+
+  it("returns undefined rather than half a geometry when a read is unparseable", async () => {
+    // A guess wearing a result's clothes is worse than no answer: the caller
+    // would scale taps by it.
+    mockGeometry("Physical size: 1440x2960", "garbage");
+    expect(await android().geometry!()).toBeUndefined();
+    mockGeometry("garbage", "Physical density: 640");
+    expect(await android().geometry!()).toBeUndefined();
+  });
+});
+
 describe("buildAndroidPtyLaunchCommand", () => {
   // This adapter owns only the `flutter run --<mode>` inner + the appDir cwd;
   // the cross-platform `script` wrapping is buildPtyCaptureCommand's concern

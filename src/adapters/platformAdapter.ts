@@ -18,6 +18,7 @@ import {
   Platform,
 } from "../types.js";
 import { ScreenshotResult } from "../screenshot.js";
+import { DeviceGeometryReading } from "../deviceGeometry.js";
 import { RecordFormat, RecordResult } from "../recording.js";
 
 /**
@@ -313,6 +314,27 @@ export interface PlatformAdapter {
     /** Optional specific target id (iOS); adapters that ignore device kinds ignore it. */
     deviceUdid?: string;
   }): Promise<RecordResult>;
+
+  /**
+   * Report the device's real screen geometry — display size in device pixels,
+   * the density-derived device pixel ratio, and the logical size that follows.
+   *
+   * OPTIONAL. Implemented by Android (`adb shell wm size` + `wm density`), the
+   * only platform whose geometry has been exercised on-device; absence is
+   * surfaced by the server as `{ supported: false }` rather than a guess.
+   *
+   * This exists because the pointer plane REQUIRES a device pixel ratio for
+   * logical coordinates and refuses to assume one, while nothing here used to
+   * report one — leaving a caller to eyeball a screenshot and guess. Returns
+   * undefined when the device answered but the output could not be parsed.
+   *
+   * `preference` selects the target exactly like {@link discoverDevice} (which
+   * an implementation is expected to delegate to): geometry differs per device,
+   * so a multi-device host must be able to say which one it is asking about.
+   */
+  geometry?(
+    preference?: DeviceTargetPreference
+  ): Promise<DeviceGeometryReading | undefined>;
 
   /**
    * Physical input controller. Real dual-mode input is implemented for TV

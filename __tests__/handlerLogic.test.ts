@@ -4,6 +4,7 @@ import {
   resolvePlatform,
   resolvePointerTarget,
   resolveScrollDelta,
+  resolveViewMetrics,
   summarizeKillStale,
 } from "../src/handlerLogic.js";
 import { logicalToDevicePx } from "../src/input/dpr.js";
@@ -90,6 +91,58 @@ describe("resolveScrollDelta", () => {
 
   it("throws InvalidParams when dy is not numeric", () => {
     expect(() => resolveScrollDelta({})).toThrow(/numeric dy/);
+  });
+});
+
+describe("resolveViewMetrics", () => {
+  it("accepts an omitted view — the OS-level geometry stands on its own", () => {
+    expect(resolveViewMetrics({})).toEqual({
+      logicalSize: undefined,
+      devicePixelRatio: undefined,
+    });
+  });
+
+  it("pairs a supplied width/height into a logical size", () => {
+    expect(
+      resolveViewMetrics({ view_width: 360, view_height: 725, view_dpr: 4 })
+    ).toEqual({
+      logicalSize: { width: 360, height: 725 },
+      devicePixelRatio: 4,
+    });
+  });
+
+  it("rejects a half-supplied view rather than cross-checking one axis", () => {
+    expect(() => resolveViewMetrics({ view_width: 360 })).toThrow(
+      /must be supplied together/
+    );
+    expect(() => resolveViewMetrics({ view_height: 725 })).toThrow(
+      /must be supplied together/
+    );
+  });
+
+  it("rejects a non-positive or non-numeric dimension", () => {
+    expect(() =>
+      resolveViewMetrics({ view_width: 0, view_height: 725 })
+    ).toThrow(/positive numbers/);
+    expect(() =>
+      resolveViewMetrics({ view_width: "360", view_height: 725 })
+    ).toThrow(/positive numbers/);
+  });
+
+  it("rejects a non-positive view_dpr (a ratio of 0 divides nothing)", () => {
+    expect(() => resolveViewMetrics({ view_dpr: 0 })).toThrow(
+      /view_dpr must be a positive number/
+    );
+  });
+
+  it("throws InvalidParams so a bad argument is a protocol error", () => {
+    try {
+      resolveViewMetrics({ view_width: 360 });
+      throw new Error("expected resolveViewMetrics to throw");
+    } catch (error) {
+      expect(error).toBeInstanceOf(McpError);
+      expect((error as McpError).code).toBe(ErrorCode.InvalidParams);
+    }
   });
 });
 

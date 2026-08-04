@@ -103,6 +103,7 @@ Commands:
   record              Record a bounded screen clip (--duration-s, --fps, --format mp4|gif)
   set-input-mode      Select the input plane (--mode dpad|pointer) — TV
   key                 Send a remote/navigation key (--key UP|DOWN|ENTER|…) or type text (--text "hi")
+  geometry            Report screen size + device pixel ratio (--view-width/--view-height to cross-check)
   pointer             Drive the pointer (--action move|click|scroll, --x --y --dy) — TV
   system-prompt       Detect/tap OS-level dialogs (--action detect|tap|dismiss) — iOS
 
@@ -180,6 +181,9 @@ async function run(): Promise<number> {
         key: f.key as string | undefined,
         text: f.text as string | undefined,
       });
+      break;
+    case "geometry":
+      result = await core.geometry(merge(f) as never);
       break;
     case "pointer":
       result = await core.pointer(merge(f) as never);

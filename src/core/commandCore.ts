@@ -30,8 +30,10 @@ import {
   mapUnsupportedInput,
   resolvePointerTarget,
   resolveScrollDelta,
+  resolveViewMetrics,
   summarizeKillStale,
 } from "../handlerLogic.js";
+import { crossCheckView, DeviceGeometryReading } from "../deviceGeometry.js";
 import {
   clearLaunch,
   clearLaunches,
@@ -54,6 +56,19 @@ import {
  * outrun the budget (the client's 20s default would).
  */
 const MARIONETTE_PROBE_CLIENT_TIMEOUT_MS = 3000;
+
+/**
+ * The coordinate-space contract a geometry answer carries. Stated on the result
+ * itself because mixing the two spaces is exactly how taps end up in the wrong
+ * place, and a caller should not have to remember which is which.
+ */
+const GEOMETRY_COORDINATE_NOTE =
+  "`displaySize` is DISPLAY device pixels — the space `adb shell input tap` " +
+  "(and flutter_pointer's default) addresses. `logicalDisplaySize` is that " +
+  "display divided by `dpr`; it is NOT the Flutter view, which is smaller " +
+  "wherever system bars take space. Flutter geometry is view-relative, so " +
+  "convert view logical coordinates with `dpr` rather than measuring against " +
+  "`logicalDisplaySize`.";
 
 /** A plain, JSON-serializable command result (both frontends render this). */
 export type CommandOutput = Record<string, unknown>;
@@ -981,6 +996,81 @@ export class CommandCore {
           action: args.action,
           udid: args.udid,
           ...result,
+        };
+      }
+    );
+  }
+
+  // =========== geometry ==========
+  async geometry(
+    args: CommonArgs & {
+      device_udid?: string;
+      view_width?: number;
+      view_height?: number;
+      view_dpr?: number;
+    }
+  ): Promise<CommandOutput> {
+    const adapter = this.adapterFor(args);
+    return this.guard(
+      "flutter_geometry",
+      { platform: adapter.platform, deviceUdid: args.device_udid },
+      async () => {
+        // Validate the caller-supplied view metrics FIRST: resolving a device
+        // and shelling two adb round-trips at it only to reject an argument
+        // afterwards spends the device's time on a typo.
+        const view = resolveViewMetrics(args);
+
+        if (!adapter.geometry) {
+          return {
+            platform: adapter.platform,
+            supported: false,
+            reason:
+              `Screen geometry is not wired on ${adapter.platform}. It is ` +
+              "verified on Android only (adb wm size + wm density); no ratio is " +
+              "assumed for other platforms.",
+          };
+        }
+
+        let geometry: DeviceGeometryReading | undefined;
+        try {
+          geometry = await adapter.geometry({ udid: args.device_udid });
+        } catch (error) {
+          return {
+            platform: adapter.platform,
+            supported: false,
+            reason: `Could not read screen geometry: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          };
+        }
+        if (!geometry) {
+          return {
+            platform: adapter.platform,
+            supported: false,
+            reason:
+              "The device answered but its screen size/density output could not " +
+              "be parsed, so no device pixel ratio is reported (rather than " +
+              "guessed).",
+          };
+        }
+
+        // The view half is whatever the CALLER supplied — this server never
+        // reads the running app, so an absent view simply means no view
+        // observation.
+        const check = crossCheckView(
+          geometry,
+          view.logicalSize,
+          view.devicePixelRatio
+        );
+        return {
+          platform: adapter.platform,
+          supported: true,
+          ...geometry,
+          viewLogicalSize: view.logicalSize,
+          viewDevicePixelRatio: view.devicePixelRatio,
+          notes: check.notes,
+          warnings: check.warnings,
+          note: GEOMETRY_COORDINATE_NOTE,
         };
       }
     );

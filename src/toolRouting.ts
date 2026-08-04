@@ -25,6 +25,7 @@ export type CanonicalTool =
   | "flutter_set_input_mode"
   | "flutter_key"
   | "flutter_pointer"
+  | "flutter_geometry"
   | "flutter_system_prompt";
 
 export interface ToolRoute {
@@ -54,6 +55,7 @@ const CANONICAL: Record<string, CanonicalTool> = {
   flutter_set_input_mode: "flutter_set_input_mode",
   flutter_key: "flutter_key",
   flutter_pointer: "flutter_pointer",
+  flutter_geometry: "flutter_geometry",
   flutter_system_prompt: "flutter_system_prompt",
 };
 

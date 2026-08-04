@@ -161,6 +161,16 @@ class FlutterDeviceServer {
               text: args.text as string | undefined,
             })
           );
+        case "flutter_geometry":
+          return this.json(
+            await core.geometry({
+              ...common,
+              device_udid: args.device_udid as string | undefined,
+              view_width: args.view_width as number | undefined,
+              view_height: args.view_height as number | undefined,
+              view_dpr: args.view_dpr as number | undefined,
+            })
+          );
         case "flutter_pointer":
           return this.json(
             await core.pointer({
