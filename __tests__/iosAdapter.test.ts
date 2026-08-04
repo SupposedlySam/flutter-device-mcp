@@ -283,20 +283,6 @@ describe("IosAdapter.install is now a PREFLIGHT (full flutter run pipeline insta
     expect(ran.some((c) => c.includes("flutter install"))).toBe(false);
   });
 
-  it("on a SIMULATOR target, preflight is a clean no-op success (no pod check)", async () => {
-    const adapter = ios();
-    mockDiscovery("simulator");
-    await adapter.discoverDevice();
-    runShell.mockClear();
-    runShell.mockResolvedValue(okResult);
-    const res = await adapter.install("SIM-UDID-1", { noLaunch: true });
-    expect(res.success).toBe(true);
-    // No `pod install` runs for a simulator.
-    expect(
-      runShell.mock.calls.some(([c]) => (c as string).includes("pod install"))
-    ).toBe(false);
-  });
-
   it("uninstall uses simctl after a simulator was resolved", async () => {
     const adapter = ios();
     mockDiscovery("simulator");
@@ -910,7 +896,7 @@ describe("IosAdapter.screenshot", () => {
   });
 });
 
-describe("IosAdapter physical-device preflight (pod drift + provisioning)", () => {
+describe("IosAdapter preflight (pod drift + provisioning)", () => {
   // A real temp repo whose app/ios has a Podfile, so the adapter's
   // fs.existsSync(Podfile) gate passes and the pod-drift path is exercised.
   let repoRoot: string;
@@ -971,6 +957,144 @@ describe("IosAdapter physical-device preflight (pod drift + provisioning)", () =
     const opts = podInstall![1] as { env?: Record<string, string>; cwd?: string };
     expect(opts.env).toMatchObject({ LANG: "en_US.UTF-8", LC_ALL: "en_US.UTF-8" });
     expect(opts.cwd).toBe(iosDir);
+  });
+
+  it("runs the DRY drift check itself with the UTF-8 locale env", async () => {
+    // Under a non-UTF-8 locale the dry `pod install --deployment` dies in the
+    // Ruby-4.0 encoding crash before it can report drift, and the crash output
+    // carries no drift signature — real drift would be silently skipped.
+    const adapter = await resolvedDevice();
+    runShell.mockClear();
+    runShell.mockImplementation(async () => okResult);
+
+    await adapter.install(IPHONE_FLUTTER_ECID, { noLaunch: true });
+
+    const dryCheck = runShell.mock.calls.find(([c]) =>
+      (c as string).includes("pod install --deployment")
+    );
+    expect(dryCheck).toBeDefined();
+    const opts = dryCheck![1] as { env?: Record<string, string> };
+    expect(opts.env).toMatchObject({
+      LANG: "en_US.UTF-8",
+      LC_ALL: "en_US.UTF-8",
+    });
+  });
+
+  it("runs the pod preflight on a SIMULATOR target too (drift breaks a sim build the same way)", async () => {
+    const adapter = iosDevice();
+    mockDiscovery("simulator");
+    await adapter.discoverDevice();
+    runShell.mockClear();
+    runShell.mockImplementation(async (cmd: string) => {
+      if (cmd.includes("pod install --deployment")) {
+        return {
+          ...okResult,
+          success: false,
+          code: 1,
+          combined:
+            "[!] The sandbox is not in sync with the Podfile.lock. Run 'pod install'",
+        };
+      }
+      return okResult;
+    });
+    const res = await adapter.install("SIM-UDID-1", { noLaunch: true });
+    expect(res.success).toBe(true);
+    // The mutating repair ran — the simulator no longer skips the preflight.
+    const podInstall = runShell.mock.calls.find(
+      ([c]) =>
+        (c as string).includes("pod install") &&
+        !(c as string).includes("--deployment")
+    );
+    expect(podInstall).toBeDefined();
+  });
+
+  it("build() repairs pod drift BEFORE running flutter build", async () => {
+    const adapter = iosDevice();
+    runShell.mockImplementation(async (cmd: string) => {
+      if (cmd.includes("pod install --deployment")) {
+        return {
+          ...okResult,
+          success: false,
+          code: 1,
+          combined:
+            "[!] The sandbox is not in sync with the Podfile.lock. Run 'pod install'",
+        };
+      }
+      return okResult;
+    });
+    const build = await adapter.build({});
+    expect(build.result.success).toBe(true);
+    const ran = runShell.mock.calls.map(([c]) => c as string);
+    const repairIdx = ran.findIndex(
+      (c) => c.includes("pod install") && !c.includes("--deployment")
+    );
+    const buildIdx = ran.findIndex((c) => c.includes("flutter build ios"));
+    expect(repairIdx).toBeGreaterThanOrEqual(0);
+    expect(buildIdx).toBeGreaterThan(repairIdx);
+  });
+
+  it("build({profile:'simulator'}) also runs the pod preflight", async () => {
+    const adapter = iosDevice();
+    runShell.mockImplementation(async (cmd: string) => {
+      if (cmd.includes("pod install --deployment")) {
+        return {
+          ...okResult,
+          success: false,
+          code: 1,
+          combined: "The sandbox is not in sync with the Podfile.lock.",
+        };
+      }
+      return okResult;
+    });
+    await adapter.build({ profile: "simulator" });
+    const ran = runShell.mock.calls.map(([c]) => c as string);
+    expect(
+      ran.some((c) => c.includes("pod install") && !c.includes("--deployment"))
+    ).toBe(true);
+    expect(ran.some((c) => c.includes("flutter build ios --simulator"))).toBe(
+      true
+    );
+  });
+
+  it("build() happy path costs only the cheap dry check (no mutating pod install)", async () => {
+    const adapter = iosDevice();
+    runShell.mockResolvedValue(okResult); // dry check passes: sandbox in sync
+    await adapter.build({});
+    const ran = runShell.mock.calls.map(([c]) => c as string);
+    expect(ran.some((c) => c.includes("pod install --deployment"))).toBe(true);
+    expect(
+      ran.filter((c) => c.includes("pod install") && !c.includes("--deployment"))
+    ).toHaveLength(0);
+    expect(ran.some((c) => c.includes("flutter build ios"))).toBe(true);
+  });
+
+  it("build() surfaces a failed pod repair as the blocker and does NOT run flutter build", async () => {
+    const adapter = iosDevice();
+    runShell.mockImplementation(async (cmd: string) => {
+      if (cmd.includes("pod install --deployment")) {
+        return {
+          ...okResult,
+          success: false,
+          code: 1,
+          combined: "The sandbox is not in sync with the Podfile.lock.",
+        };
+      }
+      if (cmd.includes("pod install")) {
+        return {
+          ...okResult,
+          success: false,
+          code: 1,
+          combined:
+            "Unicode Normalization not appropriate for ASCII-8BIT (Encoding::CompatibilityError)",
+        };
+      }
+      return okResult;
+    });
+    const build = await adapter.build({});
+    expect(build.result.success).toBe(false);
+    expect(build.result.combined).toMatch(/pod install/i);
+    const ran = runShell.mock.calls.map(([c]) => c as string);
+    expect(ran.some((c) => c.includes("flutter build ios"))).toBe(false);
   });
 
   it("surfaces pod install's OWN failure as the blocker (not a signing hint)", async () => {

@@ -411,6 +411,21 @@ export class IosAdapter implements PlatformAdapter {
       };
     }
 
+    // Pod preflight: CocoaPods sandbox drift fails `flutter build ios` exactly
+    // as it fails the deploy's `flutter run` (both drive the same Xcode build),
+    // so the drift check + repair run here too. Gated on the cheap dry check
+    // inside preparePods, the in-sync happy path costs one `pod install
+    // --deployment` and no mutating install.
+    const pods = await this.preparePods();
+    if (!pods.success) {
+      return {
+        result: pods,
+        enospc: /No space left on device/i.test(pods.combined),
+        installFailed: false,
+        launchedDisplay: false,
+      };
+    }
+
     const forSimulator = opts.profile === "simulator";
     const flags = ["build", forSimulator ? "ios --simulator" : "ios"];
     flags.push(opts.debug ? "--debug" : "--release");
@@ -532,35 +547,20 @@ export class IosAdapter implements PlatformAdapter {
    *      `pod install` with a UTF-8 locale (dodging the Ruby-4.0 homebrew
    *      Encoding::CompatibilityError crash). If `pod install` itself fails, this
    *      returns a FAILURE carrying that as the real blocker (never a misleading
-   *      signing hint).
+   *      signing hint). Drift breaks a SIMULATOR launch's Xcode build the same
+   *      way it breaks a device one, so this runs for both target kinds.
    *   2. First-time device provisioning — a device never registered with the
    *      team is registered + a profile minted by a one-shot provisioning
-   *      `xcodebuild` build. Best-effort: a failure here is reported but does not
-   *      hard-fail the preflight, because `flutter run`'s own automatic signing
-   *      may still succeed.
+   *      `xcodebuild` build. Handled REACTIVELY (see recoverLaunchFailure): the
+   *      slow xcodebuild runs only when a launch actually fails on provisioning,
+   *      so the happy path stays fast.
    *
    * On success returns a synthetic ok result (nothing to install here). On a
    * blocking failure returns the failing CommandResult so the deploy handler
    * surfaces it + its diagnostic ({@link installFailureDiagnostic}).
    */
   async install(_device: string, _opts: InstallOptions): Promise<CommandResult> {
-    // Simulators don't use CocoaPods signing/provisioning the same way and
-    // `flutter run` handles them cleanly, so the preflight is a device-only
-    // concern. On a simulator, report a clean no-op success.
-    if (this.lastKind === "simulator") {
-      return IosAdapter.okPreflight(
-        "Simulator target — no pod/provisioning preflight needed; the full " +
-          "flutter run pipeline installs + launches."
-      );
-    }
-
-    const pods = await this.preparePods();
-    if (!pods.success) return pods;
-
-    // Provisioning is handled REACTIVELY (see recoverLaunchFailure): the slow
-    // one-shot provisioning xcodebuild runs only when a launch actually fails on
-    // provisioning, so the happy path stays fast. Nothing to do here beyond pods.
-    return IosAdapter.okPreflight(pods.stdout);
+    return this.preparePods();
   }
 
   /**
@@ -583,9 +583,15 @@ export class IosAdapter implements PlatformAdapter {
 
     // Cheap, non-destructive drift check: --deployment makes pod refuse to
     // mutate the lockfile and exit non-zero when the sandbox is out of sync.
+    // The UTF-8 locale matters HERE too, not just for the repair: under a
+    // non-UTF-8 locale the check itself dies in the Ruby-4.0 encoding crash
+    // ({@link IOS_POD_ENCODING_CRASH_SIGNATURE}) before it can report drift,
+    // and the crash output carries no drift signature — so real drift would
+    // be silently skipped.
     const check = await runShell("pod install --deployment 2>&1", {
       cwd: iosDir,
       timeoutMs: 300000,
+      env: iosPodInstallEnv,
     });
     if (check.success || !isPodDrift(check.combined)) {
       // Either in sync, or a failure unrelated to drift (leave it to the build's
