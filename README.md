@@ -15,13 +15,13 @@ shared command core, so every guardrail behaves identically no matter who calls.
 Rows are platforms, columns are capabilities. ✅ full · ⚠️ partial / experimental ·
 ❌ not supported.
 
-| Platform | Deploy + VM URI | Hot reload/restart | Lifecycle (bg/fg/kill) | Screenshot | Record | System prompt | OS input (key/pointer) | Screen geometry |
-|----------|:---------------:|:------------------:|:----------------------:|:----------:|:------:|:-------------:|:----------------------:|:---------------:|
-| **iOS** | ✅ | ✅ | ✅ | ✅ ¹ | ✅ ² | ✅ ³ | ❌ ⁴ | ❌ |
-| **Android** | ✅ | ✅ | ✅ | ✅ | ✅ ⁵ | ❌ | ✅ ¹⁴ | ✅ ¹⁵ |
-| **Tizen** (Samsung) | ✅ ⁶ | ✅ | ❌ | ❌ ⁷ | ❌ ⁷ | ❌ | ✅ ⁸ | ❌ |
-| **tvOS** (Apple TV) | ✅ ⁹ | ✅ | ✅ | ⚠️ ¹⁰ | ❌ | ❌ | ❌ ¹¹ | ❌ |
-| **webOS** (LG) | ⚠️ ¹² | ⚠️ | ❌ | ❌ | ❌ | ❌ | ⚠️ ¹³ | ❌ |
+| Platform | Deploy + VM URI | Hot reload/restart | Lifecycle (bg/fg/kill) | Screenshot | Record | System prompt | OS input (key/pointer) | Screen geometry | Deep links |
+|----------|:---------------:|:------------------:|:----------------------:|:----------:|:------:|:-------------:|:----------------------:|:---------------:|:----------:|
+| **iOS** | ✅ | ✅ | ✅ | ✅ ¹ | ✅ ² | ✅ ³ | ❌ ⁴ | ❌ | ⚠️ ¹⁶ |
+| **Android** | ✅ | ✅ | ✅ | ✅ | ✅ ⁵ | ❌ | ✅ ¹⁴ | ✅ ¹⁵ | ✅ |
+| **Tizen** (Samsung) | ✅ ⁶ | ✅ | ❌ | ❌ ⁷ | ❌ ⁷ | ❌ | ✅ ⁸ | ❌ | ❌ ⁷ |
+| **tvOS** (Apple TV) | ✅ ⁹ | ✅ | ✅ | ⚠️ ¹⁰ | ❌ | ❌ | ❌ ¹¹ | ❌ | ⚠️ ¹⁶ |
+| **webOS** (LG) | ⚠️ ¹² | ⚠️ | ❌ | ❌ | ❌ | ❌ | ⚠️ ¹³ | ❌ | ❌ |
 
 **iOS is the most mature, best-tested path; Android is well-supported.** Both use
 standard Flutter / `adb` / `xcrun` tooling. **Tizen, tvOS, and webOS depend on
@@ -44,6 +44,7 @@ contributions are very welcome.**
 ¹³ Input over `ssap` is wired but currently device-blocked.
 ¹⁴ `adb shell input` (keyevent/tap/swipe/text), on devices and emulators. This is the OS-LEVEL plane: raw system input that bypasses Flutter's gesture arena, so a VM-service driver remains the primary in-app path. It reaches what that driver cannot — OS UI outside the Flutter view, non-debug builds, and D-pad navigation on Android TV.
 ¹⁵ `adb shell wm size` + `wm density` — the device pixel ratio `flutter_pointer` needs for logical coordinates and refuses to guess.
+¹⁶ Simulator only (`simctl openurl`). Apple provides no url-open verb for a physical device — `devicectl` has none and idb is simulator-only — so a physical target reports `{supported:false}` rather than silently doing nothing.
 </sub>
 
 ## Why
@@ -283,7 +284,7 @@ flutter-device record --platform android --duration-s 10 --output-path ./demo.mp
 
 ## MCP tools
 
-The server advertises **17 tools**. Each takes an optional `platform` arg
+The server advertises **19 tools**. Each takes an optional `platform` arg
 (`ios` | `android` | `tizen` | `tvos` | `webos`); omit it to use the default
 platform from your config.
 
@@ -293,6 +294,7 @@ platform from your config.
 | `flutter_setup` | Prepare the device for development |
 | `flutter_build` | Build the app package. `mode` picks release/profile/debug — reach for `profile` when measuring, since it is AOT-timed *and* keeps the VM service open. `dart_define` passes compile-time constants |
 | `flutter_deploy` | **Install + launch through a pty and return the captured `ws://…/ws` VM Service URI** to hand to a driver. Runs the guardrails: kills stale drivers first, recovers from `ENOSPC`, records the launch for hot reload/restart, and probes whether the build is Marionette-drivable |
+| `flutter_open_url` | **Open a URL on the device — the deep-link driver.** Drives custom schemes (`myapp://…`) and `https://…` App Links / universal links through the real OS plumbing, so intent-filters and domain associations are actually exercised. Android + Apple **simulators**; a physical iPhone/Apple TV reports `{supported:false}` because Apple provides no url-open verb — see [Deep links](#deep-links-flutter_open_url) |
 | `flutter_uninstall` | Remove the app from the device |
 | `flutter_kill_stale` | Kill stale launch/driver processes holding the device lock |
 | `flutter_hot_reload` | Real hot reload on the running app |
@@ -304,9 +306,59 @@ platform from your config.
 | `flutter_foreground` | Foreground the app again (mobile) |
 | `flutter_set_input_mode` | Select the input plane (dpad/pointer) — TV |
 | `flutter_key` | Send a remote/navigation key, or type text into the focused field — TV + Android |
-| `flutter_pointer` | Drive the pointer (move/click/scroll) — TV + Android |
+| `flutter_pointer` | Drive the pointer (move/click/scroll) — TV + Android. `click` takes `x`/`y` directly, so a tap is one call |
 | `flutter_geometry` | **Report the screen's real size and device pixel ratio** so `flutter_pointer`'s logical coordinates are read rather than guessed. Optionally cross-checks a supplied Flutter view size and warns when the ratio cannot be right — Android |
 | `flutter_system_prompt` | Detect/tap OS-level dialogs — iOS |
+
+## Deep links (`flutter_open_url`)
+
+A deep link is reachable only by *following* a link, so testing one otherwise
+means hand-rolling `adb shell am start` — or, on a physical iPhone, tapping a
+link by hand and giving up on the automated run.
+
+```bash
+flutter_open_url platform=android url='myapp://details?id=42'
+flutter_open_url platform=android url='https://example.com/details?id=42'
+flutter_open_url platform=ios target=simulator url='https://example.com/details?id=42'
+```
+
+This hands the URL to the **OS**, so the app's real intent-filter / URL-scheme /
+universal-link association runs. It is not in-app navigation — that belongs to a
+VM-service driver such as Marionette.
+
+| Platform | Support |
+| --- | --- |
+| **Android** (device + emulator) | Full — `adb shell am start -a android.intent.action.VIEW -d <url> <pkg>` |
+| **iOS / tvOS simulator** | Full — `xcrun simctl openurl <udid> <url>` |
+| **iOS / tvOS physical device** | `{supported:false}` — no Apple automation path exists |
+| **Tizen / webOS** | `{supported:false}` — `sdb shell` is disabled on Samsung devices |
+
+**Why a physical iPhone/Apple TV can't do this.** Checked against the toolchain,
+not assumed: `xcrun devicectl device` exposes copy / info / install /
+notification / orientation / process / reboot / sysdiagnose / uninstall and **no**
+url-open verb, and idb's `open`/`ui` commands reject a physical target
+("Target doesn't conform to FBSimulatorLifecycleCommands protocol"). The tool
+reports the gap rather than silently doing nothing — a no-op there reads as
+"the deep link is broken" and sends you debugging the app.
+
+**Apple targets are physical-first, so pass `target: "simulator"`.** Otherwise,
+on a host with a paired iPhone or Apple TV, the call resolves the physical device
+and correctly returns `{supported:false}` — the working path would be
+unreachable.
+
+**Android scoping.** The VIEW intent defaults to the project's resolved
+application id, because an unscoped https link can raise a browser-vs-app
+disambiguation chooser that an automated run cannot answer — the call then looks
+like a hang rather than a failure. Pass `package_or_bundle_id: ""` to go unscoped
+on purpose (what a real user tap does).
+
+**`am` lies about success.** It reports a refused intent on STDOUT while still
+exiting 0, so the output is classified rather than trusting the exit code. An
+unresolvable link comes back as a failure naming the App Links /
+`assetlinks.json` requirement. The very common
+`Warning: Activity not started, intent has been delivered to currently running
+top-most instance.` is treated as **success** — it is just re-delivery to an
+already-foregrounded app, which is what firing several links in a row looks like.
 
 ## Per-platform prerequisites
 

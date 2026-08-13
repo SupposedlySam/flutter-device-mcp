@@ -38,6 +38,12 @@ import {
   tail,
 } from "../cli.js";
 import {
+  androidOpenUrlFailure,
+  buildAdbOpenUrlCommand,
+  invalidOpenUrlReason,
+  OpenUrlResult,
+} from "../openUrl.js";
+import {
   allocateControlFifo,
   buildPtyCaptureCommand,
   launchAndCaptureUri as neutralLaunchAndCaptureUri,
@@ -512,6 +518,56 @@ export class AndroidAdapter implements PlatformAdapter {
   }
 
   /** Uninstall the app to free device space / reset state via `adb uninstall`. */
+  /**
+   * Open a URL on the device via `am start -a android.intent.action.VIEW`.
+   *
+   * Defaults the target package to this project's resolved application id: an
+   * unscoped VIEW intent for an https link can raise a disambiguation chooser
+   * (browser vs app) that an automated run cannot answer, and the call then
+   * looks like a hang rather than a failure. Pass an explicit id to target
+   * another app, or an empty string to deliberately go unscoped and let the OS
+   * disambiguate the way a real user tap does.
+   *
+   * `am` reports a refused intent on STDOUT while still exiting 0, so the
+   * output is classified rather than trusting the exit code.
+   */
+  async openUrl(
+    url: string,
+    packageOrBundleId?: string,
+    preference?: DeviceTargetPreference
+  ): Promise<OpenUrlResult> {
+    const invalid = invalidOpenUrlReason(url);
+    if (invalid) {
+      return { opened: false, url, reason: invalid };
+    }
+    const resolution = await this.discoverDevice(preference);
+    const pkg = packageOrBundleId ?? this.appId;
+    const command = buildAdbOpenUrlCommand(
+      resolution.target,
+      url,
+      pkg && pkg.length > 0 ? pkg : undefined
+    );
+    const result = await runShell(command, { timeoutMs: 30000 });
+    const refusal = androidOpenUrlFailure(result.combined);
+    if (!result.success || refusal) {
+      return {
+        opened: false,
+        url,
+        device: resolution.target,
+        command,
+        reason: refusal ?? `adb am start failed on ${resolution.target}.`,
+        output: tail(result.combined, 20),
+      };
+    }
+    return {
+      opened: true,
+      url,
+      device: resolution.target,
+      command,
+      output: tail(result.combined, 10),
+    };
+  }
+
   async uninstall(device: string, appId: string): Promise<CommandResult> {
     return runShell(`adb -s ${quote(device)} uninstall ${quote(appId)}`, {
       timeoutMs: 120000,

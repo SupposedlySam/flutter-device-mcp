@@ -26,6 +26,7 @@ export type CanonicalTool =
   | "flutter_key"
   | "flutter_pointer"
   | "flutter_geometry"
+  | "flutter_open_url"
   | "flutter_system_prompt";
 
 export interface ToolRoute {
@@ -56,6 +57,7 @@ const CANONICAL: Record<string, CanonicalTool> = {
   flutter_key: "flutter_key",
   flutter_pointer: "flutter_pointer",
   flutter_geometry: "flutter_geometry",
+  flutter_open_url: "flutter_open_url",
   flutter_system_prompt: "flutter_system_prompt",
 };
 

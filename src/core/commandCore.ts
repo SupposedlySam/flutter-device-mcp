@@ -733,6 +733,49 @@ export class CommandCore {
     );
   }
 
+  // =========== openUrl ==========
+  async openUrl(
+    args: CommonArgs & {
+      url: string;
+      package_or_bundle_id?: string;
+      target?: "device" | "simulator";
+      device_udid?: string;
+    }
+  ): Promise<CommandOutput> {
+    const adapter = this.adapterFor(args);
+    return this.guard(
+      "flutter_open_url",
+      { platform: adapter.platform, url: args.url },
+      async () => {
+        // An adapter with no open-url seam reports unsupported (mirroring
+        // screenshot/lifecycle), never an error.
+        if (!adapter.openUrl) {
+          return {
+            platform: adapter.platform,
+            opened: false,
+            supported: false,
+            url: args.url,
+            reason: `Opening a URL is not implemented on ${adapter.platform}.`,
+            hint:
+              adapter.platform === "tizen" || adapter.platform === "webos"
+                ? "Samsung/LG appliances expose no device-side launcher here (`sdb shell` is disabled on Samsung devices). Drive the app over the VM service instead."
+                : undefined,
+          };
+        }
+        // Target preference matters MORE here than for other verbs: Apple
+        // supports this on a SIMULATOR and not on a physical device, while
+        // discovery is physical-first — so without this a host with a paired
+        // iPhone could never reach the path that works.
+        const result = await adapter.openUrl(
+          args.url,
+          args.package_or_bundle_id,
+          { kind: args.target, udid: args.device_udid }
+        );
+        return { platform: adapter.platform, ...result };
+      }
+    );
+  }
+
   // =========== record ==========
   async record(
     args: CommonArgs & {
@@ -912,6 +955,29 @@ export class CommandCore {
             };
           }
           case "click": {
+            // Coordinates ON the click are staged first, so a tap is ONE call
+            // instead of the move-then-click pair a caller would otherwise
+            // write. Omitting them preserves the staged-position behavior.
+            const staged =
+              args.x !== undefined && args.y !== undefined
+                ? resolvePointerTarget(args)
+                : undefined;
+            if (staged) {
+              // Staging is reported as its OWN action: on a focus-driven
+              // platform `click` IS supported but positioning is not, so
+              // blaming "click" here would deny a verb that works.
+              try {
+                await input.pointerMove(staged.point.x, staged.point.y);
+              } catch (error) {
+                const notSupported = mapUnsupportedInput(
+                  error,
+                  adapter.platform,
+                  "click at coordinates"
+                );
+                if (notSupported) return notSupported;
+                throw error;
+              }
+            }
             try {
               await input.pointerClick();
             } catch (error) {
@@ -924,7 +990,15 @@ export class CommandCore {
               mode: input.mode,
               action: "click",
               sent: true,
-              note: "Activates the currently-focused element (KEY_ENTER) on focus/D-pad-driven platforms; pair it with flutter_key to move focus first.",
+              ...(staged
+                ? {
+                    coordinateSpace: staged.coordinateSpace,
+                    devicePosition: staged.point,
+                  }
+                : {}),
+              note: staged
+                ? "Tapped at the coordinates given on this call."
+                : "Taps the staged pointer position where the platform has one, or activates the currently-focused element (KEY_ENTER) on focus/D-pad-driven platforms. Pass x/y here to tap a coordinate in one call.",
             };
           }
           case "scroll": {

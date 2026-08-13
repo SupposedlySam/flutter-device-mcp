@@ -5,9 +5,9 @@ describe("buildToolList (ListTools advertisement)", () => {
   const { flutter } = buildToolList();
   const advertised = buildAdvertisedTools();
 
-  it("advertises exactly 18 flutter_ tools", () => {
-    expect(flutter).toHaveLength(18);
-    expect(advertised).toHaveLength(18);
+  it("advertises exactly 19 flutter_ tools", () => {
+    expect(flutter).toHaveLength(19);
+    expect(advertised).toHaveLength(19);
   });
 
   it("names every tool with the flutter_ prefix", () => {
@@ -26,6 +26,10 @@ describe("buildToolList (ListTools advertisement)", () => {
       "flutter_kill_stale",
       "flutter_hot_reload",
       "flutter_hot_restart",
+      // open_url is PROJECT-scoped: its Android package defaults to the
+      // project's resolved application id, so which project is in play changes
+      // what the call does.
+      "flutter_open_url",
     ];
     const DEVICE_SCOPED = [
       "flutter_key",

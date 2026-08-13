@@ -233,6 +233,18 @@ class FlutterDeviceServer {
               dpr: args.dpr as number | undefined,
             })
           );
+        case "flutter_open_url":
+          return this.json(
+            await core.openUrl({
+              ...common,
+              url: args.url as string,
+              package_or_bundle_id: args.package_or_bundle_id as
+                | string
+                | undefined,
+              target: args.target as "device" | "simulator" | undefined,
+              device_udid: args.device_udid as string | undefined,
+            })
+          );
         case "flutter_system_prompt":
           return this.json(
             await core.systemPrompt({

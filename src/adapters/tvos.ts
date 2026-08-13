@@ -69,6 +69,12 @@ import {
   tail,
 } from "../cli.js";
 import {
+  appleDeviceOpenUrlUnsupported,
+  buildSimctlOpenUrlCommand,
+  invalidOpenUrlReason,
+  OpenUrlResult,
+} from "../openUrl.js";
+import {
   buildPtyCaptureCommand,
   launchAndCaptureUri as neutralLaunchAndCaptureUri,
 } from "../launchCapture.js";
@@ -665,6 +671,53 @@ export class TvosAdapter implements PlatformAdapter {
    * Uninstall the app to free space / reset state. devicectl for a physical
    * Apple TV, simctl for a simulator — chosen from the last resolved kind.
    */
+  /**
+   * Open a URL on the resolved target — supported on a SIMULATOR only.
+   *
+   * `simctl openurl` drives the real URL-handling path (custom scheme or
+   * universal link), so it exercises the app's link plumbing rather than
+   * bypassing it. A physical Apple TV target has no equivalent: Apple ships no
+   * url-open verb on `devicectl`, and idb's open/ui commands reject a physical
+   * target. That returns `{supported:false}` with the reason, because a silent
+   * no-op there would read as "the deep link is broken".
+   *
+   * `packageOrBundleId` is accepted for seam parity and ignored: simctl routes
+   * the URL by scheme/association exactly as the OS would.
+   */
+  async openUrl(
+    url: string,
+    _packageOrBundleId?: string,
+    preference?: DeviceTargetPreference
+  ): Promise<OpenUrlResult> {
+    const invalid = invalidOpenUrlReason(url);
+    if (invalid) {
+      return { opened: false, url, reason: invalid };
+    }
+    const resolution = await this.discoverDevice(preference);
+    if (this.lastKind !== "simulator") {
+      return {
+        opened: false,
+        supported: false,
+        url,
+        device: resolution.target,
+        ...appleDeviceOpenUrlUnsupported("Apple TV"),
+      };
+    }
+    const command = buildSimctlOpenUrlCommand(resolution.target, url);
+    const result = await runShell(command, { timeoutMs: 30000 });
+    if (!result.success) {
+      return {
+        opened: false,
+        url,
+        device: resolution.target,
+        command,
+        reason: `simctl openurl failed on ${resolution.target}.`,
+        output: tail(result.combined, 20),
+      };
+    }
+    return { opened: true, url, device: resolution.target, command };
+  }
+
   async uninstall(device: string, appId: string): Promise<CommandResult> {
     const command =
       this.lastKind === "simulator"

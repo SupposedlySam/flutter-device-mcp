@@ -180,6 +180,40 @@ function buildFlutterTools(): ToolDefinition[] {
       },
     },
     {
+      name: "flutter_open_url",
+      description:
+        "Open a URL ON the device, exactly as tapping a link would — the DEEP-LINK / universal-link driver. Use it to exercise custom schemes (`myapp://…`) and `https://…` App Links / universal links end-to-end: it hands the URL to the OS, so the app's real intent-filter / URL-scheme / association plumbing runs (it does NOT navigate inside the app — that belongs to a VM-service driver such as Marionette). PER-PLATFORM reality (encoded so you don't re-derive it): ANDROID — full support via `adb shell am start -a android.intent.action.VIEW -d <url>`; the target package defaults to the project's resolved application id so an https link cannot raise a disambiguation chooser an automated run can't answer (pass package_or_bundle_id: \"\" to go unscoped on purpose). `am` refuses an intent on STDOUT while still exiting 0, so the output is classified — an unresolvable link is reported as a failure with the App Links/assetlinks.json hint, while the common 'delivered to currently running top-most instance' warning is treated as SUCCESS. iOS / tvOS SIMULATOR — full support via `xcrun simctl openurl`. iOS / tvOS PHYSICAL DEVICE — {supported:false}: Apple ships NO url-open verb on `xcrun devicectl device` and idb's open/ui commands are simulator-only, so there is no automation path; open the link by hand or use a simulator. Tizen/webOS — {supported:false} (`sdb shell` is disabled on Samsung devices, so there is no device-side launcher).",
+      inputSchema: {
+        type: "object",
+        properties: {
+          ...platformProp,
+          ...appDirProp,
+          url: {
+            type: "string",
+            description:
+              "The URL to open. Must include a scheme — e.g. 'myapp://details?id=42' or 'https://example.com/details?id=42'. Passed to the device verbatim (percent-encoding is preserved, not re-encoded), and shell-quoted at the boundary so '&' and other characters in a query string are safe.",
+          },
+          package_or_bundle_id: {
+            type: "string",
+            description:
+              "ANDROID only: the package the VIEW intent is scoped to. Defaults to the project's resolved application id, which prevents a browser-vs-app chooser on https links. Pass an empty string to send an UNSCOPED intent (letting the OS disambiguate, which is what a real user tap does). Ignored on Apple platforms, where simctl routes by scheme/association.",
+          },
+          target: {
+            type: "string",
+            enum: ["device", "simulator"],
+            description:
+              "iOS/tvOS: which target to open the URL on. This matters more here than on other tools — Apple supports opening a URL on a SIMULATOR and not on a physical device, while discovery is physical-first. On a host with a paired iPhone/Apple TV you MUST pass 'simulator' to reach the working path; otherwise the call resolves the physical device and correctly returns {supported:false}.",
+          },
+          device_udid: {
+            type: "string",
+            description:
+              "iOS/tvOS: pin a specific target for THIS call by id (simulator UUID or device id), overriding discovery without a host reload.",
+          },
+        },
+        required: ["url"],
+      },
+    },
+    {
       name: "flutter_uninstall",
       description:
         "Uninstall the app (`sdb -s <device> uninstall <app_id>` on Tizen) to free device space or reset to a clean state. Soft-succeeds when the app is not installed.",

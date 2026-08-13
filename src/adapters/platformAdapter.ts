@@ -346,6 +346,35 @@ export interface PlatformAdapter {
   ): Promise<DeviceGeometryReading | undefined>;
 
   /**
+   * Open a URL ON the device, exactly as tapping a link would — the deep-link
+   * / universal-link plane.
+   *
+   * OPTIONAL, and the per-platform reality is uneven for reasons outside this
+   * codebase: Android opens any URL (`am start -a VIEW`); Apple SIMULATORS open
+   * any URL (`simctl openurl`); Apple PHYSICAL devices have NO supported
+   * automation path (devicectl exposes no url-open verb and idb's ui/open are
+   * simulator-only), so those return `{supported:false}` with the reason rather
+   * than a silent no-op. Tizen/webOS do not implement it — `sdb shell` is
+   * disabled on Samsung devices, leaving no device-side launcher. Absence of
+   * the seam is surfaced by the server as `{ supported: false }`.
+   *
+   * `packageOrBundleId` scopes the open to one app where the platform supports
+   * it (Android). Passing it avoids a disambiguation chooser that an automated
+   * run cannot answer.
+   *
+   * `preference` steers target selection exactly like {@link discoverDevice}.
+   * It matters MORE here than elsewhere: Apple platforms support this verb on a
+   * simulator and NOT on a physical device, and discovery is physical-first — so
+   * without a way to ask for the simulator, a host with a paired iPhone could
+   * never reach the path that actually works.
+   */
+  openUrl?(
+    url: string,
+    packageOrBundleId?: string,
+    preference?: DeviceTargetPreference
+  ): Promise<import("../openUrl.js").OpenUrlResult>;
+
+  /**
    * Physical input controller. Real dual-mode input is implemented for TV
    * platforms; other platforms return a stub whose methods throw
    * NotImplementedError.
