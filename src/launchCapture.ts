@@ -4,9 +4,9 @@
  * A flutter runner only line-flushes its "A Dart VM Service ... is available
  * at:" message when attached to a tty; run through a plain pipe it buffers and
  * the URI never arrives. Callers therefore supply a launch command that has
- * already been wrapped in a pty allocator (`script` — via
- * {@link buildPtyCaptureCommand}, which owns the cross-platform `script`
- * signature this module documents needing). The child is detached and left
+ * already been wrapped in a pty allocator (via {@link buildPtyCaptureCommand} —
+ * `script` for a plain launch, or the FIFO→pty bridge when the launch wants a
+ * control channel for hot reload/restart). The child is detached and left
  * running (it holds the VM service open
  * for Marionette) while its stdout is tee'd to a temp log file that this module
  * polls for the URI.
@@ -20,15 +20,17 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { quote } from "./cli.js";
+import { createControlFifoPath, makeControlFifo } from "./ptyControl.js";
 import {
-  createControlFifoPath,
-  makeControlFifo,
-  withControlFifoStdin,
-} from "./ptyControl.js";
+  buildPtyForwardCommand,
+  ControlChannel,
+  resolvePtyForwarder,
+} from "./ptyForward.js";
 import { parseVmServiceUri, VmServiceUri } from "./vmServiceUri.js";
 import { LaunchOutcome } from "./types.js";
 
 export type { LaunchResult, LaunchFailure, LaunchOutcome } from "./types.js";
+export type { ControlChannel } from "./ptyForward.js";
 export { isLaunchFailure } from "./types.js";
 
 /** Create a unique temp log path for one launch. */
@@ -67,34 +69,46 @@ export function buildPtyCaptureCommand(opts: {
   cwd?: string;
   platform?: NodeJS.Platform;
   /**
-   * When set, the flutter runner's STDIN is redirected to read from this control
-   * FIFO (opened read-write so it never hits EOF) so `r`/`R` can be appended to
-   * drive a real hot reload/restart later. `script` still owns the pty for
-   * flutter's terminal/stdout. Undefined → no control channel (the default,
-   * behavior-identical to before). See ptyControl.
+   * When set, the runner is launched through the FIFO→pty bridge instead of
+   * `script`, so `r`/`R` appended to the FIFO reach flutter's key handler on a
+   * REAL terminal (the bridge owns the pty, so `script` is not involved and the
+   * host `script` signature no longer applies). Undefined → no control channel:
+   * the plain `script` form above, behavior-identical to before. See ptyForward.
    */
-  controlFifoPath?: string;
+  controlChannel?: ControlChannel;
 }): string {
-  const { inner, cwd, platform = process.platform, controlFifoPath } = opts;
-  const wiredInner = controlFifoPath
-    ? withControlFifoStdin(inner, controlFifoPath)
-    : inner;
-  const script =
-    platform === "darwin"
-      ? `exec script -q /dev/null /bin/sh -c ${quote(wiredInner)}`
-      : `exec script -q -c ${quote(wiredInner)} /dev/null`;
-  return cwd ? `cd ${quote(cwd)} && ${script}` : script;
+  const { inner, cwd, platform = process.platform, controlChannel } = opts;
+  const launch = controlChannel
+    ? buildPtyForwardCommand({
+        forwarder: controlChannel.forwarder,
+        fifoPath: controlChannel.fifoPath,
+        inner,
+      })
+    : platform === "darwin"
+      ? `exec script -q /dev/null /bin/sh -c ${quote(inner)}`
+      : `exec script -q -c ${quote(inner)} /dev/null`;
+  return cwd ? `cd ${quote(cwd)} && ${launch}` : launch;
 }
 
 /**
- * Allocate a control FIFO for a launch, returning its path on success or
- * undefined when the FIFO could not be created (the launch then proceeds with no
- * control channel and reload/restart fall back to the VM service). One call so
- * adapters don't each repeat createControlFifoPath + makeControlFifo.
+ * Allocate a control channel for a launch — the FIFO plus the pty bridge that
+ * makes it reach flutter — or undefined when either half is unavailable (no
+ * `mkfifo`, or no usable python3 for the bridge).
+ *
+ * BOTH halves are required, which is why they are allocated together: a FIFO
+ * with no bridge accepts every write and delivers none of them, and recording
+ * that as a control channel is what made `flutter_hot_restart` report a restart
+ * it had not performed. Undefined means the launch proceeds with NO channel —
+ * hot reload falls back to the VM service and hot restart says it cannot be
+ * driven — which is a worse inner loop but an honest one.
  */
-export function allocateControlFifo(): string | undefined {
+export function allocateControlChannel(
+  deps: { forwarder?: () => ControlChannel["forwarder"] | undefined } = {}
+): ControlChannel | undefined {
+  const forwarder = (deps.forwarder ?? resolvePtyForwarder)();
+  if (!forwarder) return undefined;
   const fifoPath = createControlFifoPath();
-  return makeControlFifo(fifoPath) ? fifoPath : undefined;
+  return makeControlFifo(fifoPath) ? { fifoPath, forwarder } : undefined;
 }
 
 /** One evaluation of the launch log so far: URI found, failed, or keep polling. */
@@ -213,10 +227,10 @@ export async function launchAndCaptureUri(
     cwd,
     env: process.env,
     detached: true,
-    // stdin stays "ignore": when a control FIFO is used, the flutter runner's
-    // stdin is redirected to the FIFO INSIDE the command (see
-    // withControlFifoStdin), not through this spawn's stdin — that keeps the
-    // durable-across-restarts property (the FIFO is on disk, not this handle).
+    // stdin stays "ignore": when a control channel is used, the FIFO is read by
+    // the pty bridge INSIDE the command (see ptyForward), not through this
+    // spawn's stdin — that keeps the durable-across-restarts property (the FIFO
+    // is a path on disk, not this handle).
     stdio: ["ignore", logStream, logStream],
   });
 

@@ -9,7 +9,7 @@
  * ffmpeg is not fatal — the recorder degrades those two paths to a structured
  * `{ supported: false }` with an install hint rather than failing.
  *
- * As with {@link locatePymobiledevice3}, the MCP server is often launched by a
+ * As with {@link resolvePymobiledevice3}, the MCP server is often launched by a
  * GUI app whose process PATH omits Homebrew bins, so a bare PATH lookup can miss
  * an installed `ffmpeg`. This searches well-known install dirs IN ADDITION to the
  * inherited PATH, honors a `FLUTTER_DEVICE_FFMPEG` override, and is called

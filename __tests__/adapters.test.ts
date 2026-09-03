@@ -35,9 +35,10 @@ jest.unstable_mockModule("../src/launchCapture.js", () => ({
   // (pinned byte-for-byte to the real helper in launchCapture.test.ts) rather
   // than a per-file copy.
   buildPtyCaptureCommand: mockBuildPtyCaptureCommand,
-  // allocateControlFifo is a thin FIFO-allocator the iOS launch calls; in tests
-  // there is no live daemon, so stand it in as "no control channel" (undefined).
-  allocateControlFifo: () => undefined,
+  // allocateControlChannel mints the FIFO + pty bridge the iOS/Android launches
+  // use; in tests there is no live daemon, so stand it in as "no control
+  // channel" (undefined).
+  allocateControlChannel: () => undefined,
 }));
 
 const okResult = {

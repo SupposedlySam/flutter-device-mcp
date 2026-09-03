@@ -45,6 +45,7 @@ import { VmServiceClient } from "../vmServiceClient.js";
 import { hotReload, ReloadOutcome } from "../hotReload.js";
 import { hotControl } from "../hotControl.js";
 import { sendControlChar, removeControlFifo } from "../ptyControl.js";
+import { NO_PTY_FORWARDER_REASON } from "../ptyForward.js";
 import { confirmHotAction, logSize } from "../hotConfirm.js";
 import {
   MarionetteProbeResult,
@@ -447,6 +448,11 @@ export class CommandCore {
         success: true,
         launched: true,
         deviceWarning,
+        controlChannel: outcome.controlFifoPath ? true : undefined,
+        controlChannelWarning:
+          outcome.vmServiceUriWs && !outcome.controlFifoPath
+            ? NO_PTY_FORWARDER_REASON
+            : undefined,
         environmentDiagnostic,
         staleKilled: killed,
         enospcRecoveryAttempted: recovered,
@@ -755,7 +761,10 @@ export class CommandCore {
             reason:
               "No pty control channel is recorded for this launch, so a hot restart cannot be " +
               "driven (it re-runs main() via the flutter tool's stdin `R`, not reachable over the VM " +
-              "service). Redeploy with flutter_deploy to establish the control channel.",
+              "service). Redeploy with flutter_deploy to establish the control channel. If the " +
+              "redeploy's response carries a controlChannelWarning, the host is missing what the " +
+              "channel needs: " +
+              NO_PTY_FORWARDER_REASON,
           };
         }
 
@@ -791,9 +800,10 @@ export class CommandCore {
               "within the confirmation window. The write landing is not the restart happening, and " +
               "there is no VM-service equivalent to fall back to (reloadSources cannot re-run " +
               "main()), so this is reported as a failure rather than a restart the app never " +
-              "performed. The flutter tool only reads `r`/`R` when its stdin is a terminal, which a " +
-              "FIFO is not — check the launch log for a still-compiling restart or an exited " +
-              "daemon, then redeploy with flutter_deploy to pick up the change.",
+              "performed. The launch drives `R` through a pty (the flutter tool only reads keys on " +
+              "a terminal), so a channel that accepts the write should act on it: check the launch " +
+              "log for a still-compiling restart or an exited daemon, then redeploy with " +
+              "flutter_deploy to pick up the change.",
           };
         }
         if (!outcome.triggered) {
@@ -832,6 +842,7 @@ export class CommandCore {
       output_path?: string;
       include_base64?: boolean;
       device_udid?: string;
+      target?: "device" | "simulator";
     }
   ): Promise<CommandOutput> {
     const adapter = this.adapterFor(args);
@@ -851,6 +862,7 @@ export class CommandCore {
           outPath: args.output_path,
           includeBase64: args.include_base64,
           deviceUdid: args.device_udid,
+          target: args.target,
         });
         return { platform: adapter.platform, ...result };
       }
@@ -908,6 +920,7 @@ export class CommandCore {
       fps?: number;
       format?: "mp4" | "gif";
       device_udid?: string;
+      target?: "device" | "simulator";
     }
   ): Promise<CommandOutput> {
     const adapter = this.adapterFor(args);
@@ -941,6 +954,7 @@ export class CommandCore {
           fps,
           format,
           deviceUdid: args.device_udid,
+          target: args.target,
         });
         return { platform: adapter.platform, ...result };
       }

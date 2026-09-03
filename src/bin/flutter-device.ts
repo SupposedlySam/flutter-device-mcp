@@ -100,8 +100,8 @@ Commands:
   foreground          Bring the app back to the foreground (mobile)
   hot-reload          Real hot reload on the running app (--device, --timeout-ms)
   hot-restart         Hot restart (re-run main()) on the running app
-  screenshot          Capture the screen to a PNG (--output-path, --include-base64)
-  record              Record a bounded screen clip (--duration-s, --fps, --format mp4|gif)
+  screenshot          Capture the screen to a PNG (--output-path, --include-base64, --target device|simulator)
+  record              Record a bounded screen clip (--duration-s, --fps, --format mp4|gif, --target device|simulator)
   set-input-mode      Select the input plane (--mode dpad|pointer) — TV
   key                 Send a remote/navigation key (--key UP|DOWN|ENTER|…) or type text (--text "hi")
   geometry            Report screen size + device pixel ratio (--view-width/--view-height to cross-check)
@@ -117,6 +117,10 @@ Global flags:
                       iOS/tvOS: a flutter id, a devicectl id, or a device/simulator name).
                       Accepted by deploy, uninstall, terminate, background, foreground,
                       screenshot, record, key, pointer and geometry.
+  --target <kind>     iOS/tvOS: which CLASS of target to act on — device (real hardware) or
+                      simulator. Accepted by build, deploy, open-url, screenshot and record.
+                      Omitted, resolution is physical-first, so a capture lands on the machine
+                      a deploy would have used.
 
 Every command prints a JSON result and exits non-zero on failure.`;
 

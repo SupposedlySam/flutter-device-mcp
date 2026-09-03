@@ -44,8 +44,9 @@ import {
   OpenUrlResult,
 } from "../openUrl.js";
 import {
-  allocateControlFifo,
+  allocateControlChannel,
   buildPtyCaptureCommand,
+  ControlChannel,
   launchAndCaptureUri as neutralLaunchAndCaptureUri,
 } from "../launchCapture.js";
 import { logger } from "../logger.js";
@@ -160,7 +161,7 @@ export function buildAndroidPtyLaunchCommand(
   flutterCommand = "flutter",
   platform: NodeJS.Platform = process.platform,
   mode: AndroidLaunchMode = ANDROID_DEFAULT_LAUNCH_MODE,
-  controlFifoPath?: string,
+  controlChannel?: ControlChannel,
   extraArgs: string[] = []
 ): string {
   // `extraArgs` carries already-quoted --dart-define tokens: on Android the
@@ -170,7 +171,7 @@ export function buildAndroidPtyLaunchCommand(
   const inner =
     `${flutterCommand} run ${flutterModeFlag(mode)} -d ${quote(serial)}` +
     suffix;
-  return buildPtyCaptureCommand({ inner, cwd: appDir, platform, controlFifoPath });
+  return buildPtyCaptureCommand({ inner, cwd: appDir, platform, controlChannel });
 }
 
 /** Configuration an AndroidAdapter needs from the server. */
@@ -515,12 +516,14 @@ export class AndroidAdapter implements PlatformAdapter {
     _mode?: BuildMode,
     dartDefine?: Record<string, string>
   ): Promise<LaunchOutcome> {
-    // Allocate a durable control FIFO so flutter_hot_reload/flutter_hot_restart
-    // can drive `r`/`R` on this running `flutter run` daemon over its own stdin
-    // (the authoritative reload/restart path — `flutter run` accepts the same
-    // interactive keys on Android as on iOS). Undefined when mkfifo is
-    // unavailable — the launch still proceeds; reload falls back to the VM service.
-    const controlFifoPath = allocateControlFifo();
+    // Allocate a durable control channel (FIFO + pty bridge) so
+    // flutter_hot_reload/flutter_hot_restart can drive `r`/`R` on this running
+    // `flutter run` daemon over its own stdin — the authoritative reload/restart
+    // path, and `flutter run` accepts the same interactive keys on Android as on
+    // iOS. Undefined when the host can't provide both halves (no mkfifo, or no
+    // usable python3): the launch still proceeds, reload falls back to the VM
+    // service, and restart reports that it cannot be driven.
+    const controlChannel = allocateControlChannel();
     // The launch mode is the one the deploy resolved and recorded in install()
     // (`_mode` is already folded into it there), so it is not re-read here.
     const command = buildAndroidPtyLaunchCommand(
@@ -529,7 +532,7 @@ export class AndroidAdapter implements PlatformAdapter {
       this.flutter,
       process.platform,
       this.launchMode,
-      controlFifoPath,
+      controlChannel,
       dartDefineArgs(dartDefine).map(quote)
     );
     return neutralLaunchAndCaptureUri(
@@ -537,7 +540,7 @@ export class AndroidAdapter implements PlatformAdapter {
       this.config.appDir,
       timeoutMs,
       ANDROID_FAILURE_SIGNATURES,
-      controlFifoPath
+      controlChannel?.fifoPath
     );
   }
 

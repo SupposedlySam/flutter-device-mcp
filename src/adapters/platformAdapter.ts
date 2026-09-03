@@ -317,6 +317,14 @@ export interface PlatformAdapter {
     outPath?: string;
     includeBase64?: boolean;
     deviceUdid?: string;
+    /**
+     * Force the CLASS of target to capture where a platform has two (iOS/tvOS:
+     * `device` = real hardware, `simulator` = a booted simulator). Without it
+     * resolution is physical-first, matching deploy — so a capture lands on the
+     * machine a deploy would have used. Ignored by platforms with one target
+     * class.
+     */
+    target?: "device" | "simulator";
   }): Promise<ScreenshotResult>;
 
   /**
@@ -347,6 +355,8 @@ export interface PlatformAdapter {
      * another way ignore it.
      */
     deviceUdid?: string;
+    /** Force the class of target to record, as for {@link PlatformAdapter.screenshot}. */
+    target?: "device" | "simulator";
   }): Promise<RecordResult>;
 
   /**

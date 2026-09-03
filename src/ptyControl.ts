@@ -17,41 +17,38 @@
  * control char to reach the same running daemon, mirroring how the registry makes
  * the VM-service URI durable.
  *
- * THE EOF TRAP + FIX: a plain `flutter < fifo` reader exits the instant the last
- * writer closes the FIFO (read returns EOF → flutter quits). We defeat that by
- * having the inner command open the FIFO READ-WRITE on a dedicated fd
- * (`exec 3<>fifo`) and read from that fd (`<&3`): the reader itself is also a
- * writer, so the pipe never sees zero writers and EOF never fires between our
- * one-shot appends. Verified on macOS: three sequential `printf > fifo` appends
- * were all received and the reader stayed alive.
+ * THE EOF TRAP + FIX: a FIFO reader sees EOF the instant the last writer closes
+ * (so a one-shot `printf > fifo` would end the stream after the first control
+ * char). The reader therefore opens the FIFO READ-WRITE, making itself a writer
+ * too, so the pipe never sees zero writers and EOF never fires between appends.
+ * Verified on macOS: sequential `printf > fifo` appends were all received and the
+ * reader stayed alive.
  *
- * `script` still owns a real pty for flutter's own terminal (its VM-service URI
- * line only line-flushes under a pty); this module only redirects flutter's STDIN
- * to the FIFO, leaving `script`'s pty for flutter's stdout/terminal intact.
+ * WHY A PTY BRIDGE SITS BETWEEN THE FIFO AND FLUTTER, MEASURED. Putting the FIFO
+ * on flutter's fd 0 directly does NOT let it read keys: `Terminal.singleCharMode`
+ * returns early unless `stdinHasTerminal`, and the keystroke stream is only
+ * meaningful in single-char mode — so with a FIFO on fd 0 flutter never enters
+ * the mode and never processes `r`/`R`, while `printHelp` still prints the key
+ * legend unconditionally. The legend is what made this look like it worked.
+ * Feeding the FIFO to `script` instead (so flutter would inherit script's pty)
+ * fails too: macOS `script` ioctls its OWN stdin at startup and dies with
+ * `tcgetattr/ioctl: Operation not supported on socket` — reproduced directly.
  *
- * WHAT THIS CANNOT DO, MEASURED. Putting the FIFO on flutter's fd 0 does NOT let
- * it read keys. `Terminal.singleCharMode`'s setter returns early unless
- * `stdinHasTerminal`, and the keystroke stream is only meaningful in single-char
- * mode — so with a FIFO on fd 0 flutter never enters the mode and never
- * processes `r`/`R`, while `printHelp` still prints the key legend
- * unconditionally. The legend is therefore not evidence that keys are being
- * read, which is what made this look like it worked.
+ * So the launch runs through `scripts/pty-control-forward.py` (see ptyForward),
+ * which opens the FIFO read-write, forks flutter on a real pty, and copies
+ * FIFO→pty and pty→stdout. Flutter gets a terminal on stdin (single-char mode
+ * engages, `r`/`R` are read) AND its stdout still line-flushes through a pty for
+ * the URI capture, while the durable half stays a path on disk that any later
+ * MCP process can write to. A host with no usable python3 gets NO control
+ * channel at all rather than one that swallows writes.
  *
- * Feeding the FIFO to `script` instead — so flutter would inherit script's pty
- * and see a terminal — fails outright: macOS `script` ioctls its OWN stdin at
- * startup and dies with `tcgetattr/ioctl: Operation not supported on socket`.
- * Reaching flutter's key handler needs a real tty between the FIFO and the
- * daemon; this module does not provide one.
- *
- * So the write landing is kept as what it is — a write landing — and the caller
- * confirms the EFFECT in the launch log (see hotConfirm) before reporting one,
- * falling back to the VM-service reload when no acknowledgement appears.
+ * The write landing is still kept as what it is — a write landing — and the
+ * caller confirms the EFFECT in the launch log before reporting one.
  */
 import { execFileSync } from "child_process";
 import fs from "fs";
 import os from "os";
 import path from "path";
-import { quote } from "./cli.js";
 
 /** The two flutter interactive control chars this channel drives. */
 export type FlutterControlChar = "r" | "R";
@@ -81,23 +78,6 @@ export function makeControlFifo(fifoPath: string): boolean {
   } catch {
     return false;
   }
-}
-
-/**
- * Rewrite a flutter-runner inner command so its STDIN reads from the control
- * FIFO (opened read-write so EOF never fires). The result is still a single
- * `/bin/sh -c`-safe compound string, so it drops straight into
- * {@link buildPtyCaptureCommand}'s `inner`.
- *
- * Example: `flutter run --debug -d 'X'` becomes
- *   `exec 3<>'/tmp/ctl.fifo'; flutter run --debug -d 'X' <&3`
- *
- * The `exec 3<>fifo` runs first (opening the durable read-write fd), then flutter
- * runs with its stdin bound to fd 3. Because fd 3 is inherited read-write, the
- * pipe always has a writer and flutter's stdin never hits EOF between our appends.
- */
-export function withControlFifoStdin(inner: string, fifoPath: string): string {
-  return `exec 3<>${quote(fifoPath)}; ${inner} <&3`;
 }
 
 /**

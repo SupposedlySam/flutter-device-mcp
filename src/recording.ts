@@ -62,6 +62,21 @@ export interface RecordResult {
   hint?: string;
   /** A non-fatal note surfaced alongside a successful capture (e.g. the fps caveat). */
   note?: string;
+  /**
+   * The id of the target this recording was ROUTED to, reported on success AND
+   * on failure for the same reason {@link ScreenshotResult.device} is: a clip of
+   * the wrong machine is otherwise indistinguishable from a clip of the right one.
+   */
+  device?: string;
+  /** Which class of target was recorded — a simulator or real hardware. */
+  deviceKind?: "device" | "simulator";
+  /** Carried through when device resolution fell back off a pin (see the screenshot seam). */
+  deviceWarning?: string;
+  /**
+   * Set when a configured `FLUTTER_DEVICE_PYMOBILEDEVICE3` had to be rejected (see
+   * {@link ScreenshotResult.pymobiledevice3Warning}).
+   */
+  pymobiledevice3Warning?: string;
 }
 
 /** Clamp/normalize a requested duration to a sane bound (seconds). */

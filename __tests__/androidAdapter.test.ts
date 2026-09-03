@@ -26,17 +26,26 @@ const neutralLaunchAndCaptureUri =
     ) => Promise<unknown>
   >();
 
-// allocateControlFifo is called by the Android launch to mint the control FIFO
-// that flutter_hot_reload/flutter_hot_restart write `r`/`R` to. Stubbed to a
-// deterministic path so tests can assert it is threaded into the launch command
-// AND passed to the neutral core (which records it on the launch).
-const allocateControlFifo = jest.fn<() => string | undefined>();
+// allocateControlChannel is called by the Android launch to mint the control
+// channel that flutter_hot_reload/flutter_hot_restart write `r`/`R` to: the
+// durable FIFO plus the pty bridge that carries it into flutter's terminal.
+// Stubbed to deterministic values so tests can assert both are threaded into the
+// launch command AND that the FIFO path reaches the neutral core (which records
+// it on the launch).
 const ANDROID_FIFO = "/tmp/flutter-device-mcp-control-android.fifo";
+const ANDROID_BRIDGE = {
+  python: "/usr/bin/python3",
+  script: "/pkg/scripts/pty-control-forward.py",
+};
+const ANDROID_CHANNEL = { fifoPath: ANDROID_FIFO, forwarder: ANDROID_BRIDGE };
+const allocateControlChannel = jest.fn<
+  () => { fifoPath: string; forwarder: { python: string; script: string } } | undefined
+>();
 
 jest.unstable_mockModule("../src/launchCapture.js", () => ({
   launchAndCaptureUri: neutralLaunchAndCaptureUri,
   isLaunchFailure: (o: { failed?: boolean }) => o?.failed === true,
-  allocateControlFifo,
+  allocateControlChannel,
   // buildPtyCaptureCommand is pure; the adapter's buildAndroidPtyLaunchCommand
   // delegates to it, so the mocked module must still expose it. Use the ONE
   // shared stand-in (pinned byte-for-byte to the real helper in
@@ -107,11 +116,11 @@ function mockDiscovery() {
 beforeEach(() => {
   runShell.mockReset();
   neutralLaunchAndCaptureUri.mockReset();
-  allocateControlFifo.mockReset();
+  allocateControlChannel.mockReset();
   runShell.mockResolvedValue(okResult);
   neutralLaunchAndCaptureUri.mockResolvedValue({ failed: false });
-  // By default the launch mints a control FIFO (the on-device happy path).
-  allocateControlFifo.mockReturnValue(ANDROID_FIFO);
+  // By default the launch mints a full control channel (the on-device happy path).
+  allocateControlChannel.mockReturnValue(ANDROID_CHANNEL);
   runTimedRecorder.mockResolvedValue({ ok: true, output: "" });
 });
 
@@ -274,7 +283,9 @@ describe("AndroidAdapter.launchAndCaptureUri (deploy = flutter run)", () => {
     const [command, cwd, timeoutMs, failureSignatures] =
       neutralLaunchAndCaptureUri.mock.calls[0];
     expect(cwd).toBe("/repo/app");
-    expect(command).toMatch(/\bscript -q\b/);
+    // A launch with a control channel gets its pty from the FIFO→pty bridge
+    // rather than `script` (which cannot take a FIFO as its own stdin).
+    expect(command).toContain(ANDROID_BRIDGE.script);
     expect(command).toContain("flutter run --debug -d");
     expect(command).toContain(SERIAL);
     // No --no-build: flutter run does the apk install itself on Android.
@@ -283,23 +294,24 @@ describe("AndroidAdapter.launchAndCaptureUri (deploy = flutter run)", () => {
     expect(failureSignatures).toBe(ANDROID_FAILURE_SIGNATURES);
   });
 
-  it("allocates a control FIFO and threads it into BOTH the launch command and the neutral core (so hot_reload/hot_restart find a channel)", async () => {
+  it("allocates a control channel and threads it into BOTH the launch command and the neutral core (so hot_reload/hot_restart find a channel)", async () => {
     await android().launchAndCaptureUri(SERIAL, 4242);
-    // The launch mints exactly one control FIFO.
-    expect(allocateControlFifo).toHaveBeenCalledTimes(1);
+    // The launch mints exactly one control channel.
+    expect(allocateControlChannel).toHaveBeenCalledTimes(1);
     const [command, , , , controlFifoPath] =
       neutralLaunchAndCaptureUri.mock.calls[0];
     // The neutral core receives the FIFO path as its 5th arg — this is what gets
     // persisted onto the LaunchRecord (controlFifoPath) so a later
     // flutter_hot_reload (`r`) / flutter_hot_restart (`R`) resolves it.
     expect(controlFifoPath).toBe(ANDROID_FIFO);
-    // The pty launch command wires the SAME FIFO into flutter's stdin (via
-    // buildAndroidPtyLaunchCommand → buildPtyCaptureCommand → withControlFifoStdin).
+    // The launch command runs the runner through the bridge, fed by the SAME
+    // FIFO — the pty is what lets flutter read `r`/`R` at all.
     expect(command).toContain(ANDROID_FIFO);
+    expect(command).toContain(ANDROID_BRIDGE.script);
   });
 
-  it("proceeds with no control channel when the FIFO cannot be allocated (undefined threads through, launch still happens)", async () => {
-    allocateControlFifo.mockReturnValue(undefined);
+  it("proceeds with no control channel when it cannot be allocated (undefined threads through, launch still happens)", async () => {
+    allocateControlChannel.mockReturnValue(undefined);
     await android().launchAndCaptureUri(SERIAL, 4242);
     expect(neutralLaunchAndCaptureUri).toHaveBeenCalledTimes(1);
     const [command, , , , controlFifoPath] =
@@ -759,24 +771,27 @@ describe("buildAndroidPtyLaunchCommand", () => {
     expect(cmd).not.toContain("--profile");
   });
 
-  it("wires the control FIFO into flutter's stdin when a controlFifoPath is passed", () => {
+  it("runs the runner through the FIFO→pty bridge when a control channel is passed", () => {
     const cmd = buildAndroidPtyLaunchCommand(
       "/repo/app",
       SERIAL,
       "flutter",
       "darwin",
       "debug",
-      ANDROID_FIFO
+      ANDROID_CHANNEL
     );
-    // Delegated to buildPtyCaptureCommand → withControlFifoStdin, which opens the
-    // FIFO on fd 3 and redirects the runner's stdin from it (`<&3`) so `r`/`R`
-    // appended to the FIFO reach the flutter daemon.
+    // Delegated to buildPtyCaptureCommand: the bridge process owns the pty and
+    // reads the FIFO, so the runner's stdin is a TERMINAL and `r`/`R` appended to
+    // the FIFO actually reach flutter's key handler. A plain `<&3` redirect (a
+    // FIFO on fd 0) does not — flutter never enters single-char mode.
     expect(cmd).toContain(ANDROID_FIFO);
-    expect(cmd).toContain("<&3");
+    expect(cmd).toContain(ANDROID_BRIDGE.python);
+    expect(cmd).toContain(ANDROID_BRIDGE.script);
+    expect(cmd).not.toContain("<&3");
     expect(cmd).toContain("flutter run --debug -d");
   });
 
-  it("omits any stdin redirect when no controlFifoPath is passed", () => {
+  it("omits the bridge when no control channel is passed", () => {
     const cmd = buildAndroidPtyLaunchCommand(
       "/repo/app",
       SERIAL,
