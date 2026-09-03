@@ -21,6 +21,7 @@
   "files": [
     "dist",
     "scripts/run.mjs",
+    "scripts/run.sh",
     "README.md",
     "LICENSE"
   ],

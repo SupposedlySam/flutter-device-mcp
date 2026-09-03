@@ -36,3 +36,45 @@ describe("hotControl", () => {
     expect(outcome.char).toBe("r");
   });
 });
+
+describe("hotControl confirmation", () => {
+  it("reports confirmed:false when the write lands but flutter never acts", async () => {
+    // The failure this exists for: the FIFO accepts the byte because it has a
+    // reader, and flutter's key handler is not that reader.
+    const outcome = await hotControl(
+      "reload",
+      async () => true,
+      async () => false
+    );
+    expect(outcome.triggered).toBe(true);
+    expect(outcome.confirmed).toBe(false);
+  });
+
+  it("reports confirmed:true when flutter acknowledges", async () => {
+    const outcome = await hotControl(
+      "reload",
+      async () => true,
+      async () => true
+    );
+    expect(outcome.confirmed).toBe(true);
+  });
+
+  it("does not ask for confirmation when the write itself failed", async () => {
+    let asked = 0;
+    const outcome = await hotControl(
+      "reload",
+      async () => false,
+      async () => {
+        asked += 1;
+        return true;
+      }
+    );
+    expect(asked).toBe(0);
+    expect(outcome.confirmed).toBeUndefined();
+  });
+
+  it("omits confirmed entirely when nobody looked", async () => {
+    const outcome = await hotControl("reload", async () => true);
+    expect("confirmed" in outcome).toBe(false);
+  });
+});
