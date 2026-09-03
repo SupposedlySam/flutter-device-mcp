@@ -7,13 +7,17 @@
  * the pointer scroll, and `input text` for typing into the focused field. Works
  * on physical devices and emulators alike (both are adb targets).
  *
- * This is the OS-LEVEL FALLBACK input plane, not the primary in-app driver:
- * adb injects raw system input events, bypassing Flutter's gesture-arena
- * semantics (no widget/element addressing, no synchronization with the frame
- * pipeline). Marionette over the Dart VM service remains the primary way to
- * drive the app's own widgets; this plane covers what Marionette cannot reach —
- * OS UI outside the Flutter view, non-debug builds, and D-pad-style navigation
- * (Android TV).
+ * This is the OS-LEVEL input plane, and on Android it is the one to reach for
+ * FIRST for navigation and position-based input — it is a single adb call with
+ * no VM-service round trip, and its coordinates are device pixels, the same
+ * space `flutter_screenshot` returns. A driver over the Dart VM service (e.g.
+ * Marionette) is the fallback here, for what this plane genuinely cannot
+ * serve: adb injects raw system input events, bypassing Flutter's
+ * gesture-arena semantics (no widget/element addressing, no synchronization
+ * with the frame pipeline), so a VM-service driver is the way to address the
+ * app's own widgets by key or text. This plane, in turn, covers what a
+ * VM-service driver cannot reach — OS UI outside the Flutter view, non-debug
+ * builds, and D-pad-style navigation (Android TV).
  *
  * The device serial is NOT held here directly: it is resolved LAZILY via an
  * injected resolver so the controller always targets the currently-connected
