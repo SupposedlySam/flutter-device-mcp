@@ -106,6 +106,10 @@ describe("resolveDeviceTarget", () => {
     expect(resolution?.source).toBe("discovered");
     expect(resolution?.warning).toContain("192.0.2.6:26101");
     expect(resolution?.warning).toContain("192.0.2.7:26101");
+    // The warning tells the reader which variable to go and fix, so the name has
+    // to be the one the config layer actually reads.
+    expect(resolution?.warning).toContain("FLUTTER_DEVICE_TIZEN_DEVICE");
+    expect(resolution?.warning).not.toContain("FLUTTER_DEVICE_FLUTTER_DEVICE");
   });
 
   it("treats a pinned device that is listed but offline as stale", () => {
@@ -127,6 +131,8 @@ describe("resolveDeviceTarget", () => {
       source: "stale-pin",
       warning: expect.stringContaining("no online device"),
     });
+    expect(resolution?.warning).toContain("FLUTTER_DEVICE_TIZEN_DEVICE");
+    expect(resolution?.warning).not.toContain("FLUTTER_DEVICE_FLUTTER_DEVICE");
   });
 
   it("falls back to the first online device from sdb output", () => {

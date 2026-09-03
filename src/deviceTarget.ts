@@ -109,7 +109,7 @@ export function resolveDeviceTarget(
         target: fallback,
         source: "discovered",
         warning:
-          `FLUTTER_DEVICE_FLUTTER_DEVICE_TIZEN_DEVICE is pinned to ${pinned}, but that target is not an ` +
+          `FLUTTER_DEVICE_TIZEN_DEVICE is pinned to ${pinned}, but that target is not an ` +
           `online sdb device (stale pin — the device may have moved DHCP ` +
           `address). Using the first online sdb device ${fallback} instead.`,
       };
@@ -119,7 +119,7 @@ export function resolveDeviceTarget(
       target: pinned,
       source: "stale-pin",
       warning:
-        `FLUTTER_DEVICE_FLUTTER_DEVICE_TIZEN_DEVICE is pinned to ${pinned}, but that target is not an ` +
+        `FLUTTER_DEVICE_TIZEN_DEVICE is pinned to ${pinned}, but that target is not an ` +
         `online sdb device and no online device was found to fall back to. ` +
         `Proceeding with the pin; expect failures if the device moved.`,
     };
