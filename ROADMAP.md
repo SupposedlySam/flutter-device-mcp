@@ -1,8 +1,9 @@
 # Roadmap
 
-`flutter-device-mcp` works today across iOS, Android, and (experimentally) Tizen,
-tvOS, and webOS. This is where it's headed. Nothing here is committed — it's a set
-of design directions surfaced during architecture review, framed as future work.
+`flutter-device-mcp` works today across iOS and Android, and (experimentally)
+Tizen, tvOS, webOS, and macOS. This is where it's headed. Nothing here is
+committed — it's a set of design directions surfaced during architecture
+review, framed as future work.
 
 ## Planned / ideas
 
@@ -29,7 +30,10 @@ of design directions surfaced during architecture review, framed as future work.
 - **In-code capability/quirk matrix.** Move the support matrix into a
   machine-readable table the core consults at runtime (to answer "is this
   supported here?" consistently) and that also renders the docs table — one source
-  of truth instead of two.
+  of truth instead of two. This is no longer hypothetical: adding the macOS
+  platform touched this README's support matrix, this file's opening sentence,
+  and the CLI's `--platform` line separately, and one of the three went stale
+  before all of them were updated — the exact failure this item anticipates.
 
 - **Platform hardening.**
   - Verify the Tizen build/install path on-device — including that
