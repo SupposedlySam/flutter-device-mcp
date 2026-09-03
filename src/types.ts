@@ -223,6 +223,18 @@ export interface InputController {
    * platform and is surfaced as `{ supported: false }`.
    */
   text?(value: string): Promise<void>;
+  /**
+   * The DEVICE-pixel position a positional {@link pointerClick} /
+   * {@link pointerScroll} would use right now. OPTIONAL — implemented where a
+   * click IS positional (Android, whose click is a tap at a staged position), so
+   * the tool response can report WHERE it tapped instead of a bare `sent: true`.
+   * Absent on platforms whose click activates the focused element (Tizen) or
+   * clicks wherever the real OS cursor happens to be (macOS), where there is no
+   * such position to report. Advisory: callers must treat a throw as "unknown".
+   */
+  pointerPosition?(): Promise<
+    { x: number; y: number; stagedAt?: string } | undefined
+  >;
 }
 
 /**

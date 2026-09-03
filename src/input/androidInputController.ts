@@ -23,8 +23,23 @@
  * position (no adb call) and `pointerClick` taps at the staged position.
  * `pointerScroll` swipes vertically, anchored at the staged position or —
  * when none is staged — at the screen center read from `adb shell wm size`.
+ *
+ * The stage is DURABLE and keyed by device (see pointerStage.ts), NOT a field on
+ * this object. Holding it in memory made the move→click pair work only while one
+ * server process happened to live across both calls; a restart or a host reload
+ * dropped it, and the click then failed with "No pointer position staged" one
+ * call after the caller had staged one. Reading it back from disk makes the
+ * precondition the error names actually satisfiable, and keying it by the
+ * RESOLVED serial keeps a position staged for one device from being tapped on
+ * another.
  */
 import { quote, RunOptions, runShell, tail } from "../cli.js";
+import {
+  filePointerStage,
+  PointerStage,
+  stageKey,
+  StagedPointerPosition,
+} from "./pointerStage.js";
 import {
   CommandResult,
   InputController,
@@ -178,9 +193,6 @@ export class AndroidInputController implements InputController {
   readonly platform: Platform = "android";
   private _mode: InputMode = "dpad";
 
-  /** The staged pointer position (device pixels) — see the class doc. */
-  private position: { x: number; y: number } | undefined;
-
   /** Screen size per serial, read once from `wm size` and cached. */
   private readonly screenSizeBySerial = new Map<
     string,
@@ -189,7 +201,13 @@ export class AndroidInputController implements InputController {
 
   constructor(
     private readonly resolveSerial: SerialResolver,
-    private readonly run: ShellRunner = runShell
+    private readonly run: ShellRunner = runShell,
+    /**
+     * Where the staged pointer position lives. Defaults to the per-developer
+     * on-disk stage so it survives this process; injected in tests (and usable
+     * as an in-memory fallback) via {@link PointerStage}.
+     */
+    private readonly stage: PointerStage = filePointerStage()
   ) {}
 
   get mode(): InputMode {
@@ -207,31 +225,44 @@ export class AndroidInputController implements InputController {
   }
 
   /**
-   * Stage the pointer position. Android has no visible free cursor, so no adb
-   * INPUT event is sent here — the staged position anchors the next
-   * click/scroll. The resolver still runs (and its result is discarded) so a
-   * stale device pin is reported on `move` too, not only on the verbs that
-   * happen to need the resolved serial.
+   * Stage the pointer position for the RESOLVED device. Android has no visible
+   * free cursor, so no adb INPUT event is sent here — the staged position
+   * anchors the next click/scroll. The serial is resolved (not discarded) both
+   * to report a stale device pin on `move` too and because it is the stage key:
+   * a position staged for one device is never tapped on another.
    */
   async pointerMove(x: number, y: number): Promise<void> {
-    await this.resolveSerial();
-    this.position = { x: Math.round(x), y: Math.round(y) };
+    const serial = await this.resolveSerial();
+    this.stage.save(
+      stageKey(this.platform, serial),
+      Math.round(x),
+      Math.round(y)
+    );
+  }
+
+  /**
+   * The position a `pointerClick`/`pointerScroll` would use right now, for the
+   * currently-resolved device — so a caller can be TOLD where a tap landed
+   * instead of inferring it from a bare `sent: true`.
+   */
+  async pointerPosition(): Promise<StagedPointerPosition | undefined> {
+    return this.stage.load(stageKey(this.platform, await this.resolveSerial()));
   }
 
   /** Tap at the staged position via `input tap`. */
   async pointerClick(): Promise<void> {
-    if (!this.position) {
+    const serial = await this.resolveSerial();
+    const position = this.stage.load(stageKey(this.platform, serial));
+    if (!position) {
       throw new Error(
-        "No pointer position staged — send flutter_pointer action 'move' " +
-          "with the target coordinates first (Android taps at the staged " +
-          "position), or use flutter_key ENTER to activate the focused " +
-          "element (D-pad semantics)."
+        `No pointer position staged for ${serial} — pass x/y directly on this ` +
+          "flutter_pointer 'click' call to tap in ONE call (preferred), send " +
+          "action 'move' with the target coordinates first (the staged position " +
+          "persists across calls and server restarts, per device), or use " +
+          "flutter_key ENTER to activate the focused element (D-pad semantics)."
       );
     }
-    const serial = await this.resolveSerial();
-    await this.send(
-      buildAdbTapCommand(serial, this.position.x, this.position.y)
-    );
+    await this.send(buildAdbTapCommand(serial, position.x, position.y));
   }
 
   /**
@@ -243,7 +274,7 @@ export class AndroidInputController implements InputController {
     const serial = await this.resolveSerial();
     const size = await this.screenSize(serial);
     const anchor =
-      this.position ??
+      this.stage.load(stageKey(this.platform, serial)) ??
       (size
         ? { x: Math.round(size.width / 2), y: Math.round(size.height / 2) }
         : undefined);

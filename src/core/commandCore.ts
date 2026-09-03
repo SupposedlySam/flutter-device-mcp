@@ -14,6 +14,7 @@ import { logger } from "../logger.js";
 import { CommandResult, tail } from "../cli.js";
 import {
   BuildMode,
+  InputController,
   InputMode,
   isLaunchFailure,
   UnsupportedInputError,
@@ -1082,6 +1083,24 @@ export class CommandCore {
     );
   }
 
+  /**
+   * The position a positional click just used, for the response. ADVISORY: a
+   * controller with no such position (focus-driven click, or a real OS cursor)
+   * omits the seam, and any read failure resolves to undefined — reporting
+   * where a tap landed must never be able to fail a tap that worked.
+   */
+  private async pointerPosition(
+    input: InputController
+  ): Promise<{ x: number; y: number } | undefined> {
+    if (!input.pointerPosition) return undefined;
+    try {
+      const position = await input.pointerPosition();
+      return position ? { x: position.x, y: position.y } : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
   // =========== pointer ==========
   async pointer(
     args: CommonArgs & {
@@ -1158,21 +1177,22 @@ export class CommandCore {
               if (notSupported) return notSupported;
               throw error;
             }
+            // Report WHERE the tap landed, not just that one was sent: on a
+            // positional platform a bare `sent: true` leaves a mis-tap
+            // indistinguishable from a mis-staged coordinate. Purely advisory —
+            // a failed read never turns a successful click into an error.
+            const tapped = staged?.point ?? (await this.pointerPosition(input));
             return {
               platform: adapter.platform,
               mode: input.mode,
               action: "click",
               sent: true,
               deviceWarning: adapter.inputDeviceWarning?.(),
-              ...(staged
-                ? {
-                    coordinateSpace: staged.coordinateSpace,
-                    devicePosition: staged.point,
-                  }
-                : {}),
+              ...(staged ? { coordinateSpace: staged.coordinateSpace } : {}),
+              ...(tapped ? { devicePosition: tapped } : {}),
               note: staged
                 ? "Tapped at the coordinates given on this call."
-                : "Taps the staged pointer position where the platform has one, or activates the currently-focused element (KEY_ENTER) on focus/D-pad-driven platforms. Pass x/y here to tap a coordinate in one call.",
+                : "Taps the staged pointer position where the platform has one — reported as devicePosition — or activates the currently-focused element (KEY_ENTER) on focus/D-pad-driven platforms. Passing x/y here taps a coordinate in ONE call instead.",
             };
           }
           case "scroll": {

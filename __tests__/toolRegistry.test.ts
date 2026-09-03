@@ -157,6 +157,41 @@ describe("buildToolList (ListTools advertisement)", () => {
     });
   });
 
+  /**
+   * The one-call tap has to be DISCOVERABLE, not just implemented. `click`
+   * accepts x/y and taps there directly, but while the schema described x/y as
+   * "for 'move'" every caller wrote the two-call move-then-click dance instead —
+   * the fragile path. If these strings go, so does the reason anyone would use
+   * the robust one.
+   */
+  describe("flutter_pointer advertises the one-call Android tap", () => {
+    const pointer = advertised.find((t) => t.name === "flutter_pointer")!;
+    const props = (
+      pointer.inputSchema as {
+        properties: Record<string, { description?: string }>;
+      }
+    ).properties;
+
+    it("tells the caller x/y work on 'click', on both coordinate properties", () => {
+      expect(props.x.description).toMatch(/'click'/);
+      expect(props.y.description).toMatch(/'click'/);
+      expect(props.x.description).toMatch(/ONE call/);
+      expect(props.y.description).toMatch(/ONE call/);
+    });
+
+    it("says the staged position is durable, so a caller does not re-stage defensively", () => {
+      expect(pointer.description).toMatch(/DURABLE/);
+      expect(pointer.description).toMatch(/survives server restarts/);
+    });
+
+    it("keeps requiring an explicit dpr for logical coordinates (never assumed)", () => {
+      expect(props.dpr.description).toMatch(
+        /required when coordinateSpace is 'logical'/
+      );
+      expect(props.dpr.description).toMatch(/Never assumed/);
+    });
+  });
+
   it("has no duplicate advertised names", () => {
     const names = advertised.map((t) => t.name);
     expect(new Set(names).size).toBe(names.length);
