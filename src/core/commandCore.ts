@@ -45,6 +45,7 @@ import { VmServiceClient } from "../vmServiceClient.js";
 import { hotReload, ReloadOutcome } from "../hotReload.js";
 import { hotControl } from "../hotControl.js";
 import { sendControlChar, removeControlFifo } from "../ptyControl.js";
+import { confirmHotAction, logSize } from "../hotConfirm.js";
 import {
   MarionetteProbeResult,
   probeMarionetteReady,
@@ -557,7 +558,10 @@ export class CommandCore {
     adapter: PlatformAdapter,
     record: { device: string; vmServiceUriWs: string },
     timeoutMs: number | undefined,
-    fellBackFrom: "no-control-channel" | "dead-control-channel"
+    fellBackFrom:
+      | "no-control-channel"
+      | "dead-control-channel"
+      | "unconfirmed-control-channel"
   ): Promise<CommandOutput> {
     const client = new VmServiceClient({
       wsUri: record.vmServiceUriWs,
@@ -613,23 +617,53 @@ export class CommandCore {
         const { record } = found;
 
         if (record.controlFifoPath) {
-          const outcome = await hotControl("reload", (c) =>
-            sendControlChar(record.controlFifoPath!, c)
+          // Measure the log BEFORE sending, so a previous reload's
+          // acknowledgement cannot be read as this one's.
+          const logFrom = record.logPath
+            ? await logSize(record.logPath)
+            : undefined;
+          const outcome = await hotControl(
+            "reload",
+            (c) => sendControlChar(record.controlFifoPath!, c),
+            record.logPath
+              ? () =>
+                  confirmHotAction({
+                    logPath: record.logPath!,
+                    action: "reload",
+                    fromByte: logFrom ?? 0,
+                  })
+              : undefined
           );
+          if (outcome.triggered && outcome.confirmed === false) {
+            // The bytes landed and flutter never acknowledged them, so nothing
+            // is known to have reloaded. The VM service can still reload
+            // sources, so take it rather than reporting a reload that did not
+            // happen.
+            return this.vmServiceReload(
+              adapter,
+              record,
+              args.timeout_ms,
+              "unconfirmed-control-channel"
+            );
+          }
           if (outcome.triggered) {
             return {
               platform: adapter.platform,
               success: true,
               triggered: true,
+              confirmed: outcome.confirmed,
               via: outcome.via,
               operation: outcome.kind,
               device: record.device,
               controlFifoPath: record.controlFifoPath,
               note:
-                "Sent `r` to the running flutter daemon's stdin over the pty control channel — a " +
-                "REAL hot reload (recompiles changed Dart + reassembles). Preserves state. Use " +
-                "flutter_hot_restart (`R`) for changes a reload can't apply (main(), top-level/global " +
-                "state, new enums/static fields).",
+                (outcome.confirmed
+                  ? "Sent `r` over the pty control channel and SAW the flutter tool acknowledge it — a "
+                  : "Sent `r` over the pty control channel. NOT CONFIRMED (no launch log to watch), so " +
+                    "treat the reload as unverified — a ") +
+                "REAL hot reload recompiles changed Dart + reassembles, stronger than the " +
+                "VM-service reassemble. Preserves state. Use flutter_hot_restart (`R`) for changes " +
+                "a reload can't apply (main(), top-level/global state, new enums/static fields).",
             };
           }
           return this.vmServiceReload(
@@ -674,9 +708,43 @@ export class CommandCore {
           };
         }
 
-        const outcome = await hotControl("restart", (c) =>
-          sendControlChar(record.controlFifoPath!, c)
+        const restartLogFrom = record.logPath
+          ? await logSize(record.logPath)
+          : undefined;
+        const outcome = await hotControl(
+          "restart",
+          (c) => sendControlChar(record.controlFifoPath!, c),
+          record.logPath
+            ? () =>
+                confirmHotAction({
+                  logPath: record.logPath!,
+                  action: "restart",
+                  fromByte: restartLogFrom ?? 0,
+                })
+            : undefined
         );
+        if (outcome.triggered && outcome.confirmed === false) {
+          // There is no VM-service equivalent of a restart, so this cannot be
+          // rescued the way an unconfirmed reload can — say so plainly instead
+          // of returning a success the app never performed.
+          return {
+            platform: adapter.platform,
+            success: false,
+            triggered: true,
+            confirmed: false,
+            device: record.device,
+            controlFifoPath: record.controlFifoPath,
+            logPath: record.logPath,
+            reason:
+              "Wrote `R` to the control channel but the flutter tool never acknowledged a restart " +
+              "within the confirmation window. The write landing is not the restart happening, and " +
+              "there is no VM-service equivalent to fall back to (reloadSources cannot re-run " +
+              "main()), so this is reported as a failure rather than a restart the app never " +
+              "performed. The flutter tool only reads `r`/`R` when its stdin is a terminal, which a " +
+              "FIFO is not — check the launch log for a still-compiling restart or an exited " +
+              "daemon, then redeploy with flutter_deploy to pick up the change.",
+          };
+        }
         if (!outcome.triggered) {
           clearLaunch(adapter.platform, record.device);
           return {

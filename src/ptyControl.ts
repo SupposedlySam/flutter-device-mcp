@@ -28,6 +28,24 @@
  * `script` still owns a real pty for flutter's own terminal (its VM-service URI
  * line only line-flushes under a pty); this module only redirects flutter's STDIN
  * to the FIFO, leaving `script`'s pty for flutter's stdout/terminal intact.
+ *
+ * WHAT THIS CANNOT DO, MEASURED. Putting the FIFO on flutter's fd 0 does NOT let
+ * it read keys. `Terminal.singleCharMode`'s setter returns early unless
+ * `stdinHasTerminal`, and the keystroke stream is only meaningful in single-char
+ * mode — so with a FIFO on fd 0 flutter never enters the mode and never
+ * processes `r`/`R`, while `printHelp` still prints the key legend
+ * unconditionally. The legend is therefore not evidence that keys are being
+ * read, which is what made this look like it worked.
+ *
+ * Feeding the FIFO to `script` instead — so flutter would inherit script's pty
+ * and see a terminal — fails outright: macOS `script` ioctls its OWN stdin at
+ * startup and dies with `tcgetattr/ioctl: Operation not supported on socket`.
+ * Reaching flutter's key handler needs a real tty between the FIFO and the
+ * daemon; this module does not provide one.
+ *
+ * So the write landing is kept as what it is — a write landing — and the caller
+ * confirms the EFFECT in the launch log (see hotConfirm) before reporting one,
+ * falling back to the VM-service reload when no acknowledgement appears.
  */
 import { execFileSync } from "child_process";
 import fs from "fs";
