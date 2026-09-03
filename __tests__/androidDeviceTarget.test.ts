@@ -122,6 +122,35 @@ describe("resolveAndroidTarget (single-id: serial === flutter id)", () => {
     expect(r.warning).toMatch(/emulator-5554/);
   });
 
+  it("names the PER-CALL pin, not the env var, when a call-supplied pin self-heals", () => {
+    // The two pins fail identically but are fixed differently: the env var needs
+    // a host reload, the argument does not. A warning that always blames
+    // FLUTTER_DEVICE_ANDROID_DEVICE sends an unattended caller to the wrong knob.
+    const r = resolveAndroidTarget("emulator-5554", ADB_DEVICES_L, "call")!;
+    expect(r.target).toBe("39121FDJH003AB");
+    expect(r.warning).toMatch(/device_udid/);
+    expect(r.warning).not.toMatch(/FLUTTER_DEVICE_ANDROID_DEVICE/);
+  });
+
+  it("defaults to the env wording when no origin is given (existing callers)", () => {
+    const r = resolveAndroidTarget("emulator-5554", ADB_DEVICES_L)!;
+    expect(r.warning).toMatch(/FLUTTER_DEVICE_ANDROID_DEVICE/);
+    expect(r.warning).not.toMatch(/device_udid/);
+  });
+
+  it("honors a per-call pin over the online-first default with no warning", () => {
+    // Both online, the Pixel listed first: an emulator can only be reached by
+    // naming it, which is the whole point of the per-call pin.
+    const bothOnline =
+      "List of devices attached\n" +
+      "39121FDJH003AB  device product:panther model:Pixel_7\n" +
+      "emulator-5554   device product:sdk_gphone64 model:sdk_gphone64_arm64\n";
+    const r = resolveAndroidTarget("emulator-5554", bothOnline, "call")!;
+    expect(r.target).toBe("emulator-5554");
+    expect(r.source).toBe("pin");
+    expect(r.warning).toBeUndefined();
+  });
+
   it("keeps a pin that names no listed device when nothing online exists", () => {
     const offlineOnly =
       "List of devices attached\nemulator-5554  offline product:x model:y\n";
@@ -129,5 +158,13 @@ describe("resolveAndroidTarget (single-id: serial === flutter id)", () => {
     expect(r.target).toBe("39121FDJH003AB");
     expect(r.source).toBe("stale-pin");
     expect(r.warning).toMatch(/Proceeding with the pin/i);
+    expect(r.warning).toMatch(/FLUTTER_DEVICE_ANDROID_DEVICE/);
+
+    // Same selection from a per-call pin — only the wording changes, so a caller
+    // who names a device that just went offline is never hard-failed.
+    const call = resolveAndroidTarget("39121FDJH003AB", offlineOnly, "call")!;
+    expect(call.target).toBe("39121FDJH003AB");
+    expect(call.source).toBe("stale-pin");
+    expect(call.warning).toMatch(/device_udid/);
   });
 });

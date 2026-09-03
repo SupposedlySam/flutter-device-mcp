@@ -107,6 +107,12 @@ class FlutterDeviceServer {
       }
 
       const common: CommonArgs = { platform: resolvePlatform(route, args) };
+      // uninstall and the lifecycle verbs take no arguments of their own beyond
+      // the per-call device pin, so they share one pre-built args object.
+      const withDevicePin = {
+        ...common,
+        device_udid: args.device_udid as string | undefined,
+      };
       const core = this.coreFor(args.app_dir);
 
       switch (route.canonical) {
@@ -152,15 +158,15 @@ class FlutterDeviceServer {
             })
           );
         case "flutter_uninstall":
-          return this.json(await core.uninstall(common));
+          return this.json(await core.uninstall(withDevicePin));
         case "flutter_kill_stale":
           return this.json(await core.killStale(common));
         case "flutter_terminate":
-          return this.json(await core.terminate(common));
+          return this.json(await core.terminate(withDevicePin));
         case "flutter_background":
-          return this.json(await core.background(common));
+          return this.json(await core.background(withDevicePin));
         case "flutter_foreground":
-          return this.json(await core.foreground(common));
+          return this.json(await core.foreground(withDevicePin));
         case "flutter_hot_reload":
           return this.json(
             await core.hotReload({
@@ -182,6 +188,7 @@ class FlutterDeviceServer {
               ...common,
               output_path: args.output_path as string | undefined,
               include_base64: args.include_base64 as boolean | undefined,
+              device_udid: args.device_udid as string | undefined,
             })
           );
         case "flutter_record":
@@ -208,6 +215,7 @@ class FlutterDeviceServer {
               ...common,
               key: args.key as string | undefined,
               text: args.text as string | undefined,
+              device_udid: args.device_udid as string | undefined,
             })
           );
         case "flutter_geometry":
@@ -235,6 +243,7 @@ class FlutterDeviceServer {
               dpr: args.dpr as number | undefined,
               absolute: args.absolute as boolean | undefined,
               double: args.double as boolean | undefined,
+              device_udid: args.device_udid as string | undefined,
             })
           );
         case "flutter_open_url":

@@ -208,9 +208,13 @@ export class AndroidInputController implements InputController {
 
   /**
    * Stage the pointer position. Android has no visible free cursor, so no adb
-   * event is sent here — the staged position anchors the next click/scroll.
+   * INPUT event is sent here — the staged position anchors the next
+   * click/scroll. The resolver still runs (and its result is discarded) so a
+   * stale device pin is reported on `move` too, not only on the verbs that
+   * happen to need the resolved serial.
    */
   async pointerMove(x: number, y: number): Promise<void> {
+    await this.resolveSerial();
     this.position = { x: Math.round(x), y: Math.round(y) };
   }
 

@@ -45,6 +45,26 @@ const appDirProp = {
   },
 };
 
+/**
+ * The per-call device pin, advertised on every tool that addresses ONE device.
+ *
+ * One neutral name rather than a per-platform one: each adapter reads it in its
+ * own id space, and the alternative — an `android_serial` beside a `device_udid`
+ * — would make the same concept look like two capabilities. The `extra` clause
+ * carries a tool-specific note (deploy's is about combining it with `target`).
+ */
+function deviceUdidProp(extra = "") {
+  return {
+    device_udid: {
+      type: "string",
+      description:
+        "Pin the device this call targets, for THIS CALL ONLY — precedence: this arg > the platform's env pin > auto-resolution — needing no MCP host reload. ANDROID: an adb serial (e.g. '39121FDJH003AB' or 'emulator-5554') or the model name adb reports in `adb devices -l` (e.g. 'Pixel_7', 'sdk_gphone64_arm64'), overriding the FLUTTER_DEVICE_ANDROID_DEVICE env pin. On a host with two attached targets this is the ONLY way to choose between them: discovery takes the first ONLINE device, so a phone that is attached but unusable (PIN-locked — Flutter stops building while the app is not visible, so nothing can be driven on it) otherwise wins every call. iOS/tvOS: a flutter id, a devicectl id, or a device/simulator name (for a simulator the flutter id IS the simctl UUID), overriding FLUTTER_DEVICE_IOS_DEVICE." +
+        extra +
+        " A pin naming a target that is not currently online SELF-HEALS to the first online device and says so in `deviceWarning`, exactly like a stale env pin — it never hard-fails silently. Ignored on Tizen/webOS/macOS, which resolve their single target another way.",
+    },
+  };
+}
+
 function buildFlutterTools(): ToolDefinition[] {
   return [
     {
@@ -132,7 +152,7 @@ function buildFlutterTools(): ToolDefinition[] {
     {
       name: "flutter_deploy",
       description:
-        "THE KEY TOOL. Installs the already-built package and launches the app in DEBUG, then returns the Dart VM Service `ws://…/ws` URI for Marionette to connect to. Kills any stale `flutter-tizen` / `flutter run` processes first (one deploy at a time — concurrent installs wedge the device lock). Recovers from a full device (No space left on device / Install failed) by uninstalling and retrying the install once. The launch runs through a pty (so flutter line-flushes the URI), backgrounded, and is LEFT RUNNING to hold the VM service open. A device pin that is not currently an online device (stale — e.g. the device moved DHCP address) is ignored in favor of the first online device, noted via `deviceWarning` in the response. WARNING: launching SEIZES the physical TV/monitor display. NOTE: Marionette coordinates are LOGICAL (e.g. 1200x675), not screenshot pixels. MACOS: a different shape entirely — stages `app_path`/`app_url` (or FLUTTER_DEVICE_MACOS_APP_PATH/FLUTTER_DEVICE_MACOS_APP_URL) into a SCRATCH DIR (never /Applications) and launches it with `open -n`, returning its pid; the bundle runs directly rather than under `flutter run`, so there is no Dart VM service (`vmServiceUriWs` is empty) and no display seizure — drive it with flutter_pointer/flutter_key/flutter_screenshot instead.",
+        "THE KEY TOOL. Installs the already-built package and launches the app in DEBUG, then returns the Dart VM Service `ws://…/ws` URI for Marionette to connect to. Kills any stale `flutter-tizen` / `flutter run` processes first (one deploy at a time — concurrent installs wedge the device lock). Recovers from a full device (No space left on device / Install failed) by uninstalling and retrying the install once. The launch runs through a pty (so flutter line-flushes the URI), backgrounded, and is LEFT RUNNING to hold the VM service open. A device pin that is not currently an online device (stale — e.g. the device moved DHCP address) is ignored in favor of the first online device, noted via `deviceWarning` in the response. MULTI-TARGET HOSTS: discovery takes the first ONLINE device, which on Android means an attached physical phone beats a running emulator every time — pass `device_udid` (an adb serial or model name) to deploy to the other one for this call, without touching FLUTTER_DEVICE_ANDROID_DEVICE or reloading the host. WARNING: launching SEIZES the physical TV/monitor display. NOTE: Marionette coordinates are LOGICAL (e.g. 1200x675), not screenshot pixels. MACOS: a different shape entirely — stages `app_path`/`app_url` (or FLUTTER_DEVICE_MACOS_APP_PATH/FLUTTER_DEVICE_MACOS_APP_URL) into a SCRATCH DIR (never /Applications) and launches it with `open -n`, returning its pid; the bundle runs directly rather than under `flutter run`, so there is no Dart VM service (`vmServiceUriWs` is empty) and no display seizure — drive it with flutter_pointer/flutter_key/flutter_screenshot instead.",
       inputSchema: {
         type: "object",
         properties: {
@@ -169,13 +189,11 @@ function buildFlutterTools(): ToolDefinition[] {
             type: "string",
             enum: ["simulator", "device"],
             description:
-              "iOS ONLY per-call target selection: 'simulator' deploys to the booted simulator (booted-first) EVEN WHEN a physical iPhone is attached — the fix for the device-first default that made a simulator UI walkthrough impossible without a host reload; 'device' forces a physical device. Ignored on Tizen/webOS/Android (they don't distinguish the kind here). When omitted, iOS is physical-first.",
+              "iOS ONLY per-call target selection: 'simulator' deploys to the booted simulator (booted-first) EVEN WHEN a physical iPhone is attached — the fix for the device-first default that made a simulator UI walkthrough impossible without a host reload; 'device' forces a physical device. Ignored on Tizen/webOS/Android, which have no device-vs-simulator id split — on Android an emulator is just another adb serial, so name it with `device_udid` instead. When omitted, iOS is physical-first.",
           },
-          device_udid: {
-            type: "string",
-            description:
-              "iOS ONLY: pin a SPECIFIC target for THIS call by id (a flutter id, a devicectl id, or a device/simulator name), overriding the FLUTTER_DEVICE_IOS_DEVICE env pin without a host reload. Combine with `target` or use alone. For a simulator the flutter id equals the simctl UUID.",
-          },
+          ...deviceUdidProp(
+            " Combine with `target` (iOS) or use alone; on Android `target` has no meaning and this is the whole selection."
+          ),
           app_path: {
             type: "string",
             description:
@@ -214,11 +232,7 @@ function buildFlutterTools(): ToolDefinition[] {
             description:
               "iOS/tvOS: which target to open the URL on. This matters more here than on other tools — Apple supports opening a URL on a SIMULATOR and not on a physical device, while discovery is physical-first. On a host with a paired iPhone/Apple TV you MUST pass 'simulator' to reach the working path; otherwise the call resolves the physical device and correctly returns {supported:false}.",
           },
-          device_udid: {
-            type: "string",
-            description:
-              "iOS/tvOS: pin a specific target for THIS call by id (simulator UUID or device id), overriding discovery without a host reload.",
-          },
+          ...deviceUdidProp(),
         },
         required: ["url"],
       },
@@ -226,10 +240,10 @@ function buildFlutterTools(): ToolDefinition[] {
     {
       name: "flutter_uninstall",
       description:
-        "Uninstall the app (`sdb -s <device> uninstall <app_id>` on Tizen) to free device space or reset to a clean state. Soft-succeeds when the app is not installed.",
+        "Uninstall the app (`sdb -s <device> uninstall <app_id>` on Tizen; `adb -s <serial> uninstall <app_id>` on Android) to free device space or reset to a clean state. Soft-succeeds when the app is not installed. `device_udid` picks WHICH device to uninstall from on a multi-target host.",
       inputSchema: {
         type: "object",
-        properties: { ...platformProp, ...appDirProp },
+        properties: { ...platformProp, ...appDirProp, ...deviceUdidProp() },
       },
     },
     {
@@ -245,19 +259,19 @@ function buildFlutterTools(): ToolDefinition[] {
       name: "flutter_terminate",
       description:
         "OS-level lifecycle: force-quit the app on the resolved device (iOS: xcrun simctl/devicectl terminate; Android: adb shell am force-stop; macOS: `osascript ... tell application id \"<bundle id>\" to quit`). MOBILE/MACOS capability — on TV platforms (Tizen/webOS) this returns {supported:false}. The app's Dart VM service is gone after termination (N/A on macOS, which has none); redeploy to get a fresh URI for Marionette.",
-      inputSchema: { type: "object", properties: { ...platformProp } },
+      inputSchema: { type: "object", properties: { ...platformProp, ...deviceUdidProp() } },
     },
     {
       name: "flutter_background",
       description:
         "OS-level lifecycle: send the app to the BACKGROUND without killing it (iOS: foreground the neutral com.apple.Preferences app; Android: HOME keyevent via adb; macOS: activate Finder — there is no OS-level \"background\" verb, so losing focus IS backgrounding). Exercises the app's didEnterBackground/onPause path for lifecycle testing while keeping its VM service alive. MOBILE/MACOS capability — Tizen/webOS return {supported:false}.",
-      inputSchema: { type: "object", properties: { ...platformProp } },
+      inputSchema: { type: "object", properties: { ...platformProp, ...deviceUdidProp() } },
     },
     {
       name: "flutter_foreground",
       description:
         "OS-level lifecycle: bring the app back to the FOREGROUND by relaunching it (iOS: xcrun simctl/devicectl launch by bundle id; Android: adb monkey LAUNCHER intent by package; macOS: `osascript ... tell application id \"<bundle id>\" to activate`). Exercises didBecomeActive/onResume. Pair with flutter_background for background→foreground lifecycle testing. MOBILE/MACOS capability — Tizen/webOS return {supported:false}.",
-      inputSchema: { type: "object", properties: { ...platformProp } },
+      inputSchema: { type: "object", properties: { ...platformProp, ...deviceUdidProp() } },
     },
     {
       name: "flutter_hot_reload",
@@ -316,6 +330,7 @@ function buildFlutterTools(): ToolDefinition[] {
             description:
               "When true, also return the PNG bytes base64-encoded inline (in addition to the saved path). Default false.",
           },
+          ...deviceUdidProp(),
         },
       },
     },
@@ -348,11 +363,7 @@ function buildFlutterTools(): ToolDefinition[] {
             description:
               "Output container. 'mp4' (default) uses the native recorder where available (no ffmpeg). 'gif' always requires ffmpeg.",
           },
-          device_udid: {
-            type: "string",
-            description:
-              "Optional specific target id (iOS). When omitted the adapter resolves the target the normal way (simulator-first for a sim walkthrough, else the physical device).",
-          },
+          ...deviceUdidProp(),
         },
       },
     },
@@ -391,6 +402,7 @@ function buildFlutterTools(): ToolDefinition[] {
             description:
               "A string to TYPE into the currently-focused field (Android: `adb shell input text`; macOS: `cliclick t:`). Cannot carry newlines/tabs — send those as key events (KEYCODE_ENTER / KEYCODE_TAB). Platforms without an OS-level text channel return {supported:false}. Provide exactly one of `key` or `text`.",
           },
+          ...deviceUdidProp(),
         },
       },
     },
@@ -402,11 +414,9 @@ function buildFlutterTools(): ToolDefinition[] {
         type: "object",
         properties: {
           ...platformProp,
-          device_udid: {
-            type: "string",
-            description:
-              "Pin the device to report on for THIS call (Android: the adb serial or model name; overrides the FLUTTER_DEVICE_ANDROID_DEVICE env pin). Omit to resolve the same target deploy/lifecycle use. Screen geometry differs per device, so a multi-device host should say which one it means.",
-          },
+          ...deviceUdidProp(
+            " Screen geometry differs per device, so a multi-device host should always say which one it means."
+          ),
           view_width: {
             type: "number",
             description:
@@ -474,6 +484,7 @@ function buildFlutterTools(): ToolDefinition[] {
             description:
               "MACOS ONLY, for action 'click': perform a double-click (`cliclick dc:`) instead of a single click. Ignored on every other platform.",
           },
+          ...deviceUdidProp(),
         },
         required: ["action"],
       },

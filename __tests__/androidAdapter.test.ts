@@ -44,6 +44,19 @@ jest.unstable_mockModule("../src/launchCapture.js", () => ({
   buildPtyCaptureCommand: mockBuildPtyCaptureCommand,
 }));
 
+// The record path spawns its recorder for real; stub the runner so a unit test
+// can never fire `adb shell screenrecord` at a developer's attached device.
+const runTimedRecorder =
+  jest.fn<() => Promise<{ ok: boolean; output: string }>>();
+
+jest.unstable_mockModule("../src/recordingRun.js", () => ({
+  runTimedRecorder,
+  runScreenshotBurst: jest.fn(),
+  convertVideoToGif: jest.fn(),
+  cleanupDir: jest.fn(),
+  runSequential: jest.fn(),
+}));
+
 const okResult = {
   code: 0,
   stdout: "",
@@ -99,6 +112,7 @@ beforeEach(() => {
   neutralLaunchAndCaptureUri.mockResolvedValue({ failed: false });
   // By default the launch mints a control FIFO (the on-device happy path).
   allocateControlFifo.mockReturnValue(ANDROID_FIFO);
+  runTimedRecorder.mockResolvedValue({ ok: true, output: "" });
 });
 
 describe("AndroidAdapter identity", () => {
@@ -795,5 +809,232 @@ describe("ANDROID_FAILURE_SIGNATURES", () => {
         re.test("Installing build/app/outputs/flutter-apk/app.apk...")
       )
     ).toBe(false);
+  });
+});
+
+describe("AndroidAdapter per-call device pin (device_udid)", () => {
+  const EMULATOR = "emulator-5554";
+
+  /**
+   * Both targets ONLINE, the physical device listed first — the shape that makes
+   * a pin necessary rather than cosmetic: discovery is online-first, so the
+   * physical device wins every call and nothing short of an env pin (a host
+   * reload) could redirect it.
+   */
+  function mockTwoOnlineDevices() {
+    runShell.mockImplementation(async (cmd: string) => {
+      if (cmd.includes("adb devices")) {
+        return {
+          ...okResult,
+          stdout:
+            "List of devices attached\n" +
+            `${SERIAL}  device product:panther model:Pixel_7\n` +
+            `${EMULATOR}  device product:sdk_gphone64 model:sdk_gphone64_arm64\n`,
+        };
+      }
+      return okResult;
+    });
+  }
+
+  /** The physical device online, the emulator listed but OFFLINE. */
+  function mockEmulatorOffline() {
+    runShell.mockImplementation(async (cmd: string) => {
+      if (cmd.includes("adb devices")) {
+        return {
+          ...okResult,
+          stdout:
+            "List of devices attached\n" +
+            `${SERIAL}  device product:panther model:Pixel_7\n` +
+            `${EMULATOR}  offline product:sdk_gphone64 model:sdk_gphone64_arm64\n`,
+        };
+      }
+      return okResult;
+    });
+  }
+
+  it("selects the named target over the online-first default", async () => {
+    mockTwoOnlineDevices();
+    const r = await android().discoverDevice({ udid: EMULATOR });
+    expect(r.target).toBe(EMULATOR);
+    expect(r.source).toBe("pin");
+    expect(r.warning).toBeUndefined();
+  });
+
+  it("beats the env pin for that one call, leaving the env pin otherwise intact", async () => {
+    mockTwoOnlineDevices();
+    // FLUTTER_DEVICE_ANDROID_DEVICE names the physical device; the call names
+    // the emulator. Precedence is arg > env, and the env pin still applies to
+    // the next unpinned call — the pin must not be sticky.
+    const adapter = android(SERIAL);
+    expect((await adapter.discoverDevice({ udid: EMULATOR })).target).toBe(
+      EMULATOR
+    );
+    expect((await adapter.discoverDevice()).target).toBe(SERIAL);
+  });
+
+  it("matches by model name as well as by serial", async () => {
+    mockTwoOnlineDevices();
+    const r = await android().discoverDevice({ udid: "sdk_gphone64_arm64" });
+    expect(r.target).toBe(EMULATOR);
+  });
+
+  it("self-heals a pin whose target went offline instead of failing the call", async () => {
+    mockEmulatorOffline();
+    const r = await android().discoverDevice({ udid: EMULATOR });
+    // Same fallback a stale env pin gets — with the warning naming the argument,
+    // which is the knob this caller can actually change.
+    expect(r.target).toBe(SERIAL);
+    expect(r.source).toBe("discovered");
+    expect(r.warning).toMatch(/device_udid/);
+  });
+
+  it("screenshot captures the pinned device, not the first online one", async () => {
+    mockTwoOnlineDevices();
+    await android().screenshot!({
+      outPath: "/tmp/shot.png",
+      deviceUdid: EMULATOR,
+    });
+    expect(runShell).toHaveBeenCalledWith(
+      expect.stringContaining(`adb -s '${EMULATOR}' exec-out screencap`),
+      expect.anything()
+    );
+    expect(runShell).not.toHaveBeenCalledWith(
+      expect.stringContaining(`adb -s '${SERIAL}' exec-out screencap`),
+      expect.anything()
+    );
+  });
+
+  it("record runs the recorder against the pinned device", async () => {
+    mockTwoOnlineDevices();
+    await android().record!({
+      durationSeconds: 1,
+      fps: 2,
+      format: "mp4",
+      deviceUdid: EMULATOR,
+    });
+    // The recorder command itself goes to the stubbed runner; the stop and pull
+    // are plain shells, and both must address the SAME pinned device — a pull
+    // from the other target would return someone else's screen.
+    const commands = runShell.mock.calls.map((c) => c[0] as string);
+    const deviceCommands = commands.filter((c) => c.startsWith("adb -s"));
+    expect(deviceCommands.length).toBeGreaterThan(0);
+    for (const cmd of deviceCommands) {
+      expect(cmd).toContain(`adb -s '${EMULATOR}'`);
+    }
+  });
+
+  it("input sends to the pinned device while keeping the staged pointer position", async () => {
+    mockTwoOnlineDevices();
+    const adapter = android();
+    // Stage against the default target, then pin: a pinned call must not mint a
+    // fresh controller, because that would silently drop the staged position a
+    // `move` set and a `click` consumes.
+    await adapter.input().pointerMove(120, 340);
+    await adapter.input({ udid: EMULATOR }).pointerClick();
+    expect(runShell).toHaveBeenCalledWith(
+      `adb -s '${EMULATOR}' shell input tap 120 340`,
+      { timeoutMs: 15000 }
+    );
+
+    // The pin lasts exactly one call: the next unpinned send resolves normally.
+    await adapter.input().key("HOME");
+    expect(runShell).toHaveBeenCalledWith(
+      `adb -s '${SERIAL}' shell input keyevent ${ANDROID_KEYCODE_HOME}`,
+      { timeoutMs: 15000 }
+    );
+  });
+
+  /**
+   * The seam `flutter_key`/`flutter_pointer` read to build `deviceWarning` in
+   * the JSON they return (see `CommandCore.key`/`CommandCore.pointer`) — and see
+   * `deviceUdidProp` in toolRegistry.ts, which promises this on both tools.
+   * `adapter.input()` sets up the pin; `inputDeviceWarning()` is what a caller
+   * reads back AFTER the send that actually resolved it, since resolution
+   * happens lazily.
+   */
+  describe("inputDeviceWarning (deviceWarning surfaced through the input path)", () => {
+    it("pinned device ONLINE -> no warning at all", async () => {
+      mockTwoOnlineDevices();
+      const adapter = android();
+      await adapter.input({ udid: EMULATOR }).key("HOME");
+      expect(adapter.inputDeviceWarning()).toBeUndefined();
+    });
+
+    it("via flutter_key: pinned device OFFLINE, another online -> self-heals AND names both devices", async () => {
+      mockEmulatorOffline();
+      const adapter = android();
+      await adapter.input({ udid: EMULATOR }).key("HOME");
+      // Still sent — to the device it healed to, not the one asked for.
+      expect(runShell).toHaveBeenCalledWith(
+        `adb -s '${SERIAL}' shell input keyevent ${ANDROID_KEYCODE_HOME}`,
+        { timeoutMs: 15000 }
+      );
+      expect(adapter.inputDeviceWarning()).toMatch(/device_udid/);
+      expect(adapter.inputDeviceWarning()).toContain(EMULATOR);
+      expect(adapter.inputDeviceWarning()).toContain(SERIAL);
+    });
+
+    it("via flutter_pointer move: the pin's warning surfaces even though move sends no adb event", async () => {
+      mockEmulatorOffline();
+      const adapter = android();
+      await adapter.input({ udid: EMULATOR }).pointerMove(10, 20);
+      // move stages only — no `input` adb command, but the resolver still ran.
+      expect(runShell).not.toHaveBeenCalledWith(
+        expect.stringContaining("shell input"),
+        expect.anything()
+      );
+      expect(adapter.inputDeviceWarning()).toContain(EMULATOR);
+      expect(adapter.inputDeviceWarning()).toContain(SERIAL);
+    });
+
+    it("no per-call pin, stale env pin -> the existing env-pin warning still surfaces unchanged", async () => {
+      mockDiscovery();
+      // The env pin (constructor `device`) names a serial that never shows up.
+      const adapter = android(EMULATOR);
+      await adapter.input().key("HOME");
+      expect(adapter.inputDeviceWarning()).toMatch(
+        /FLUTTER_DEVICE_ANDROID_DEVICE/
+      );
+      expect(adapter.inputDeviceWarning()).not.toMatch(/device_udid/);
+    });
+
+    it("no per-call pin, no env pin, one device -> no warning", async () => {
+      mockDiscovery();
+      const adapter = android();
+      await adapter.input().key("HOME");
+      expect(adapter.inputDeviceWarning()).toBeUndefined();
+    });
+
+    it("clears a previous call's warning even when the new call resolves nothing", async () => {
+      // The reset happens in input() itself, not only as a side effect of the
+      // next resolve. A verb that returns or throws BEFORE resolving a serial
+      // (an unsupported key, a click with nothing staged) would otherwise report
+      // the previous call's warning as if it belonged to this one.
+      mockEmulatorOffline();
+      const adapter = android();
+      await adapter.input({ udid: EMULATOR }).key("HOME");
+      expect(adapter.inputDeviceWarning()).toContain(EMULATOR);
+
+      adapter.input();
+      expect(adapter.inputDeviceWarning()).toBeUndefined();
+    });
+
+    it("the pin and the warning reset between calls, but the staged position survives", async () => {
+      mockEmulatorOffline();
+      const adapter = android();
+      // Call 1: pin names the offline emulator — self-heals, warns.
+      await adapter.input({ udid: EMULATOR }).pointerMove(120, 340);
+      expect(adapter.inputDeviceWarning()).toContain(EMULATOR);
+
+      // Call 2: pin names the online device directly — no reason to warn, and
+      // the OLD warning from call 1 must not leak into this clean call.
+      await adapter.input({ udid: SERIAL }).pointerClick();
+      expect(adapter.inputDeviceWarning()).toBeUndefined();
+      // The staged position from call 1 still lands — same cached controller.
+      expect(runShell).toHaveBeenCalledWith(
+        `adb -s '${SERIAL}' shell input tap 120 340`,
+        { timeoutMs: 15000 }
+      );
+    });
   });
 });

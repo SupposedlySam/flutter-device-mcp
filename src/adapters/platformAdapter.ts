@@ -28,6 +28,14 @@ import { RecordFormat, RecordResult } from "../recording.js";
  * concept ignores them. On iOS: `kind` biases physical-vs-simulator (the primary
  * gap — a simulator UI walkthrough on a host with a paired iPhone), and `udid`
  * pins a specific target for this call only (no env pin, no host reload).
+ *
+ * `udid` is deliberately ONE field across platforms rather than a per-platform
+ * name: each adapter reads it in its own id space (iOS/tvOS a flutter id,
+ * devicectl id or device/simulator name; Android an adb serial or the model name
+ * adb reports), and it overrides that platform's env pin for the one call. It is
+ * the only escape hatch on a host with two usable targets attached — an emulator
+ * beside a locked physical phone — where discovery alone always answers the same
+ * way and only a host reload could change it.
  */
 export interface DeviceTargetPreference {
   /** Bias selection toward a device or a simulator (iOS today). */
@@ -300,11 +308,15 @@ export interface PlatformAdapter {
    *
    * `outPath` is an optional caller-chosen destination; when omitted the adapter
    * writes to a predictable temp path and returns it. `includeBase64` asks for
-   * the PNG bytes inline (base64) in addition to the saved path.
+   * the PNG bytes inline (base64) in addition to the saved path. `deviceUdid`
+   * pins which target to capture for this call (see
+   * {@link DeviceTargetPreference}); adapters that resolve their target another
+   * way ignore it.
    */
   screenshot?(opts: {
     outPath?: string;
     includeBase64?: boolean;
+    deviceUdid?: string;
   }): Promise<ScreenshotResult>;
 
   /**
@@ -329,7 +341,11 @@ export interface PlatformAdapter {
     durationSeconds: number;
     fps: number;
     format: RecordFormat;
-    /** Optional specific target id (iOS); adapters that ignore device kinds ignore it. */
+    /**
+     * Pins which target to record for this call (see
+     * {@link DeviceTargetPreference}); adapters that resolve their target
+     * another way ignore it.
+     */
     deviceUdid?: string;
   }): Promise<RecordResult>;
 
@@ -387,8 +403,29 @@ export interface PlatformAdapter {
    * Physical input controller. Real dual-mode input is implemented for TV
    * platforms; other platforms return a stub whose methods throw
    * NotImplementedError.
+   *
+   * `preference` steers WHICH device the returned controller sends to, exactly
+   * like {@link discoverDevice} — a multi-device host has to be able to say
+   * which target a key or tap is meant for. The controller itself is long-lived
+   * (its mode and staged pointer position are session-sticky), so the preference
+   * applies to the sends that follow this call rather than minting a new
+   * controller and losing that state. Adapters whose controller holds no device
+   * concept ignore it.
    */
-  input(): InputController;
+  input(preference?: DeviceTargetPreference): InputController;
+
+  /**
+   * The device-resolution warning produced by the most recent `input()`-scoped
+   * send (key/pointerMove/pointerClick/pointerScroll/text), when the pin
+   * {@link input}'s `preference` named self-healed to a different device —
+   * mirroring the `deviceWarning` {@link discoverDevice} callers already get
+   * from deploy/screenshot/geometry. Reset to `undefined` by every {@link input}
+   * call, so a warning from one call is never reported against a later one.
+   * Optional: only an adapter whose controller resolves the device lazily
+   * per-send (Android) implements it — adapters with no per-call device concept
+   * omit it, and callers must use the optional-call form.
+   */
+  inputDeviceWarning?(): string | undefined;
 
   /** The default app id for this platform, used for uninstall. */
   readonly appId: string;
