@@ -65,6 +65,22 @@ function deviceUdidProp(extra = "") {
   };
 }
 
+/**
+ * The per-call capture-target CLASS, advertised on the capture tools
+ * (screenshot/record) for the platforms that have two target kinds.
+ *
+ * Separate from `device_udid` because the common case is not "this exact id" but
+ * "the simulator, not the phone that happens to be plugged in".
+ */
+const captureTargetProp = {
+  target: {
+    type: "string",
+    enum: ["device", "simulator"],
+    description:
+      "iOS/tvOS ONLY: which CLASS of target to capture. Omitted, resolution is PHYSICAL-FIRST (the same order flutter_deploy uses, so a capture lands on the machine you deployed to) after any `device_udid`/FLUTTER_DEVICE_IOS_DEVICE pin. 'simulator' captures the booted simulator EVEN WHEN a physical device is attached; 'device' forces real hardware. Ignored on Android/Tizen/webOS/macOS, which have one target class (on Android an emulator is just another adb serial — name it with `device_udid`).",
+  },
+};
+
 function buildFlutterTools(): ToolDefinition[] {
   return [
     {
@@ -276,7 +292,7 @@ function buildFlutterTools(): ToolDefinition[] {
     {
       name: "flutter_hot_reload",
       description:
-        "FAST INNER LOOP. Trigger a REAL Dart hot reload on the app already running from flutter_deploy — seconds, not the minutes a full flutter_build + flutter_deploy takes. Preserves app state, recompiles changed Dart, and reassembles the widget tree. PREFERRED PATH: writes `r` to the running flutter daemon's stdin over a durable pty control channel (a FIFO recorded at deploy time) — the flutter tool's own hot reload. If no live control channel exists (a launch from before this feature, or a dead daemon), it FALLS BACK to the VM-service reloadSources+reassemble path (weaker — reloads sources in place; the response's `fellBackFrom` says why). flutter_deploy must have been run first; if no live daemon is recorded this returns a clear {triggered:false} telling you to deploy. Some changes can't be hot-reloaded (new enums/static fields, changes to main(), top-level/global state) — use flutter_hot_restart for those. NOTE: Marionette also exposes a hot_reload, but it is only a reassemble (no Dart recompile); the pty `r` here is the real path.",
+        "FAST INNER LOOP. Trigger a REAL Dart hot reload on the app already running from flutter_deploy — seconds, not the minutes a full flutter_build + flutter_deploy takes. Preserves app state, recompiles changed Dart, and reassembles the widget tree. PREFERRED PATH: writes `r` to the running flutter daemon's stdin over a durable pty control channel established at deploy time (a FIFO on disk, bridged onto a real pty — the flutter tool only reads keys when its stdin is a terminal, so the bridge is what makes this work at all) — the flutter tool's own hot reload, and the effect is CONFIRMED in the launch log before it is reported. If no live control channel exists (a launch from before this feature, a dead daemon, or a host with no usable python3 for the bridge — see the deploy response's controlChannelWarning), it FALLS BACK to the VM-service reloadSources+reassemble path (weaker — reloads sources in place; the response's `fellBackFrom` says why). flutter_deploy must have been run first; if no live daemon is recorded this returns a clear {triggered:false} telling you to deploy. Some changes can't be hot-reloaded (new enums/static fields, changes to main(), top-level/global state) — use flutter_hot_restart for those. NOTE: Marionette also exposes a hot_reload, but it is only a reassemble (no Dart recompile); the pty `r` here is the real path.",
       inputSchema: {
         type: "object",
         properties: {
@@ -298,7 +314,7 @@ function buildFlutterTools(): ToolDefinition[] {
     {
       name: "flutter_hot_restart",
       description:
-        "Hot RESTART the app already running from flutter_deploy: re-runs main() and DISCARDS in-memory state, while KEEPING the process, its Dart VM Service ws://…/ws URI, and any Marionette connection ALIVE (no redeploy, no new URI to reconnect). Use this for changes a hot reload can't apply — changes to main(), top-level/global/static state, new enums, or app-wide initialization. This is driven by writing `R` to the running flutter daemon's stdin over the pty control channel established at deploy time — it IS reachable this way (unlike over the raw VM service, where re-running main() is not exposed). Requires a live control channel: if the launch recorded none (older launch) or the daemon has exited, this returns a clear {triggered:false} telling you to redeploy with flutter_deploy (which re-establishes the channel). NOTE: Marionette's hot_reload is only a reassemble; there is no Marionette hot-restart — this tool is the restart path.",
+        "Hot RESTART the app already running from flutter_deploy: re-runs main() and DISCARDS in-memory state, while KEEPING the process, its Dart VM Service ws://…/ws URI, and any Marionette connection ALIVE (no redeploy, no new URI to reconnect). Use this for changes a hot reload can't apply — changes to main(), top-level/global/static state, new enums, or app-wide initialization. This is driven by writing `R` to the running flutter daemon's stdin over the pty control channel established at deploy time — it IS reachable this way (unlike over the raw VM service, where re-running main() is not exposed: reloadSources reloads in place and only the flutter tool can recompile the Dart in the first place). The channel is a FIFO on disk BRIDGED ONTO A REAL PTY, because the flutter tool reads `r`/`R` only when its stdin is a terminal — a plain stdin redirect to the FIFO accepts every write and delivers none, which is what made this report a restart that never happened. The restart is CONFIRMED against the flutter tool's own acknowledgement in the launch log before success is reported; an unconfirmed write comes back as a failure, never as a restart. Requires a live control channel: if the launch recorded none (older launch, or a host with no usable python3 for the bridge — the deploy response's controlChannelWarning says so) or the daemon has exited, this returns a clear {triggered:false} telling you to redeploy with flutter_deploy (which re-establishes the channel). NOTE: Marionette's hot_reload is only a reassemble; there is no Marionette hot-restart — this tool is the restart path.",
       inputSchema: {
         type: "object",
         properties: {
@@ -315,7 +331,7 @@ function buildFlutterTools(): ToolDefinition[] {
     {
       name: "flutter_screenshot",
       description:
-        "Capture the current device/app screen to a PNG on disk and return the absolute saved path (optionally the base64 bytes too). PER-PLATFORM capture reality (encoded so you don't re-derive it): iOS SIMULATOR — reliable via `xcrun simctl io <udid> screenshot` (the primary iOS path; a booted simulator is picked automatically); iOS PHYSICAL device — `pymobiledevice3 developer dvt screenshot` (verified live: captures a real PNG over a no-root userspace tunnel on iOS 17+, no sudo; requires the Developer Disk Image to be mounted, which Xcode does automatically). Requires `pymobiledevice3` on the host (`pipx install pymobiledevice3`, or a venv; override its path with FLUTTER_DEVICE_PYMOBILEDEVICE3); ONLY if it is not installed does the physical path return {supported:false} with an install hint. Android — `adb -s <serial> exec-out screencap -p`; tvOS SIMULATOR — simctl (physical Apple TV returns {supported:false}); macOS — `screencapture -R<x,y,w,h>` WINDOW-TARGETED against the target app's LIVE front-window bounds (never a full-desktop grab — that would leak whatever else the machine's owner has open); needs Screen Recording granted (flutter_info probes this by effect); Tizen/webOS — {supported:false} (no clean path — `sdb shell` is DISABLED on Samsung devices, so no device-side screencap; use Marionette take_screenshots over the VM service for the Flutter view). When output_path is omitted the PNG is written to a predictable temp path that is returned.",
+        "Capture the current device/app screen to a PNG on disk and return the absolute saved path (optionally the base64 bytes too), ALONG WITH the device it was captured from (`device`/`deviceKind`/`via`) and the PNG's pixel dimensions — so a capture can never be mistaken for one of a different machine. WHICH TARGET: on iOS/tvOS the capture is routed by the RESOLVED target's kind, not by what else is attached — `device_udid` (or FLUTTER_DEVICE_IOS_DEVICE) wins, otherwise resolution is PHYSICAL-FIRST exactly like flutter_deploy, so a capture lands on the machine a deploy would have used; pass `target: \"simulator\"` to capture a booted simulator while a phone is attached. A `device_udid` naming a physical device is NEVER served from the simulator. PER-PLATFORM capture reality (encoded so you don't re-derive it): iOS SIMULATOR — `xcrun simctl io <udid> screenshot`; iOS PHYSICAL device — `pymobiledevice3 developer dvt screenshot` (verified live: captures a real PNG over a no-root userspace tunnel on iOS 17+, no sudo — its stderr WARNING about the native tunnel is NOT a failure; requires the Developer Disk Image to be mounted, which Xcode does automatically). Requires `pymobiledevice3` on the host (`pipx install pymobiledevice3`, or a venv; override its path with FLUTTER_DEVICE_PYMOBILEDEVICE3); when it is missing the physical path returns {supported:false} with an install hint and captures NOTHING — it never substitutes another device. Android — `adb -s <serial> exec-out screencap -p`; tvOS SIMULATOR — simctl (physical Apple TV returns {supported:false}); macOS — `screencapture -R<x,y,w,h>` WINDOW-TARGETED against the target app's LIVE front-window bounds (never a full-desktop grab — that would leak whatever else the machine's owner has open); needs Screen Recording granted (flutter_info probes this by effect); Tizen/webOS — {supported:false} (no clean path — `sdb shell` is DISABLED on Samsung devices, so no device-side screencap; use Marionette take_screenshots over the VM service for the Flutter view). When output_path is omitted the PNG is written to a predictable temp path that is returned.",
       inputSchema: {
         type: "object",
         properties: {
@@ -330,6 +346,7 @@ function buildFlutterTools(): ToolDefinition[] {
             description:
               "When true, also return the PNG bytes base64-encoded inline (in addition to the saved path). Default false.",
           },
+          ...captureTargetProp,
           ...deviceUdidProp(),
         },
       },
@@ -337,7 +354,7 @@ function buildFlutterTools(): ToolDefinition[] {
     {
       name: "flutter_record",
       description:
-        "Record a bounded screen CLIP (video/gif) to a file and return the absolute saved path — for before/after captures. DURATION-BOUNDED: it records `duration_s` seconds then stops cleanly. PER-PLATFORM reality (encoded so you don't re-derive it): Android (best) — native mp4 via `adb shell screenrecord`, SIGINT'd on-device to flush, then pulled (no ffmpeg needed for mp4); iOS SIMULATOR — native mp4 via `xcrun simctl io recordVideo`; iOS PHYSICAL device — NO native recorder, so a screenshot BURST is assembled with ffmpeg (realistically only ~1–3 fps and CHOPPY because each dvt screenshot takes ~0.3–1s — a documented tradeoff, not a bug; needs pymobiledevice3 + ffmpeg); tvOS/Tizen/webOS — {supported:false} (no validated recording path; use Marionette take_screenshots over the VM service for the Flutter view). `format` 'gif' ALWAYS needs ffmpeg (native recorders emit mp4 only); absent ffmpeg, gif + the iOS-device path return {supported:false} with an install hint while native-mp4 paths still work (detect via FLUTTER_DEVICE_FFMPEG override / PATH / Homebrew). When output_path is omitted the clip is written to a predictable temp path that is returned as savedPath.",
+        "Record a bounded screen CLIP (video/gif) to a file and return the absolute saved path — for before/after captures. DURATION-BOUNDED: it records `duration_s` seconds then stops cleanly. PER-PLATFORM reality (encoded so you don't re-derive it): Android (best) — native mp4 via `adb shell screenrecord`, SIGINT'd on-device to flush, then pulled (no ffmpeg needed for mp4); iOS SIMULATOR — native mp4 via `xcrun simctl io recordVideo`; iOS PHYSICAL device — NO native recorder, so a screenshot BURST is assembled with ffmpeg (realistically only ~1–3 fps and CHOPPY because each dvt screenshot takes ~0.3–1s — a documented tradeoff, not a bug; needs pymobiledevice3 + ffmpeg); tvOS/Tizen/webOS — {supported:false} (no validated recording path; use Marionette take_screenshots over the VM service for the Flutter view). `format` 'gif' ALWAYS needs ffmpeg (native recorders emit mp4 only); absent ffmpeg, gif + the iOS-device path return {supported:false} with an install hint while native-mp4 paths still work (detect via FLUTTER_DEVICE_FFMPEG override / PATH / Homebrew). When output_path is omitted the clip is written to a predictable temp path that is returned as savedPath. WHICH TARGET: routed exactly like flutter_screenshot — `device_udid` wins, otherwise PHYSICAL-FIRST on iOS/tvOS, with `target: \"simulator\"` to record a booted simulator while a phone is attached; the response names the `device`/`deviceKind` it recorded.",
       inputSchema: {
         type: "object",
         properties: {
@@ -363,6 +380,7 @@ function buildFlutterTools(): ToolDefinition[] {
             description:
               "Output container. 'mp4' (default) uses the native recorder where available (no ffmpeg). 'gif' always requires ffmpeg.",
           },
+          ...captureTargetProp,
           ...deviceUdidProp(),
         },
       },

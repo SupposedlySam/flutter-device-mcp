@@ -1,7 +1,7 @@
 /**
  * Locate the `cliclick` CLI for {@link MacosAdapter}'s pointer/key input plane.
  *
- * Same rationale as {@link locateIdb}/{@link locatePymobiledevice3}: the MCP
+ * Same rationale as {@link locateIdb}/{@link resolvePymobiledevice3}: the MCP
  * server is often launched by a GUI app (an IDE, an agent host) whose process
  * PATH omits Homebrew's `/opt/homebrew/bin`, so a bare `command -v cliclick`
  * through the server's env can fail even when cliclick is installed. This

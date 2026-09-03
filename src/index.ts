@@ -189,6 +189,7 @@ class FlutterDeviceServer {
               output_path: args.output_path as string | undefined,
               include_base64: args.include_base64 as boolean | undefined,
               device_udid: args.device_udid as string | undefined,
+              target: args.target as "simulator" | "device" | undefined,
             })
           );
         case "flutter_record":
@@ -200,6 +201,7 @@ class FlutterDeviceServer {
               fps: args.fps as number | undefined,
               format: args.format as "mp4" | "gif" | undefined,
               device_udid: args.device_udid as string | undefined,
+              target: args.target as "simulator" | "device" | undefined,
             })
           );
         case "flutter_set_input_mode":

@@ -36,9 +36,9 @@ jest.unstable_mockModule("../src/launchCapture.js", () => ({
   // shared stand-in (pinned byte-for-byte to the real helper in
   // launchCapture.test.ts) rather than a per-file copy.
   buildPtyCaptureCommand: mockBuildPtyCaptureCommand,
-  // allocateControlFifo is called by the iOS launch; stand it in as "no control
-  // channel" (undefined) since these tests have no live daemon/FIFO.
-  allocateControlFifo: () => undefined,
+  // allocateControlChannel is called by the iOS launch; stand it in as "no
+  // control channel" (undefined) since these tests have no live daemon/FIFO.
+  allocateControlChannel: () => undefined,
 }));
 
 const okResult = {
@@ -83,6 +83,24 @@ const IPHONE_FLUTTER_ECID = "00008020-001A2D021AF3002E";
 
 // The pid the app runs under in the fixture below.
 const APP_PID = 4231;
+
+/**
+ * A PNG header (8-byte signature + IHDR) declaring `width`x`height`. The
+ * adapter reads a capture's dimensions out of exactly these bytes, so a header
+ * is a complete stand-in for a real screenshot here.
+ */
+function pngHeader(width: number, height: number): Buffer {
+  const header = Buffer.alloc(24);
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(header, 0);
+  header.writeUInt32BE(13, 8); // IHDR chunk length
+  header.write("IHDR", 12, "ascii");
+  header.writeUInt32BE(width, 16);
+  header.writeUInt32BE(height, 20);
+  return header;
+}
+
+/** An iPhone XR's screen size — the pinned device in the routing tests. */
+const PNG_828x1792 = pngHeader(828, 1792);
 
 /**
  * Realistic `xcrun devicectl device info processes --json-output -` payload:
@@ -965,18 +983,39 @@ describe("IosAdapter.screenshot", () => {
     }
   });
 
-  /** Build an ios adapter with a pinned pymobiledevice3 locator + flutter command. */
+  /** Build an ios adapter with a pinned pymobiledevice3 resolution + flutter command. */
   function iosWithPmd3(present: boolean, device?: string) {
-    return new IosAdapter(
-      {
-        appDir: IOS_APP_DIR,
-        appId: IOS_APP_ID,
-        device,
-        flutterCommand: "flutter",
-        locatePymobiledevice3: () =>
-          present ? "/opt/homebrew/bin/pymobiledevice3" : undefined,
-      }
-    );
+    return new IosAdapter({
+      appDir: IOS_APP_DIR,
+      appId: IOS_APP_ID,
+      device,
+      flutterCommand: "flutter",
+      resolvePymobiledevice3: () => ({
+        binary: present ? "/opt/homebrew/bin/pymobiledevice3" : undefined,
+      }),
+    });
+  }
+
+  /**
+   * An adapter whose FLUTTER_DEVICE_PYMOBILEDEVICE3 override was REJECTED:
+   * resolution self-healed to the PATH copy (or to nothing) and carries the
+   * warning.
+   */
+  function iosWithRejectedOverride(fallback?: string) {
+    return new IosAdapter({
+      appDir: IOS_APP_DIR,
+      appId: IOS_APP_ID,
+      flutterCommand: "flutter",
+      resolvePymobiledevice3: () => ({
+        binary: fallback,
+        overrideWarning:
+          "FLUTTER_DEVICE_PYMOBILEDEVICE3 is set to /nonexistent/pymobiledevice3, but " +
+          "that path cannot be used for physical-device capture (no such file). " +
+          (fallback
+            ? `Using ${fallback} instead — fix or unset the override so the two cannot disagree.`
+            : "No other pymobiledevice3 was found either, so nothing could be captured."),
+      }),
+    });
   }
 
   /**
@@ -1056,6 +1095,411 @@ describe("IosAdapter.screenshot", () => {
           (c as string).includes("simctl io")
       )
     ).toBe(false);
+  });
+
+  /**
+   * The host that produced the live defect: a physical iPhone attached AND a
+   * simulator booted at the same time. Routing on "is a simulator present?"
+   * silently served every capture from simctl — a real PNG of the WRONG machine,
+   * reported as success. These tests pin the routing to the RESOLVED target.
+   */
+  function mockBothTargets(writePng?: string) {
+    runShell.mockImplementation(async (cmd: string) => {
+      if (cmd.includes("devicectl list devices")) {
+        return {
+          ...okResult,
+          stdout:
+            "Name  Host  Identifier  State  Model\n" +
+            `My iPhone  h  ${IPHONE_DEVICECTL_ID}  connected  (iPhone11,8)\n`,
+        };
+      }
+      if (cmd.includes("simctl list devices --json")) {
+        return {
+          ...okResult,
+          stdout: JSON.stringify({
+            devices: {
+              "com.apple.CoreSimulator.SimRuntime.iOS-18-0": [
+                {
+                  udid: "SIM-UDID-1",
+                  name: "iPhone 15",
+                  state: "Booted",
+                  isAvailable: true,
+                },
+              ],
+            },
+          }),
+        };
+      }
+      if (cmd.includes("devices --machine")) {
+        return {
+          ...okResult,
+          stdout: JSON.stringify([
+            {
+              id: IPHONE_FLUTTER_ECID,
+              name: "My iPhone",
+              targetPlatform: "ios",
+              emulator: false,
+              isSupported: true,
+            },
+            {
+              id: "SIM-UDID-1",
+              name: "iPhone 15",
+              targetPlatform: "ios",
+              emulator: true,
+              isSupported: true,
+            },
+          ]),
+        };
+      }
+      if (
+        cmd.includes("developer dvt screenshot") ||
+        (cmd.includes("simctl io") && cmd.includes("screenshot"))
+      ) {
+        if (writePng) fs.writeFileSync(writePng, PNG_828x1792);
+        return okResult;
+      }
+      return okResult;
+    });
+  }
+
+  /** Every screenshot command the adapter shelled, in order. */
+  function shotCommands(): string[] {
+    return runShell.mock.calls
+      .map(([c]) => c as string)
+      .filter(
+        (c) => c.includes("developer dvt screenshot") || c.includes("simctl io")
+      );
+  }
+
+  function tmpPng(tag: string): string {
+    return path.join(
+      os.tmpdir(),
+      `flutter-device-mcp-${tag}-${process.pid}-${Math.random().toString(36).slice(2)}.png`
+    );
+  }
+
+  it("routes a device_udid naming the PHYSICAL device to pymobiledevice3 even while a simulator is BOOTED", async () => {
+    const outPath = tmpPng("route-flutter-id");
+    mockBothTargets(outPath);
+    try {
+      const res = await iosWithPmd3(true).screenshot({
+        outPath,
+        deviceUdid: IPHONE_FLUTTER_ECID,
+      });
+      expect(res.captured).toBe(true);
+      expect(res.deviceKind).toBe("device");
+      expect(res.device).toBe(IPHONE_FLUTTER_ECID);
+      expect(res.via).toBe("pymobiledevice3");
+      // The pin is honored, not "self-healed" onto the booted simulator.
+      expect(res.deviceWarning).toBeUndefined();
+      expect(shotCommands()).toHaveLength(1);
+      expect(shotCommands()[0]).toContain("developer dvt screenshot");
+      expect(shotCommands()[0]).toContain(`--udid '${IPHONE_FLUTTER_ECID}'`);
+      expect(shotCommands()[0]).not.toContain("simctl io");
+    } finally {
+      fs.rmSync(outPath, { force: true });
+    }
+  });
+
+  it("routes a device_udid given in DEVICECTL id space to the physical path too (the ids are not interchangeable)", async () => {
+    const outPath = tmpPng("route-devicectl-id");
+    mockBothTargets(outPath);
+    try {
+      const res = await iosWithPmd3(true).screenshot({
+        outPath,
+        deviceUdid: IPHONE_DEVICECTL_ID,
+      });
+      expect(res.captured).toBe(true);
+      expect(res.deviceKind).toBe("device");
+      expect(shotCommands()[0]).toContain("developer dvt screenshot");
+      // pymobiledevice3 addresses the device by its flutter id / ECID, so the
+      // devicectl id must be TRANSLATED, not passed through.
+      expect(shotCommands()[0]).toContain(`--udid '${IPHONE_FLUTTER_ECID}'`);
+    } finally {
+      fs.rmSync(outPath, { force: true });
+    }
+  });
+
+  it("NEVER substitutes the booted simulator when the physical target's capture tool is missing", async () => {
+    const outPath = tmpPng("route-no-substitute");
+    // The mocked simctl WOULD write a valid PNG if it were reached, so a capture
+    // reported here could only be the simulator standing in for the phone.
+    mockBothTargets(outPath);
+    try {
+      const res = await iosWithPmd3(false).screenshot({
+        outPath,
+        deviceUdid: IPHONE_FLUTTER_ECID,
+      });
+      expect(res.captured).toBe(false);
+      expect(res.supported).toBe(false);
+      expect(res.deviceKind).toBe("device");
+      expect(res.device).toBe(IPHONE_FLUTTER_ECID);
+      expect(res.savedPath).toBeUndefined();
+      expect(res.reason).toMatch(/pymobiledevice3` was not found/i);
+      // The whole point: a booted simulator is sitting right there and must NOT
+      // be captured in the pinned device's place.
+      expect(shotCommands()).toEqual([]);
+      expect(fs.existsSync(outPath)).toBe(false);
+    } finally {
+      fs.rmSync(outPath, { force: true });
+    }
+  });
+
+  it("defaults to the PHYSICAL device with no pin, matching what a deploy would have targeted", async () => {
+    const outPath = tmpPng("route-default");
+    mockBothTargets(outPath);
+    try {
+      const res = await iosWithPmd3(true).screenshot({ outPath });
+      expect(res.deviceKind).toBe("device");
+      expect(shotCommands()[0]).toContain("developer dvt screenshot");
+    } finally {
+      fs.rmSync(outPath, { force: true });
+    }
+  });
+
+  it("captures the simulator when target: \"simulator\" asks for it, phone attached or not", async () => {
+    const outPath = tmpPng("route-sim");
+    mockBothTargets(outPath);
+    try {
+      const res = await iosWithPmd3(true).screenshot({
+        outPath,
+        target: "simulator",
+      });
+      expect(res.captured).toBe(true);
+      expect(res.deviceKind).toBe("simulator");
+      expect(res.device).toBe("SIM-UDID-1");
+      expect(res.via).toBe("simctl");
+      expect(shotCommands()[0]).toContain("simctl io 'SIM-UDID-1' screenshot");
+      expect(shotCommands()[0]).not.toContain("developer dvt screenshot");
+    } finally {
+      fs.rmSync(outPath, { force: true });
+    }
+  });
+
+  it("reports the captured PNG's pixel dimensions, so a wrong-device capture is visible", async () => {
+    const outPath = tmpPng("route-dims");
+    mockBothTargets(outPath);
+    try {
+      const res = await iosWithPmd3(true).screenshot({
+        outPath,
+        deviceUdid: IPHONE_FLUTTER_ECID,
+      });
+      // 828x1792 is an iPhone XR; a booted iPhone 15 simulator would report
+      // 1179x2556 — the dimensions alone identify which machine answered.
+      expect(res.pixelWidth).toBe(828);
+      expect(res.pixelHeight).toBe(1792);
+    } finally {
+      fs.rmSync(outPath, { force: true });
+    }
+  });
+
+  it("treats pymobiledevice3's iOS-17+ stderr WARNING as success (exit 0 + a written PNG is the contract)", async () => {
+    const outPath = tmpPng("route-warning");
+    mockBothTargets();
+    // Re-wrap the capture call to emit the real tunnel warning on stderr while
+    // still exiting 0 and writing the PNG.
+    const base = runShell.getMockImplementation()!;
+    runShell.mockImplementation(async (cmd: string, opts?: unknown) => {
+      if (cmd.includes("developer dvt screenshot")) {
+        fs.writeFileSync(outPath, PNG_828x1792);
+        return {
+          ...okResult,
+          stderr:
+            "WARNING <...> failed to connect to lockdown, retrying over the native tunnel",
+          combined:
+            "WARNING <...> failed to connect to lockdown, retrying over the native tunnel",
+        };
+      }
+      return base(cmd, opts);
+    });
+    try {
+      const res = await iosWithPmd3(true).screenshot({
+        outPath,
+        deviceUdid: IPHONE_FLUTTER_ECID,
+      });
+      expect(res.captured).toBe(true);
+      expect(res.savedPath).toBe(outPath);
+    } finally {
+      fs.rmSync(outPath, { force: true });
+    }
+  });
+
+  it("surfaces pymobiledevice3Warning on a SUCCESSFUL capture that self-healed off a rejected override", async () => {
+    const outPath = tmpPng("route-override-warning");
+    mockBothTargets(outPath);
+    try {
+      const res = await iosWithRejectedOverride(
+        "/opt/homebrew/bin/pymobiledevice3"
+      ).screenshot({ outPath, deviceUdid: IPHONE_FLUTTER_ECID });
+      // The capture still succeeds — self-heal, matching the stale-device-pin
+      // convention…
+      expect(res.captured).toBe(true);
+      expect(res.via).toBe("pymobiledevice3");
+      // …but the operator named a binary and a DIFFERENT one ran, so the result
+      // must say so. Without this the typo'd path looked like it had worked.
+      expect(res.pymobiledevice3Warning).toContain(
+        "FLUTTER_DEVICE_PYMOBILEDEVICE3"
+      );
+      expect(res.pymobiledevice3Warning).toContain("/nonexistent/pymobiledevice3");
+      expect(res.pymobiledevice3Warning).toContain(
+        "/opt/homebrew/bin/pymobiledevice3"
+      );
+    } finally {
+      fs.rmSync(outPath, { force: true });
+    }
+  });
+
+  it("surfaces pymobiledevice3Warning when the rejected override leaves nothing to capture with", async () => {
+    mockBothTargets();
+    const res = await iosWithRejectedOverride().screenshot({
+      deviceUdid: IPHONE_FLUTTER_ECID,
+    });
+    expect(res.captured).toBe(false);
+    expect(res.supported).toBe(false);
+    expect(res.pymobiledevice3Warning).toContain("/nonexistent/pymobiledevice3");
+    // Still no substitution: the booted simulator is not captured in its place.
+    expect(shotCommands()).toEqual([]);
+  });
+
+  it("omits pymobiledevice3Warning entirely when no override was rejected", async () => {
+    const outPath = tmpPng("route-no-warning");
+    mockBothTargets(outPath);
+    try {
+      const res = await iosWithPmd3(true).screenshot({
+        outPath,
+        deviceUdid: IPHONE_FLUTTER_ECID,
+      });
+      expect(res.captured).toBe(true);
+      expect(res.pymobiledevice3Warning).toBeUndefined();
+    } finally {
+      fs.rmSync(outPath, { force: true });
+    }
+  });
+
+  it("reports no capture (never a guess) when nothing is connected", async () => {
+    runShell.mockImplementation(async (cmd: string) => {
+      if (cmd.includes("simctl list devices --json")) return { ...okResult, stdout: "{}" };
+      if (cmd.includes("devicectl list devices")) return { ...okResult, stdout: "" };
+      if (cmd.includes("devices --machine")) return { ...okResult, stdout: "[]" };
+      return okResult;
+    });
+    const res = await iosWithPmd3(true).screenshot({});
+    expect(res.captured).toBe(false);
+    expect(res.supported).toBe(false);
+    expect(res.reason).toMatch(/No iOS device or simulator/i);
+    expect(shotCommands()).toEqual([]);
+  });
+});
+
+describe("IosAdapter.record device routing", () => {
+  it("records the PHYSICAL device (burst path) when pinned, never simctl recordVideo", async () => {
+    // No pymobiledevice3/ffmpeg needed to prove the ROUTING: the physical path
+    // reports its own unsupported result, and simctl is never reached.
+    runShell.mockImplementation(async (cmd: string) => {
+      if (cmd.includes("devicectl list devices")) {
+        return {
+          ...okResult,
+          stdout:
+            "Name  Host  Identifier  State  Model\n" +
+            `My iPhone  h  ${IPHONE_DEVICECTL_ID}  connected  (iPhone11,8)\n`,
+        };
+      }
+      if (cmd.includes("simctl list devices --json")) {
+        return {
+          ...okResult,
+          stdout: JSON.stringify({
+            devices: {
+              "com.apple.CoreSimulator.SimRuntime.iOS-18-0": [
+                { udid: "SIM-UDID-1", name: "iPhone 15", state: "Booted", isAvailable: true },
+              ],
+            },
+          }),
+        };
+      }
+      if (cmd.includes("devices --machine")) {
+        return {
+          ...okResult,
+          stdout: JSON.stringify([
+            {
+              id: IPHONE_FLUTTER_ECID,
+              name: "My iPhone",
+              targetPlatform: "ios",
+              emulator: false,
+              isSupported: true,
+            },
+          ]),
+        };
+      }
+      return okResult;
+    });
+    const adapter = new IosAdapter({
+      appDir: IOS_APP_DIR,
+      appId: IOS_APP_ID,
+      flutterCommand: "flutter",
+      resolvePymobiledevice3: () => ({ binary: undefined }),
+    });
+    const res = await adapter.record!({
+      durationSeconds: 2,
+      fps: 2,
+      format: "mp4",
+      deviceUdid: IPHONE_FLUTTER_ECID,
+    });
+    expect(res.recorded).toBe(false);
+    expect(res.deviceKind).toBe("device");
+    expect(res.device).toBe(IPHONE_FLUTTER_ECID);
+    expect(res.reason).toMatch(/no native screen recorder/i);
+    expect(
+      runShell.mock.calls.some(([c]) => (c as string).includes("recordVideo"))
+    ).toBe(false);
+  });
+
+  it("carries a rejected FLUTTER_DEVICE_PYMOBILEDEVICE3 through to the recording result too", async () => {
+    runShell.mockImplementation(async (cmd: string) => {
+      if (cmd.includes("devicectl list devices")) {
+        return {
+          ...okResult,
+          stdout:
+            "Name  Host  Identifier  State  Model\n" +
+            `My iPhone  h  ${IPHONE_DEVICECTL_ID}  connected  (iPhone11,8)\n`,
+        };
+      }
+      if (cmd.includes("simctl list devices --json")) return { ...okResult, stdout: "{}" };
+      if (cmd.includes("devices --machine")) {
+        return {
+          ...okResult,
+          stdout: JSON.stringify([
+            {
+              id: IPHONE_FLUTTER_ECID,
+              name: "My iPhone",
+              targetPlatform: "ios",
+              emulator: false,
+              isSupported: true,
+            },
+          ]),
+        };
+      }
+      return okResult;
+    });
+    const adapter = new IosAdapter({
+      appDir: IOS_APP_DIR,
+      appId: IOS_APP_ID,
+      flutterCommand: "flutter",
+      resolvePymobiledevice3: () => ({
+        binary: undefined,
+        overrideWarning:
+          "FLUTTER_DEVICE_PYMOBILEDEVICE3 is set to /nonexistent/pymobiledevice3, but " +
+          "that path cannot be used for physical-device capture (no such file). No other " +
+          "pymobiledevice3 was found either, so nothing could be captured.",
+      }),
+    });
+    const res = await adapter.record!({
+      durationSeconds: 2,
+      fps: 2,
+      format: "mp4",
+      deviceUdid: IPHONE_FLUTTER_ECID,
+    });
+    expect(res.recorded).toBe(false);
+    expect(res.pymobiledevice3Warning).toContain("/nonexistent/pymobiledevice3");
   });
 });
 

@@ -1,5 +1,6 @@
 import fs from "fs";
 import {
+  allocateControlChannel,
   buildPtyCaptureCommand,
   createLogPath,
   evaluateLaunchLog,
@@ -100,6 +101,16 @@ describe("buildPtyCaptureCommand", () => {
   // no assertion depends on the host's process.platform.
   const SIMPLE = "flutter run --no-build --debug -d 'SIM-1'";
   const COMPOUND = "export PATH='/opt/bin:'\"$PATH\"; ares-launch -d 'tv1' && echo ok";
+  // A control channel = the durable FIFO + the pty bridge that carries it into
+  // flutter's terminal. Both halves are fixed values here so the composed launch
+  // command can be asserted byte-for-byte.
+  const CHANNEL = {
+    fifoPath: "/tmp/ctl.fifo",
+    forwarder: {
+      python: "/usr/bin/python3",
+      script: "/pkg/scripts/pty-control-forward.py",
+    },
+  };
 
   it("uses the darwin `script -q /dev/null /bin/sh -c '<inner>'` form", () => {
     expect(buildPtyCaptureCommand({ inner: SIMPLE, platform: "darwin" })).toBe(
@@ -169,15 +180,15 @@ describe("buildPtyCaptureCommand", () => {
     const platforms: NodeJS.Platform[] = ["darwin", "linux"];
     const inners = [SIMPLE, COMPOUND];
     const cwds: (string | undefined)[] = [undefined, "/repo/app"];
-    const fifos: (string | undefined)[] = [undefined, "/tmp/ctl.fifo"];
+    const channels = [undefined, CHANNEL];
     for (const platform of platforms) {
       for (const inner of inners) {
         for (const cwd of cwds) {
-          for (const controlFifoPath of fifos) {
+          for (const controlChannel of channels) {
             expect(
-              mockBuildPtyCaptureCommand({ inner, cwd, platform, controlFifoPath })
+              mockBuildPtyCaptureCommand({ inner, cwd, platform, controlChannel })
             ).toBe(
-              buildPtyCaptureCommand({ inner, cwd, platform, controlFifoPath })
+              buildPtyCaptureCommand({ inner, cwd, platform, controlChannel })
             );
           }
         }
@@ -185,19 +196,77 @@ describe("buildPtyCaptureCommand", () => {
     }
   });
 
-  it("wires the flutter runner's stdin to the control FIFO when supplied", () => {
+  it("launches through the FIFO→pty bridge (NOT `script`) when a control channel is supplied", () => {
     const cmd = buildPtyCaptureCommand({
       inner: SIMPLE,
       platform: "darwin",
-      controlFifoPath: "/tmp/ctl.fifo",
+      controlChannel: CHANNEL,
     });
-    // The inner is redirected from a read-write fd on the FIFO (`exec 3<>…; … <&3`)
-    // so `r`/`R` can be appended later without EOF-killing the reader. The FIFO
-    // path is single-quoted inside the outer `/bin/sh -c` layer, so its quotes
-    // appear escaped (`'\''`) — assert on the fd-redirect tokens, which survive.
-    expect(cmd).toContain("exec 3<>");
-    expect(cmd).toContain("/tmp/ctl.fifo");
-    expect(cmd).toContain("<&3");
+    // The bridge owns the pty and takes the FIFO as its own stdin source, so the
+    // runner's stdin is a TERMINAL — the only way the flutter tool reads `r`/`R`.
+    expect(cmd).toBe(
+      `exec '/usr/bin/python3' '/pkg/scripts/pty-control-forward.py' '/tmp/ctl.fifo' ` +
+        `'${SIMPLE.replace(/'/g, "'\\''")}'`
+    );
+    // `script` is NOT involved: it ioctls its own stdin, which is why handing it
+    // the FIFO failed ("tcgetattr/ioctl: Operation not supported on socket").
+    expect(cmd).not.toContain("script -q");
+    // And no plain stdin redirect — a FIFO on fd 0 never reaches flutter's key
+    // handler (singleCharMode requires a terminal), which is the defect this fixes.
+    expect(cmd).not.toContain("<&3");
+  });
+
+  it("keeps the bridge form on linux too (the host `script` split no longer applies)", () => {
+    expect(
+      buildPtyCaptureCommand({
+        inner: SIMPLE,
+        platform: "linux",
+        controlChannel: CHANNEL,
+      })
+    ).toBe(
+      buildPtyCaptureCommand({
+        inner: SIMPLE,
+        platform: "darwin",
+        controlChannel: CHANNEL,
+      })
+    );
+  });
+
+  it("still prepends the cwd when launching through the bridge", () => {
+    expect(
+      buildPtyCaptureCommand({
+        inner: SIMPLE,
+        cwd: "/repo/app",
+        platform: "darwin",
+        controlChannel: CHANNEL,
+      }).startsWith("cd '/repo/app' && exec '/usr/bin/python3'")
+    ).toBe(true);
+  });
+});
+
+describe("allocateControlChannel", () => {
+  it("returns undefined when the host has no pty bridge, so no half-built channel is recorded", () => {
+    // A FIFO with no bridge accepts every write and delivers none of them.
+    // Recording that as a control channel is what let flutter_hot_restart
+    // report a restart it had not performed, so the FIFO is not even created.
+    expect(allocateControlChannel({ forwarder: () => undefined })).toBeUndefined();
+  });
+
+  it("pairs a real FIFO with the bridge when one is available", () => {
+    const forwarder = {
+      python: "/usr/bin/python3",
+      script: "/pkg/scripts/pty-control-forward.py",
+    };
+    const channel = allocateControlChannel({ forwarder: () => forwarder });
+    expect(channel).toBeDefined();
+    try {
+      expect(channel!.forwarder).toBe(forwarder);
+      // The FIFO half must exist on disk — it is the durable, cross-process end.
+      expect(fs.existsSync(channel!.fifoPath)).toBe(true);
+      expect(fs.statSync(channel!.fifoPath).isFIFO()).toBe(true);
+    } finally {
+      fs.rmSync(channel!.fifoPath, { force: true });
+    }
   });
 });
 

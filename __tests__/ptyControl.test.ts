@@ -6,27 +6,7 @@ import {
   makeControlFifo,
   removeControlFifo,
   sendControlChar,
-  withControlFifoStdin,
 } from "../src/ptyControl.js";
-
-describe("withControlFifoStdin", () => {
-  it("opens the FIFO read-write on fd 3 and binds the inner's stdin to it", () => {
-    const wired = withControlFifoStdin(
-      "flutter run --debug -d 'X'",
-      "/tmp/ctl.fifo"
-    );
-    // read-write fd (so the reader never sees EOF) + stdin redirect from it.
-    expect(wired).toBe(
-      "exec 3<>'/tmp/ctl.fifo'; flutter run --debug -d 'X' <&3"
-    );
-  });
-
-  it("single-quotes a FIFO path so an odd path can't break the command", () => {
-    const wired = withControlFifoStdin("flutter run", "/tmp/a b/c'.fifo");
-    expect(wired).toContain("exec 3<>'/tmp/a b/c'\\''.fifo'");
-    expect(wired.endsWith(" <&3")).toBe(true);
-  });
-});
 
 describe("createControlFifoPath", () => {
   it("produces a unique .fifo path under the temp dir", () => {
