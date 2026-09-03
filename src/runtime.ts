@@ -15,6 +15,7 @@ import { WebOSAdapter } from "./adapters/webos.js";
 import { IosAdapter } from "./adapters/ios.js";
 import { AndroidAdapter } from "./adapters/android.js";
 import { TvosAdapter } from "./adapters/tvos.js";
+import { MacosAdapter } from "./adapters/macos.js";
 import { Platform } from "./types.js";
 import {
   ResolveConfigOptions,
@@ -87,7 +88,19 @@ export function buildRuntime(opts: ResolveConfigOptions = {}): Runtime {
     preBuild: platforms.webos.preBuild,
   });
 
-  const adapters: PlatformAdapter[] = [tizen, webos, ios, android, tvos];
+  // macOS takes no `appDir`: it drives a prebuilt, signed `.app` a caller
+  // supplies, and there is no build step here for a Flutter project to feed.
+  // The bundle id is likewise NOT derived from the project — install() reads
+  // the STAGED bundle's own CFBundleIdentifier, which is the only id that can
+  // be right for an arbitrary app.
+  const macos = new MacosAdapter({
+    appId: platforms.macos.appId,
+    appPath: platforms.macos.macosAppPath,
+    appUrl: platforms.macos.macosAppUrl,
+    processName: platforms.macos.macosProcessName,
+  });
+
+  const adapters: PlatformAdapter[] = [tizen, webos, ios, android, tvos, macos];
   const registry = new AdapterRegistry(adapters, config.defaultPlatform);
   return { registry, config };
 }

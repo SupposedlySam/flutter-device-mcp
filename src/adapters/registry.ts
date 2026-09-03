@@ -35,7 +35,8 @@ export class AdapterRegistry {
       value === "webos" ||
       value === "ios" ||
       value === "android" ||
-      value === "tvos"
+      value === "tvos" ||
+      value === "macos"
     );
   }
 
@@ -50,7 +51,7 @@ export class AdapterRegistry {
     if (!AdapterRegistry.isPlatform(platform)) {
       throw new McpError(
         ErrorCode.InvalidParams,
-        `Unknown platform "${platform}". Supported: tizen, webos, ios, android, tvos (or omit for auto).`
+        `Unknown platform "${platform}". Supported: tizen, webos, ios, android, tvos, macos (or omit for auto).`
       );
     }
     return this.get(platform);

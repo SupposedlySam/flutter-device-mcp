@@ -85,13 +85,14 @@ function parseArgs(argv: string[]): ParsedArgs {
 const HELP = `flutter-device — build, deploy, launch, and drive Flutter apps
 
 Usage:
-  flutter-device <command> [--platform <ios|android|tizen|tvos|webos>] [--app-dir <dir>] [flags]
+  flutter-device <command> [--platform <ios|android|tizen|tvos|webos|macos>] [--app-dir <dir>] [flags]
 
 Commands:
   info                Device + environment status and resolved config (with provenance)
   setup               Prepare the device for development (--device-ip <host>)
   build               Build the app package (--mode release|profile|debug, --profile, --target, --install, --run)
   deploy              Install + launch, capture the VM Service URI (THE key command; --mode to match the built artifact)
+                      macOS: stages + launches a prebuilt signed .app (--app-path <path> | --app-url <url>); no VM Service URI exists there
   uninstall           Remove the app from the device
   kill-stale          Kill stale launch/driver processes holding the device lock
   terminate           Force-quit the app (mobile)
@@ -105,6 +106,7 @@ Commands:
   key                 Send a remote/navigation key (--key UP|DOWN|ENTER|…) or type text (--text "hi")
   geometry            Report screen size + device pixel ratio (--view-width/--view-height to cross-check)
   pointer             Drive the pointer (--action move|click|scroll, --x --y --dy) — TV
+                      macOS: x/y are WINDOW-RELATIVE points by default (--absolute for raw screen points, --double for a double-click)
   system-prompt       Detect/tap OS-level dialogs (--action detect|tap|dismiss) — iOS
 
 Global flags:

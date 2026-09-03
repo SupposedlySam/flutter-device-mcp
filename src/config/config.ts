@@ -52,6 +52,21 @@ export interface PlatformSettings {
   androidLaunchMode?: AndroidLaunchMode;
   /** Directory holding the `flutter-tvos` bin, prepended to PATH for tvOS. */
   flutterTvosBinDir?: string;
+  /**
+   * macOS: default `.app`/`.tar.gz`/`.dmg` PATH to stage when a deploy call
+   * passes no `app_path`. This MCP does not build macOS apps, so a source has
+   * to come from somewhere — either per-call or from here.
+   */
+  macosAppPath?: string;
+  /** macOS: default archive URL to stage, used when no path is configured. */
+  macosAppUrl?: string;
+  /**
+   * macOS: pin the target process by its `CFBundleExecutable` (NOT its display
+   * name), so geometry/screenshot/pointer/key can drive an ALREADY-RUNNING app
+   * this session never deployed — and so `kill_stale` can still find a stale
+   * instance after an MCP server restart, when the in-memory name is gone.
+   */
+  macosProcessName?: string;
 }
 
 /** The fully-resolved configuration handed to the runtime. */
@@ -81,7 +96,8 @@ function asPlatform(value: string | undefined): Platform | undefined {
     value === "webos" ||
     value === "ios" ||
     value === "android" ||
-    value === "tvos"
+    value === "tvos" ||
+    value === "macos"
     ? value
     : undefined;
 }
@@ -89,7 +105,14 @@ function asPlatform(value: string | undefined): Platform | undefined {
 /** The env-var prefix for every setting this tool reads. */
 const ENV_PREFIX = "FLUTTER_DEVICE";
 
-const ALL_PLATFORMS: Platform[] = ["tizen", "webos", "ios", "android", "tvos"];
+const ALL_PLATFORMS: Platform[] = [
+  "tizen",
+  "webos",
+  "ios",
+  "android",
+  "tvos",
+  "macos",
+];
 
 /** Shape of the JSON config file (all fields optional). */
 interface ConfigFile {
@@ -108,6 +131,9 @@ interface ConfigFile {
         sdk?: { dataPath?: string; apiVersion?: string };
         androidLaunchMode?: string;
         flutterTvosBinDir?: string;
+        appPath?: string;
+        appUrl?: string;
+        processName?: string;
       }
     >
   >;
@@ -248,6 +274,19 @@ export function resolveConfig(opts: ResolveConfigOptions = {}): ResolvedConfig {
         p === "tvos"
           ? envValue(env, `${ENV_PREFIX}_TVOS_FLUTTER_BIN`) ??
             fromFile.flutterTvosBinDir
+          : undefined,
+      macosAppPath:
+        p === "macos"
+          ? envValue(env, `${ENV_PREFIX}_MACOS_APP_PATH`) ?? fromFile.appPath
+          : undefined,
+      macosAppUrl:
+        p === "macos"
+          ? envValue(env, `${ENV_PREFIX}_MACOS_APP_URL`) ?? fromFile.appUrl
+          : undefined,
+      macosProcessName:
+        p === "macos"
+          ? envValue(env, `${ENV_PREFIX}_MACOS_PROCESS_NAME`) ??
+            fromFile.processName
           : undefined,
     };
   }
