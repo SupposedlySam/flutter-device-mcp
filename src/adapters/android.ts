@@ -852,14 +852,20 @@ export class AndroidAdapter implements PlatformAdapter {
    *
    * The serial is resolved lazily per send through the normal device resolution
    * (per-call pin > env pin > self-heal), so a multi-device host targets the
-   * same device as deploy/lifecycle. Cached so the selected mode and the staged
-   * pointer position survive across tool calls.
+   * same device as deploy/lifecycle. Cached so the selected mode survives across
+   * tool calls.
+   *
+   * The staged pointer position a `move` sets and a `click` consumes does NOT
+   * depend on that cache: it lives in the per-developer on-disk stage keyed by
+   * device (see input/pointerStage.ts), because relying on this object outliving
+   * both calls made coordinate tapping fail — with an error naming a
+   * precondition the caller had already satisfied — after any server restart or
+   * host reload.
    *
    * A per-call `preference.udid` is recorded on the adapter rather than baked
-   * into a fresh controller, because a new controller would drop the staged
-   * pointer position that a `move` sets and a `click` consumes — the pin has to
-   * change the target without resetting the plane. Recording it here mirrors how
-   * the launch mode is resolved at install time and read by the launch.
+   * into a fresh controller so the pin changes the target without resetting the
+   * plane (the selected input mode). Recording it here mirrors how the launch
+   * mode is resolved at install time and read by the launch.
    */
   input(preference: DeviceTargetPreference = {}): InputController {
     this.inputDevicePin = preference.udid;

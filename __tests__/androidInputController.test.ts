@@ -11,7 +11,16 @@ import {
   normalizeAndroidKey,
   parseWmSize,
 } from "../src/input/androidInputController.js";
+import {
+  filePointerStage,
+  memoryPointerStage,
+  PointerStage,
+  stageKey,
+} from "../src/input/pointerStage.js";
 import { CommandResult } from "../src/types.js";
+import fs from "fs";
+import os from "os";
+import path from "path";
 
 const SERIAL = "988a1b413950494c49";
 
@@ -24,11 +33,23 @@ const okResult: CommandResult = {
   timedOut: false,
 };
 
-/** A controller with an injected runner + a fixed serial resolver. */
-function controller(run: jest.Mock) {
+/**
+ * A controller with an injected runner + a fixed serial resolver.
+ *
+ * The pointer stage is injected too, defaulting to a FRESH in-memory stage per
+ * controller: the production stage is on disk (so a staged tap survives a server
+ * restart), and letting tests share it would leak a staged position from one
+ * case into the next. Pass a shared stage to exercise the cross-process path.
+ */
+function controller(
+  run: jest.Mock,
+  stage: PointerStage = memoryPointerStage(),
+  resolveSerial: () => Promise<string> = async () => SERIAL
+) {
   return new AndroidInputController(
-    async () => SERIAL,
-    run as unknown as (cmd: string, opts?: unknown) => Promise<CommandResult>
+    resolveSerial,
+    run as unknown as (cmd: string, opts?: unknown) => Promise<CommandResult>,
+    stage
   );
 }
 
@@ -180,6 +201,114 @@ describe("AndroidInputController", () => {
       /No pointer position staged.*'move'/s
     );
     expect(run).not.toHaveBeenCalled();
+  });
+
+  describe("the staged position survives the process that staged it", () => {
+    /**
+     * THE REGRESSION. `move` used to record the tap position in a field on the
+     * controller, so `click` only saw it while ONE server process happened to
+     * live across both tool calls. Every other case — a restarted server, a
+     * reloaded MCP host, any call that rebuilds the adapter registry — silently
+     * dropped it, and the click failed with "No pointer position staged": an
+     * error naming a precondition the caller HAD satisfied one call earlier,
+     * which is what made coordinate tapping unusable.
+     *
+     * These assert the POSITIVE: a tap actually goes out, at the staged
+     * coordinates, from a controller that never shared memory with the mover.
+     * A test that only asserted "click did not throw" would pass on a no-op.
+     */
+    function tmpStageFile(): string {
+      return path.join(
+        fs.mkdtempSync(path.join(os.tmpdir(), "android-input-stage-")),
+        "pointer-stage.json"
+      );
+    }
+
+    it("taps at the moved-to coordinates from a SEPARATE controller sharing only the on-disk stage", async () => {
+      const file = tmpStageFile();
+      // Two controllers over two stage instances = two server processes. No
+      // shared object graph: the position can only travel through the file.
+      await controller(
+        jest.fn(async () => okResult) as jest.Mock,
+        filePointerStage(file)
+      ).pointerMove(756, 2268);
+
+      const clickRun = jest.fn(async () => okResult) as jest.Mock;
+      await controller(clickRun, filePointerStage(file)).pointerClick();
+
+      expect(clickRun).toHaveBeenCalledWith(
+        `adb -s '${SERIAL}' shell input tap 756 2268`,
+        { timeoutMs: 15000 }
+      );
+    });
+
+    it("anchors a scroll at the staged position from a SEPARATE controller too", async () => {
+      const file = tmpStageFile();
+      await controller(
+        jest.fn(async () => okResult) as jest.Mock,
+        filePointerStage(file)
+      ).pointerMove(540, 1200);
+
+      const scrollRun = jest.fn(async () => okResult) as jest.Mock;
+      await controller(scrollRun, filePointerStage(file)).pointerScroll(400);
+
+      // The anchor is the staged (540,1200), not the wm-size screen center the
+      // no-position fallback would have used.
+      expect(scrollRun).toHaveBeenCalledWith(
+        `adb -s '${SERIAL}' shell input swipe 540 1200 540 800 ` +
+          `${ANDROID_SWIPE_DURATION_MS}`,
+        { timeoutMs: 15000 }
+      );
+    });
+
+    it("keys the stage by device, so a position staged for one serial is NOT tapped on another", async () => {
+      const file = tmpStageFile();
+      await controller(
+        jest.fn(async () => okResult) as jest.Mock,
+        filePointerStage(file),
+        async () => "emulator-5554"
+      ).pointerMove(756, 2268);
+
+      const otherRun = jest.fn(async () => okResult) as jest.Mock;
+      await expect(
+        controller(
+          otherRun,
+          filePointerStage(file),
+          async () => "R5CT10ABCDE"
+        ).pointerClick()
+      ).rejects.toThrow(/No pointer position staged for R5CT10ABCDE/);
+      expect(otherRun).not.toHaveBeenCalled();
+    });
+
+    it("reports the position a click would use, for the tool response", async () => {
+      const file = tmpStageFile();
+      const input = controller(
+        jest.fn(async () => okResult) as jest.Mock,
+        filePointerStage(file)
+      );
+      expect(await input.pointerPosition()).toBeUndefined();
+      await input.pointerMove(120, 340);
+      expect(
+        await controller(run, filePointerStage(file)).pointerPosition()
+      ).toMatchObject({ x: 120, y: 340 });
+    });
+
+    it("names the one-call tap and the D-pad alternative when nothing is staged", async () => {
+      await expect(controller(run).pointerClick()).rejects.toThrow(
+        /pass x\/y directly on this flutter_pointer 'click' call/
+      );
+      await expect(controller(run).pointerClick()).rejects.toThrow(
+        /flutter_key ENTER/
+      );
+    });
+
+    it("stages under the platform-qualified key (no cross-platform collision)", async () => {
+      const file = tmpStageFile();
+      await controller(run, filePointerStage(file)).pointerMove(11, 22);
+      expect(
+        filePointerStage(file).load(stageKey("android", SERIAL))
+      ).toMatchObject({ x: 11, y: 22 });
+    });
   });
 
   it("pointerScroll swipes UP from the staged anchor for a positive (scroll-down) dy", async () => {

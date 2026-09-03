@@ -1,4 +1,7 @@
 import { jest } from "@jest/globals";
+import fs from "fs";
+import os from "os";
+import path from "path";
 import { mockBuildPtyCaptureCommand } from "./support/mockBuildPtyCaptureCommand.js";
 
 // Mock the shell layer so we can assert exactly which adb/flutter commands the
@@ -114,6 +117,12 @@ function mockDiscovery() {
 }
 
 beforeEach(() => {
+  // The pointer stage the adapter's input controller uses is DURABLE (on disk,
+  // per developer), so give every test its own state dir — otherwise a position
+  // staged by one case would still be staged for the next one.
+  process.env.FLUTTER_DEVICE_STATE_DIR = fs.mkdtempSync(
+    path.join(os.tmpdir(), "android-adapter-state-")
+  );
   runShell.mockReset();
   neutralLaunchAndCaptureUri.mockReset();
   allocateControlChannel.mockReset();
@@ -938,13 +947,12 @@ describe("AndroidAdapter per-call device pin (device_udid)", () => {
     }
   });
 
-  it("input sends to the pinned device while keeping the staged pointer position", async () => {
+  it("input taps the pinned device at the position staged for THAT device", async () => {
     mockTwoOnlineDevices();
     const adapter = android();
-    // Stage against the default target, then pin: a pinned call must not mint a
-    // fresh controller, because that would silently drop the staged position a
-    // `move` set and a `click` consumes.
-    await adapter.input().pointerMove(120, 340);
+    // Stage and tap against the SAME pinned target: the pin has to change which
+    // device the plane addresses without resetting the plane.
+    await adapter.input({ udid: EMULATOR }).pointerMove(120, 340);
     await adapter.input({ udid: EMULATOR }).pointerClick();
     expect(runShell).toHaveBeenCalledWith(
       `adb -s '${EMULATOR}' shell input tap 120 340`,
@@ -957,6 +965,30 @@ describe("AndroidAdapter per-call device pin (device_udid)", () => {
       `adb -s '${SERIAL}' shell input keyevent ${ANDROID_KEYCODE_HOME}`,
       { timeoutMs: 15000 }
     );
+  });
+
+  it("does NOT tap one device at a position staged for another", async () => {
+    mockTwoOnlineDevices();
+    const adapter = android();
+    // Staged against the default target, then clicked with a pin to the other
+    // one. The two screens have different coordinate spaces, so carrying the
+    // position across would tap a blind, wrong point — refuse and say so.
+    await adapter.input().pointerMove(120, 340);
+    await expect(
+      adapter.input({ udid: EMULATOR }).pointerClick()
+    ).rejects.toThrow(/No pointer position staged for emulator-5554/);
+    const taps = runShell.mock.calls
+      .map((c) => c[0] as string)
+      .filter((c) => c.includes("input tap"));
+    expect(taps).toEqual([]);
+  });
+
+  it("a pinned call reuses the cached controller (the selected mode survives)", async () => {
+    mockTwoOnlineDevices();
+    const adapter = android();
+    adapter.input().setMode("pointer");
+    // A fresh controller per pinned call would reset this to the "dpad" default.
+    expect(adapter.input({ udid: EMULATOR }).mode).toBe("pointer");
   });
 
   /**
