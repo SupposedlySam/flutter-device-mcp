@@ -14,10 +14,12 @@
  * Appliances: `tizen` (Samsung Smart Monitor/TV, fully implemented) and `webos`
  * (LG TV, Stage-1 stub). TV (Apple family): `tvos` (Apple TV via `flutter-tvos` +
  * xcrun devicectl/simctl). Mobile: `ios` (iPhone/iPad via xcrun devicectl/simctl
- * + flutter) and `android` (adb + flutter). The set is a SUPERSET — each new
- * target is added alongside the existing platforms, not in place of them.
+ * + flutter) and `android` (adb + flutter). Desktop: `macos` (a prebuilt, signed
+ * `.app` driven via cliclick/screencapture/osascript — this MCP does not build
+ * it). The set is a SUPERSET — each new target is added alongside the existing
+ * platforms, not in place of them.
  */
-export type Platform = "tizen" | "webos" | "ios" | "android" | "tvos";
+export type Platform = "tizen" | "webos" | "ios" | "android" | "tvos" | "macos";
 
 // =========== SHELL RESULT ==========
 export interface CommandResult {
@@ -100,6 +102,13 @@ export interface BuildResult {
   installFailed: boolean;
   /** True when this build also launched (seizes the physical display). */
   launchedDisplay: boolean;
+  /**
+   * False when this platform has no build path in this MCP (macOS: bring your
+   * own signed `.app` and point flutter_deploy at it — there is no toolchain
+   * here to build/sign one). Present only when unsupported, mirroring
+   * {@link ScreenshotResult}/{@link RecordResult}'s `supported?: false`.
+   */
+  supported?: false;
 }
 
 // =========== DEVICE DISCOVERY ==========
@@ -187,16 +196,26 @@ export interface InputController {
    * Move the virtual pointer to a DEVICE-pixel position. May throw
    * {@link UnsupportedInputError} on focus-based platforms (e.g. Tizen) that
    * have no free cursor — use {@link key} for navigation there instead.
+   *
+   * `opts.absolute` is an ESCAPE HATCH a controller may honor: when true, `x`/`y`
+   * are ABSOLUTE screen coordinates rather than the platform's own default space
+   * (macOS defaults to WINDOW-RELATIVE points, translated via the target
+   * window's live bounds, precisely so a script survives the window moving).
+   * Controllers with no such distinction ignore it.
    */
-  pointerMove(x: number, y: number): Promise<void>;
-  /** Click at the current pointer position (activates the focused element). */
-  pointerClick(): Promise<void>;
+  pointerMove(x: number, y: number, opts?: PointerCoordinateOpts): Promise<void>;
+  /**
+   * Click at the current pointer position (activates the focused element).
+   * `opts.double` is an escape hatch a controller may honor (macOS: `cliclick
+   * dc:` instead of `c:`); controllers with no double-click concept ignore it.
+   */
+  pointerClick(opts?: PointerClickOpts): Promise<void>;
   /**
    * Scroll by a DEVICE-pixel vertical delta (positive = down). May throw
    * {@link UnsupportedInputError} on focus-based platforms (e.g. Tizen) that
    * have no free cursor — use {@link key} for navigation there instead.
    */
-  pointerScroll(dy: number): Promise<void>;
+  pointerScroll(dy: number, opts?: PointerCoordinateOpts): Promise<void>;
   /**
    * Type a text string into the currently-focused field. OPTIONAL — implemented
    * where the platform has an OS-level text-injection channel (Android:
@@ -204,6 +223,22 @@ export interface InputController {
    * platform and is surfaced as `{ supported: false }`.
    */
   text?(value: string): Promise<void>;
+}
+
+/**
+ * Escape hatch for a controller whose default coordinate space is not plain
+ * absolute screen pixels (today: macOS, whose default is WINDOW-RELATIVE).
+ * Ignored by controllers with no such distinction.
+ */
+export interface PointerCoordinateOpts {
+  /** When true, coordinates are ABSOLUTE screen points/pixels. */
+  absolute?: boolean;
+}
+
+/** Escape hatch for a controller with a double-click concept (macOS). */
+export interface PointerClickOpts {
+  /** When true, perform a double-click instead of a single click. */
+  double?: boolean;
 }
 
 // =========== ERRORS ==========

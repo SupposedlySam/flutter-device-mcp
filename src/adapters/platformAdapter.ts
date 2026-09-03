@@ -62,6 +62,15 @@ export interface InstallOptions {
    * at build time instead and ignore this.
    */
   dartDefine?: Record<string, string>;
+  /**
+   * macOS ONLY: override the `.app` source to stage for this deploy — a local
+   * path (`.app`, `.tar.gz`/`.tgz`, or `.dmg`) or a URL to fetch. Wins over the
+   * adapter's configured FLUTTER_DEVICE_MACOS_APP_PATH/FLUTTER_DEVICE_MACOS_APP_URL
+   * for this one call. Ignored by every other platform.
+   */
+  appPath?: string;
+  /** macOS ONLY: see {@link appPath}; the URL form. Ignored elsewhere. */
+  appUrl?: string;
 }
 
 /**

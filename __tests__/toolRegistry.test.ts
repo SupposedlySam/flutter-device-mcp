@@ -15,6 +15,14 @@ describe("buildToolList (ListTools advertisement)", () => {
     expect(advertised.every((t) => t.name.startsWith("flutter_"))).toBe(true);
   });
 
+  /** The property names one advertised tool's input schema exposes. */
+  const propsOf = (name: string) =>
+    Object.keys(
+      (advertised.find((t) => t.name === name)!.inputSchema as {
+        properties?: Record<string, unknown>;
+      }).properties ?? {}
+    );
+
   describe("per-call app_dir targeting", () => {
     // Tools that act on a PROJECT get the override; tools that act on a DEVICE
     // do not -- advertising it there would imply a checkout mattered to them.
@@ -38,19 +46,39 @@ describe("buildToolList (ListTools advertisement)", () => {
       "flutter_screenshot",
       "flutter_set_input_mode",
     ];
-    const propsOf = (name: string) =>
-      Object.keys(
-        (advertised.find((t) => t.name === name)!.inputSchema as {
-          properties?: Record<string, unknown>;
-        }).properties ?? {}
-      );
-
     it.each(PROJECT_SCOPED)("%s advertises app_dir", (name) => {
       expect(propsOf(name)).toContain("app_dir");
     });
 
     it.each(DEVICE_SCOPED)("%s does NOT advertise app_dir", (name) => {
       expect(propsOf(name)).not.toContain("app_dir");
+    });
+  });
+
+  describe("macos is advertised as a selectable platform", () => {
+    // Every tool takes `platform`, and a value the schema does not list is a
+    // value a strict MCP host will refuse to send — so an adapter registered
+    // in the runtime but missing from this enum is unreachable from the wire.
+    it("every tool's platform enum offers macos", () => {
+      for (const tool of advertised) {
+        const platform = (
+          (tool.inputSchema as { properties?: Record<string, { enum?: string[] }> })
+            .properties ?? {}
+        ).platform;
+        expect(platform?.enum).toContain("macos");
+      }
+    });
+
+    it("flutter_deploy advertises the macOS-only app_path/app_url staging args", () => {
+      expect(propsOf("flutter_deploy")).toEqual(
+        expect.arrayContaining(["app_path", "app_url"])
+      );
+    });
+
+    it("flutter_pointer advertises the macOS-only absolute/double escape hatches", () => {
+      expect(propsOf("flutter_pointer")).toEqual(
+        expect.arrayContaining(["absolute", "double"])
+      );
     });
   });
 

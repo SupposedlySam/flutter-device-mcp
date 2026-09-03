@@ -70,6 +70,19 @@ const GEOMETRY_COORDINATE_NOTE =
   "convert view logical coordinates with `dpr` rather than measuring against " +
   "`logicalDisplaySize`.";
 
+/**
+ * The macOS-specific coordinate contract — see {@link GEOMETRY_COORDINATE_NOTE}'s
+ * Android framing, which does not apply here.
+ */
+const GEOMETRY_COORDINATE_NOTE_MACOS =
+  "`displaySize`/`logicalDisplaySize` are the TARGET WINDOW's bounds in POINTS — the " +
+  "same point space flutter_pointer (window-relative by default) and " +
+  "flutter_screenshot (`screencapture -R`) address; there is no further \"logical\" " +
+  "reduction beneath points on macOS. `dpr` is the display's backingScaleFactor and " +
+  "matters ONLY for interpreting a flutter_screenshot PNG's pixel dimensions " +
+  "(pixels = points × dpr) — it does NOT scale flutter_pointer/flutter_key " +
+  "coordinates, which are already point-space.";
+
 /** A plain, JSON-serializable command result (both frontends render this). */
 export type CommandOutput = Record<string, unknown>;
 
@@ -217,6 +230,7 @@ export class CommandCore {
         platform: adapter.platform,
         ...this.summarizeCli(build.result, 200),
         artifactPath: build.artifactPath,
+        supported: build.supported,
         enospc: build.enospc,
         installFailed: build.installFailed,
         launchedDisplay: build.launchedDisplay,
@@ -234,6 +248,8 @@ export class CommandCore {
       dart_define?: Record<string, string>;
       target?: "simulator" | "device";
       device_udid?: string;
+      app_path?: string;
+      app_url?: string;
     }
   ): Promise<CommandOutput> {
     const adapter = this.adapterFor(args);
@@ -257,6 +273,11 @@ export class CommandCore {
         mode: args.mode,
         debug: args.debug,
         dartDefine: args.dart_define,
+        // macOS-only (ignored by every other adapter): the .app source for this
+        // deploy, overriding the configured
+        // FLUTTER_DEVICE_MACOS_APP_PATH/FLUTTER_DEVICE_MACOS_APP_URL defaults.
+        appPath: args.app_path,
+        appUrl: args.app_url,
       });
 
       // 3. ENOSPC recovery: uninstall + retry the install once.
@@ -274,6 +295,8 @@ export class CommandCore {
           mode: args.mode,
           debug: args.debug,
           dartDefine: args.dart_define,
+          appPath: args.app_path,
+          appUrl: args.app_url,
         });
       }
 
@@ -358,42 +381,64 @@ export class CommandCore {
         };
       }
 
-      const marionette = await this.probeMarionette(outcome.vmServiceUriWs);
+      // No Dart VM service exists at all for a launch that is not a `flutter
+      // run` daemon (an empty URI is how the macOS adapter reports it), so the
+      // probe is skipped rather than dialing an empty ws:// URL just to watch
+      // it fail.
+      const marionette: MarionetteProbeResult = outcome.vmServiceUriWs
+        ? await this.probeMarionette(outcome.vmServiceUriWs)
+        : {
+            marionetteReady: null,
+            marionetteHint:
+              "This platform has no Dart VM service (macOS launches a prebuilt .app " +
+              "directly, not under `flutter run`), so an in-app driver such as " +
+              "Marionette does not apply. Drive it with flutter_pointer/flutter_key/" +
+              "flutter_screenshot instead.",
+          };
 
       // Persist the launch so hot_reload/restart can reach this daemon later.
-      recordLaunch({
-        platform: adapter.platform,
-        device,
-        vmServiceUriWs: outcome.vmServiceUriWs,
-        vmServiceUriHttp: outcome.vmServiceUriHttp,
-        pid: outcome.pid,
-        logPath: outcome.logPath,
-        controlFifoPath: outcome.controlFifoPath,
-        recordedAt: Date.now(),
-      });
+      // Skipped when there is no VM service to reconnect to (macOS).
+      if (outcome.vmServiceUriWs) {
+        recordLaunch({
+          platform: adapter.platform,
+          device,
+          vmServiceUriWs: outcome.vmServiceUriWs,
+          vmServiceUriHttp: outcome.vmServiceUriHttp,
+          pid: outcome.pid,
+          logPath: outcome.logPath,
+          controlFifoPath: outcome.controlFifoPath,
+          recordedAt: Date.now(),
+        });
+      }
 
       const isTvLike =
         adapter.platform === "tizen" ||
         adapter.platform === "webos" ||
         adapter.platform === "tvos";
       const note =
-        "The launch process is left running to hold the VM service open for a driver " +
-        "(e.g. Marionette). Use flutter_hot_reload against this same daemon for a fast inner " +
-        "loop instead of rebuilding + redeploying." +
-        (adapter.platform === "ios" || adapter.platform === "android"
-          ? " Drive the app with Marionette (tap/enter_text/scroll) over this VM service; the " +
-            "flutter_key/flutter_pointer input tools do not apply. Use flutter_background/" +
-            "flutter_foreground to exercise app lifecycle."
-          : "") +
-        (adapter.platform === "tvos"
-          ? " NOTE (tvOS): the VM-service URI is a ws://127.0.0.1:<port>/<authCode>=/ws loopback " +
-            "forward held open by the launch process over the CoreDevice tunnel — the auth code is " +
-            "PER-RUN, so re-deploy (not just reconnect) after a relaunch. This launch has seized the " +
-            "Apple TV's HDMI display."
-          : "") +
-        (isTvLike && adapter.platform !== "tvos"
-          ? " This launch has seized the physical TV/monitor display."
-          : "");
+        adapter.platform === "macos"
+          ? "macOS has no Dart VM service — this launched a prebuilt signed .app from a " +
+            "scratch dir (never /Applications), pid above. Drive it with flutter_pointer " +
+            "(window-relative by default), flutter_key, and flutter_screenshot " +
+            "(window-targeted); flutter_geometry reports the window's live bounds. " +
+            "flutter_hot_reload/flutter_hot_restart do not apply (no daemon to reload)."
+          : "The launch process is left running to hold the VM service open for a driver " +
+            "(e.g. Marionette). Use flutter_hot_reload against this same daemon for a fast inner " +
+            "loop instead of rebuilding + redeploying." +
+            (adapter.platform === "ios" || adapter.platform === "android"
+              ? " Drive the app with Marionette (tap/enter_text/scroll) over this VM service; the " +
+                "flutter_key/flutter_pointer input tools do not apply. Use flutter_background/" +
+                "flutter_foreground to exercise app lifecycle."
+              : "") +
+            (adapter.platform === "tvos"
+              ? " NOTE (tvOS): the VM-service URI is a ws://127.0.0.1:<port>/<authCode>=/ws loopback " +
+                "forward held open by the launch process over the CoreDevice tunnel — the auth code is " +
+                "PER-RUN, so re-deploy (not just reconnect) after a relaunch. This launch has seized the " +
+                "Apple TV's HDMI display."
+              : "") +
+            (isTvLike && adapter.platform !== "tvos"
+              ? " This launch has seized the physical TV/monitor display."
+              : "");
 
       return {
         platform: adapter.platform,
@@ -927,6 +972,8 @@ export class CommandCore {
       dy?: number;
       coordinateSpace?: "device" | "logical";
       dpr?: number;
+      absolute?: boolean;
+      double?: boolean;
     }
   ): Promise<CommandOutput> {
     const adapter = this.adapterFor(args);
@@ -939,7 +986,9 @@ export class CommandCore {
           case "move": {
             const { point, coordinateSpace } = resolvePointerTarget(args);
             try {
-              await input.pointerMove(point.x, point.y);
+              await input.pointerMove(point.x, point.y, {
+                absolute: args.absolute,
+              });
             } catch (error) {
               const notSupported = mapUnsupportedInput(error, adapter.platform, "move");
               if (notSupported) return notSupported;
@@ -950,6 +999,7 @@ export class CommandCore {
               mode: input.mode,
               action: "move",
               coordinateSpace,
+              absolute: args.absolute,
               devicePosition: point,
               sent: true,
             };
@@ -967,7 +1017,9 @@ export class CommandCore {
               // platform `click` IS supported but positioning is not, so
               // blaming "click" here would deny a verb that works.
               try {
-                await input.pointerMove(staged.point.x, staged.point.y);
+                await input.pointerMove(staged.point.x, staged.point.y, {
+                  absolute: args.absolute,
+                });
               } catch (error) {
                 const notSupported = mapUnsupportedInput(
                   error,
@@ -979,7 +1031,7 @@ export class CommandCore {
               }
             }
             try {
-              await input.pointerClick();
+              await input.pointerClick({ double: args.double });
             } catch (error) {
               const notSupported = mapUnsupportedInput(error, adapter.platform, "click");
               if (notSupported) return notSupported;
@@ -1004,7 +1056,7 @@ export class CommandCore {
           case "scroll": {
             const { dy, coordinateSpace } = resolveScrollDelta(args);
             try {
-              await input.pointerScroll(dy);
+              await input.pointerScroll(dy, { absolute: args.absolute });
             } catch (error) {
               const notSupported = mapUnsupportedInput(error, adapter.platform, "scroll");
               if (notSupported) return notSupported;
@@ -1107,8 +1159,9 @@ export class CommandCore {
             supported: false,
             reason:
               `Screen geometry is not wired on ${adapter.platform}. It is ` +
-              "verified on Android only (adb wm size + wm density); no ratio is " +
-              "assumed for other platforms.",
+              "wired on Android (adb wm size + wm density) and macOS (the target " +
+              "window's live bounds via System Events); no ratio is assumed for " +
+              "other platforms.",
           };
         }
 
@@ -1151,7 +1204,10 @@ export class CommandCore {
           viewDevicePixelRatio: view.devicePixelRatio,
           notes: check.notes,
           warnings: check.warnings,
-          note: GEOMETRY_COORDINATE_NOTE,
+          note:
+            adapter.platform === "macos"
+              ? GEOMETRY_COORDINATE_NOTE_MACOS
+              : GEOMETRY_COORDINATE_NOTE,
         };
       }
     );

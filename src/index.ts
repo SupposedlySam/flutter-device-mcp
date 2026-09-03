@@ -147,6 +147,8 @@ class FlutterDeviceServer {
               debug: args.debug as boolean | undefined,
               target: args.target as "simulator" | "device" | undefined,
               device_udid: args.device_udid as string | undefined,
+              app_path: args.app_path as string | undefined,
+              app_url: args.app_url as string | undefined,
             })
           );
         case "flutter_uninstall":
@@ -231,6 +233,8 @@ class FlutterDeviceServer {
                 | "logical"
                 | undefined,
               dpr: args.dpr as number | undefined,
+              absolute: args.absolute as boolean | undefined,
+              double: args.double as boolean | undefined,
             })
           );
         case "flutter_open_url":

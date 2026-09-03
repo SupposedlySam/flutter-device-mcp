@@ -24,9 +24,9 @@ export interface ToolList {
 const platformProp = {
   platform: {
     type: "string",
-    enum: ["tizen", "webos", "ios", "android", "tvos", "auto"],
+    enum: ["tizen", "webos", "ios", "android", "tvos", "macos", "auto"],
     description:
-      "Target platform. 'tizen' (Samsung TV/monitor via flutter-tizen + sdb), 'webos' (LG TV via ares — EXPERIMENTAL/stub), 'ios' (iPhone/iPad or simulator via xcrun devicectl/simctl + flutter), 'android' (device/emulator via adb + flutter), or 'tvos' (Apple TV via flutter-tvos + xcrun — EXPERIMENTAL; on-device requires a PROFILE/RELEASE build, since a standalone debug launch segfaults, and its VM-service URI is a `ws://127.0.0.1:<port>/<authCode>=/ws` loopback forward held open by the launch process over the CoreDevice tunnel). Defaults to the configured `defaultPlatform` (falls back to ios).",
+      "Target platform. 'tizen' (Samsung TV/monitor via flutter-tizen + sdb), 'webos' (LG TV via ares — EXPERIMENTAL/stub), 'ios' (iPhone/iPad or simulator via xcrun devicectl/simctl + flutter), 'android' (device/emulator via adb + flutter), 'tvos' (Apple TV via flutter-tvos + xcrun — EXPERIMENTAL; on-device requires a PROFILE/RELEASE build, since a standalone debug launch segfaults, and its VM-service URI is a `ws://127.0.0.1:<port>/<authCode>=/ws` loopback forward held open by the launch process over the CoreDevice tunnel), or 'macos' (a prebuilt, SIGNED `.app` you supply — this MCP has no macOS build/sign toolchain — driven via cliclick/screencapture/osascript from a SCRATCH DIR, never /Applications; it launches the bundle directly rather than under `flutter run`, so there is no Dart VM service and flutter_pointer/flutter_key/flutter_screenshot ARE the driver). Defaults to the configured `defaultPlatform` (falls back to ios).",
   },
 };
 
@@ -75,7 +75,7 @@ function buildFlutterTools(): ToolDefinition[] {
     {
       name: "flutter_build",
       description:
-        "Build the app package. Any app-specific pre-build steps (e.g. compiling a native engine) are configured via the `preBuild` hook in flutter-device.config.json and run first. Returns the tail of the build output plus the built package path and detected failure signatures (Install failed / No space left on device). WARNING: passing `run: true` installs AND launches the app, which SEIZES the physical TV/monitor display. This can run long (pre-build hooks + package build).",
+        "Build the app package. Any app-specific pre-build steps (e.g. compiling a native engine) are configured via the `preBuild` hook in flutter-device.config.json and run first. Returns the tail of the build output plus the built package path and detected failure signatures (Install failed / No space left on device). WARNING: passing `run: true` installs AND launches the app, which SEIZES the physical TV/monitor display. This can run long (pre-build hooks + package build). MACOS: returns `{supported:false}` — this MCP has no build/sign toolchain for macOS; bring your own signed `.app` and point flutter_deploy at it.",
       inputSchema: {
         type: "object",
         properties: {
@@ -132,7 +132,7 @@ function buildFlutterTools(): ToolDefinition[] {
     {
       name: "flutter_deploy",
       description:
-        "THE KEY TOOL. Installs the already-built package and launches the app in DEBUG, then returns the Dart VM Service `ws://…/ws` URI for Marionette to connect to. Kills any stale `flutter-tizen` / `flutter run` processes first (one deploy at a time — concurrent installs wedge the device lock). Recovers from a full device (No space left on device / Install failed) by uninstalling and retrying the install once. The launch runs through a pty (so flutter line-flushes the URI), backgrounded, and is LEFT RUNNING to hold the VM service open. A device pin that is not currently an online device (stale — e.g. the device moved DHCP address) is ignored in favor of the first online device, noted via `deviceWarning` in the response. WARNING: launching SEIZES the physical TV/monitor display. NOTE: Marionette coordinates are LOGICAL (e.g. 1200x675), not screenshot pixels.",
+        "THE KEY TOOL. Installs the already-built package and launches the app in DEBUG, then returns the Dart VM Service `ws://…/ws` URI for Marionette to connect to. Kills any stale `flutter-tizen` / `flutter run` processes first (one deploy at a time — concurrent installs wedge the device lock). Recovers from a full device (No space left on device / Install failed) by uninstalling and retrying the install once. The launch runs through a pty (so flutter line-flushes the URI), backgrounded, and is LEFT RUNNING to hold the VM service open. A device pin that is not currently an online device (stale — e.g. the device moved DHCP address) is ignored in favor of the first online device, noted via `deviceWarning` in the response. WARNING: launching SEIZES the physical TV/monitor display. NOTE: Marionette coordinates are LOGICAL (e.g. 1200x675), not screenshot pixels. MACOS: a different shape entirely — stages `app_path`/`app_url` (or FLUTTER_DEVICE_MACOS_APP_PATH/FLUTTER_DEVICE_MACOS_APP_URL) into a SCRATCH DIR (never /Applications) and launches it with `open -n`, returning its pid; the bundle runs directly rather than under `flutter run`, so there is no Dart VM service (`vmServiceUriWs` is empty) and no display seizure — drive it with flutter_pointer/flutter_key/flutter_screenshot instead.",
       inputSchema: {
         type: "object",
         properties: {
@@ -175,6 +175,16 @@ function buildFlutterTools(): ToolDefinition[] {
             type: "string",
             description:
               "iOS ONLY: pin a SPECIFIC target for THIS call by id (a flutter id, a devicectl id, or a device/simulator name), overriding the FLUTTER_DEVICE_IOS_DEVICE env pin without a host reload. Combine with `target` or use alone. For a simulator the flutter id equals the simctl UUID.",
+          },
+          app_path: {
+            type: "string",
+            description:
+              "MACOS ONLY: a local path to what to stage — a `.app` bundle, a `.tar.gz`/`.tgz`, or a `.dmg`. Overrides FLUTTER_DEVICE_MACOS_APP_PATH for this call. Wins over `app_url` when both are set. Ignored on every other platform.",
+          },
+          app_url: {
+            type: "string",
+            description:
+              "MACOS ONLY: a URL to fetch (a `.tar.gz`/`.tgz` or `.dmg`, sniffed by extension), used when `app_path` is not set. Overrides FLUTTER_DEVICE_MACOS_APP_URL for this call. Ignored on every other platform.",
           },
         },
       },
@@ -234,19 +244,19 @@ function buildFlutterTools(): ToolDefinition[] {
     {
       name: "flutter_terminate",
       description:
-        "OS-level lifecycle: force-quit the app on the resolved device (iOS: xcrun simctl/devicectl terminate; Android: adb shell am force-stop). MOBILE capability — on TV platforms (Tizen/webOS) this returns {supported:false}. The app's Dart VM service is gone after termination; redeploy to get a fresh URI for Marionette.",
+        "OS-level lifecycle: force-quit the app on the resolved device (iOS: xcrun simctl/devicectl terminate; Android: adb shell am force-stop; macOS: `osascript ... tell application id \"<bundle id>\" to quit`). MOBILE/MACOS capability — on TV platforms (Tizen/webOS) this returns {supported:false}. The app's Dart VM service is gone after termination (N/A on macOS, which has none); redeploy to get a fresh URI for Marionette.",
       inputSchema: { type: "object", properties: { ...platformProp } },
     },
     {
       name: "flutter_background",
       description:
-        "OS-level lifecycle: send the app to the BACKGROUND without killing it (iOS: foreground the neutral com.apple.Preferences app; Android: HOME keyevent via adb). Exercises the app's didEnterBackground/onPause path for lifecycle testing while keeping its VM service alive. MOBILE capability — Tizen/webOS return {supported:false}.",
+        "OS-level lifecycle: send the app to the BACKGROUND without killing it (iOS: foreground the neutral com.apple.Preferences app; Android: HOME keyevent via adb; macOS: activate Finder — there is no OS-level \"background\" verb, so losing focus IS backgrounding). Exercises the app's didEnterBackground/onPause path for lifecycle testing while keeping its VM service alive. MOBILE/MACOS capability — Tizen/webOS return {supported:false}.",
       inputSchema: { type: "object", properties: { ...platformProp } },
     },
     {
       name: "flutter_foreground",
       description:
-        "OS-level lifecycle: bring the app back to the FOREGROUND by relaunching it (iOS: xcrun simctl/devicectl launch by bundle id; Android: adb monkey LAUNCHER intent by package). Exercises didBecomeActive/onResume. Pair with flutter_background for background→foreground lifecycle testing. MOBILE capability — Tizen/webOS return {supported:false}.",
+        "OS-level lifecycle: bring the app back to the FOREGROUND by relaunching it (iOS: xcrun simctl/devicectl launch by bundle id; Android: adb monkey LAUNCHER intent by package; macOS: `osascript ... tell application id \"<bundle id>\" to activate`). Exercises didBecomeActive/onResume. Pair with flutter_background for background→foreground lifecycle testing. MOBILE/MACOS capability — Tizen/webOS return {supported:false}.",
       inputSchema: { type: "object", properties: { ...platformProp } },
     },
     {
@@ -291,7 +301,7 @@ function buildFlutterTools(): ToolDefinition[] {
     {
       name: "flutter_screenshot",
       description:
-        "Capture the current device/app screen to a PNG on disk and return the absolute saved path (optionally the base64 bytes too). PER-PLATFORM capture reality (encoded so you don't re-derive it): iOS SIMULATOR — reliable via `xcrun simctl io <udid> screenshot` (the primary iOS path; a booted simulator is picked automatically); iOS PHYSICAL device — `pymobiledevice3 developer dvt screenshot` (verified live: captures a real PNG over a no-root userspace tunnel on iOS 17+, no sudo; requires the Developer Disk Image to be mounted, which Xcode does automatically). Requires `pymobiledevice3` on the host (`pipx install pymobiledevice3`, or a venv; override its path with FLUTTER_DEVICE_PYMOBILEDEVICE3); ONLY if it is not installed does the physical path return {supported:false} with an install hint. Android — `adb -s <serial> exec-out screencap -p`; tvOS SIMULATOR — simctl (physical Apple TV returns {supported:false}); Tizen/webOS — {supported:false} (no clean path — `sdb shell` is DISABLED on Samsung devices, so no device-side screencap; use Marionette take_screenshots over the VM service for the Flutter view). When output_path is omitted the PNG is written to a predictable temp path that is returned.",
+        "Capture the current device/app screen to a PNG on disk and return the absolute saved path (optionally the base64 bytes too). PER-PLATFORM capture reality (encoded so you don't re-derive it): iOS SIMULATOR — reliable via `xcrun simctl io <udid> screenshot` (the primary iOS path; a booted simulator is picked automatically); iOS PHYSICAL device — `pymobiledevice3 developer dvt screenshot` (verified live: captures a real PNG over a no-root userspace tunnel on iOS 17+, no sudo; requires the Developer Disk Image to be mounted, which Xcode does automatically). Requires `pymobiledevice3` on the host (`pipx install pymobiledevice3`, or a venv; override its path with FLUTTER_DEVICE_PYMOBILEDEVICE3); ONLY if it is not installed does the physical path return {supported:false} with an install hint. Android — `adb -s <serial> exec-out screencap -p`; tvOS SIMULATOR — simctl (physical Apple TV returns {supported:false}); macOS — `screencapture -R<x,y,w,h>` WINDOW-TARGETED against the target app's LIVE front-window bounds (never a full-desktop grab — that would leak whatever else the machine's owner has open); needs Screen Recording granted (flutter_info probes this by effect); Tizen/webOS — {supported:false} (no clean path — `sdb shell` is DISABLED on Samsung devices, so no device-side screencap; use Marionette take_screenshots over the VM service for the Flutter view). When output_path is omitted the PNG is written to a predictable temp path that is returned.",
       inputSchema: {
         type: "object",
         properties: {
@@ -366,7 +376,7 @@ function buildFlutterTools(): ToolDefinition[] {
     {
       name: "flutter_key",
       description:
-        "Send a navigation/remote key, or type a text string, on the resolved device. Accepts short names (UP/DOWN/LEFT/RIGHT/ENTER/RETURN/BACK/HOME) on every wired platform. TIZEN: sent over the Samsung remote channel; also accepts full Samsung KEY_* names (e.g. KEY_VOLUP); BACK maps to KEY_RETURN. ANDROID: injected via `adb shell input keyevent` (device AND emulator) — short names map to Android keycodes (arrows→DPAD, ENTER/OK/SELECT→KEYCODE_DPAD_CENTER which activates the focused element, RETURN/BACK→KEYCODE_BACK, HOME→KEYCODE_HOME); also accepts full KEYCODE_* names and bare numeric keycodes. `text` (instead of `key`) types into the focused field via `adb shell input text` (Android only today). NOTE: adb input is the OS-LEVEL plane — raw system input injection that bypasses Flutter's gesture-arena semantics; a driver over the Dart VM service remains the primary in-app path, and this covers what it cannot reach (OS UI outside the Flutter view, non-debug builds, D-pad navigation on Android TV). iOS reports {supported:false}. This is the D-pad input plane; it works irrespective of the recorded input mode.",
+        "Send a navigation/remote key, or type a text string, on the resolved device. Accepts short names (UP/DOWN/LEFT/RIGHT/ENTER/RETURN/BACK/HOME) on every wired platform. TIZEN: sent over the Samsung remote channel; also accepts full Samsung KEY_* names (e.g. KEY_VOLUP); BACK maps to KEY_RETURN. ANDROID: injected via `adb shell input keyevent` (device AND emulator) — short names map to Android keycodes (arrows→DPAD, ENTER/OK/SELECT→KEYCODE_DPAD_CENTER which activates the focused element, RETURN/BACK→KEYCODE_BACK, HOME→KEYCODE_HOME); also accepts full KEYCODE_* names and bare numeric keycodes. `text` (instead of `key`) types into the focused field via `adb shell input text` (Android only today). NOTE: adb input is the OS-LEVEL plane — raw system input injection that bypasses Flutter's gesture-arena semantics; a driver over the Dart VM service remains the primary in-app path, and this covers what it cannot reach (OS UI outside the Flutter view, non-debug builds, D-pad navigation on Android TV). MACOS: sent via `cliclick kp:` (short names map to arrow-up/down/left/right, return, esc, tab, space, home, end, delete, page-up/down; a cliclick-native token like 'f1' or 'volume-up' passes straight through) — needs Accessibility granted (flutter_info probes this by effect: without it cliclick exits 0 and silently does nothing). On macOS this IS the primary driver, not a fallback: a prebuilt `.app` exposes no Dart VM service. iOS reports {supported:false}. This is the D-pad input plane; it works irrespective of the recorded input mode.",
       inputSchema: {
         type: "object",
         properties: {
@@ -374,12 +384,12 @@ function buildFlutterTools(): ToolDefinition[] {
           key: {
             type: "string",
             description:
-              "Key to send: a short name (UP/DOWN/LEFT/RIGHT/ENTER/RETURN/BACK/HOME), a full Samsung KEY_* name (Tizen), or a full KEYCODE_* name / bare numeric keycode (Android). Provide exactly one of `key` or `text`.",
+              "Key to send: a short name (UP/DOWN/LEFT/RIGHT/ENTER/RETURN/BACK/HOME), a full Samsung KEY_* name (Tizen), a full KEYCODE_* name / bare numeric keycode (Android), or a cliclick kp: token (macOS). Provide exactly one of `key` or `text`.",
           },
           text: {
             type: "string",
             description:
-              "A string to TYPE into the currently-focused field (Android: `adb shell input text`). Cannot carry newlines/tabs — send those as key events (KEYCODE_ENTER / KEYCODE_TAB). Platforms without an OS-level text channel return {supported:false}. Provide exactly one of `key` or `text`.",
+              "A string to TYPE into the currently-focused field (Android: `adb shell input text`; macOS: `cliclick t:`). Cannot carry newlines/tabs — send those as key events (KEYCODE_ENTER / KEYCODE_TAB). Platforms without an OS-level text channel return {supported:false}. Provide exactly one of `key` or `text`.",
           },
         },
       },
@@ -387,7 +397,7 @@ function buildFlutterTools(): ToolDefinition[] {
     {
       name: "flutter_geometry",
       description:
-        "REPORT THE DEVICE'S REAL SCREEN GEOMETRY so nothing is assumed: display size in DEVICE pixels, the density buckets (physical vs an active override), the device pixel ratio and where it came from, and the logical display size that follows. This is the ratio flutter_pointer requires for `coordinateSpace: \"logical\"` and refuses to guess — read it here instead of eyeballing a screenshot. OS-LEVEL: it describes the DISPLAY, so it needs no app installed, no debug build, and no Dart VM service. The Flutter VIEW is a different, smaller box — on a device whose display is 1440x2960 at density 640 (dpr 4.0, logical display 360x740) the Flutter view can be 360x725 logical, because the 60px navigation bar is outside the view; dividing the DISPLAY height by the dpr gives 740 and is WRONG for anything view-derived. Pass the view's own numbers (`view_width`/`view_height` in Flutter LOGICAL px, and optionally `view_dpr`) — from a VM-service driver, since this server never reads the app — to have them cross-checked: a WIDTH mismatch comes back as a warning (it means the dpr is wrong and every derived tap will mis-land), a height shortfall as an expected note naming the system chrome. `device_udid` targets a specific device (geometry differs per device); otherwise the target resolves exactly as it does for deploy/lifecycle. ANDROID ONLY (`adb shell wm size` + `wm density`, preferring the Override density line — the density actually in force); other platforms return {supported:false} rather than a guess.",
+        "REPORT THE DEVICE'S REAL SCREEN GEOMETRY so nothing is assumed: display size in DEVICE pixels, the density buckets (physical vs an active override), the device pixel ratio and where it came from, and the logical display size that follows. This is the ratio flutter_pointer requires for `coordinateSpace: \"logical\"` and refuses to guess — read it here instead of eyeballing a screenshot. OS-LEVEL: it describes the DISPLAY, so it needs no app installed, no debug build, and no Dart VM service. The Flutter VIEW is a different, smaller box — on a device whose display is 1440x2960 at density 640 (dpr 4.0, logical display 360x740) the Flutter view can be 360x725 logical, because the 60px navigation bar is outside the view; dividing the DISPLAY height by the dpr gives 740 and is WRONG for anything view-derived. Pass the view's own numbers (`view_width`/`view_height` in Flutter LOGICAL px, and optionally `view_dpr`) — from a VM-service driver, since this server never reads the app — to have them cross-checked: a WIDTH mismatch comes back as a warning (it means the dpr is wrong and every derived tap will mis-land), a height shortfall as an expected note naming the system chrome. `device_udid` targets a specific device (geometry differs per device); otherwise the target resolves exactly as it does for deploy/lifecycle. ANDROID (`adb shell wm size` + `wm density`, preferring the Override density line — the density actually in force). MACOS: a DIFFERENT contract — reports the TARGET WINDOW's live bounds (via osascript/System Events) in POINTS, the same space flutter_pointer/flutter_screenshot address (there is no separate logical/device split on macOS — points already ARE the addressable space); `dpr` there is the display's backingScaleFactor, relevant only for interpreting a flutter_screenshot PNG's pixel dimensions. Other platforms return {supported:false} rather than a guess.",
       inputSchema: {
         type: "object",
         properties: {
@@ -418,7 +428,7 @@ function buildFlutterTools(): ToolDefinition[] {
     {
       name: "flutter_pointer",
       description:
-        "Drive the TV pointer. action 'click' activates the currently-focused element (KEY_ENTER) — on the focus/D-pad-driven Tizen TV this is the working 'click', so use flutter_key to move focus first, then flutter_pointer click. action 'move'/'scroll' is a free-cursor primitive reserved for pointer-native platforms (webOS Magic Remote); on Tizen it is unsupported (the native Samsung touchpad channel has no observable effect) and returns a clear {supported:false} result. Coordinates default to DEVICE pixels; pass coordinateSpace 'logical' together with the device's dpr to send Marionette-style LOGICAL coordinates (e.g. 1200x675) — they are converted to device pixels before sending. dpr is never assumed; it must be supplied for logical space — but it no longer has to be GUESSED: flutter_geometry reports the device's real ratio and screen sizes. NOTE: this exposes the logical→device pointer primitive only; element-geometry→tap orchestration lives in the agent/skill layer (this MCP does not call Marionette).",
+        "Drive the TV pointer. action 'click' activates the currently-focused element (KEY_ENTER) — on the focus/D-pad-driven Tizen TV this is the working 'click', so use flutter_key to move focus first, then flutter_pointer click. action 'move'/'scroll' is a free-cursor primitive reserved for pointer-native platforms (webOS Magic Remote); on Tizen it is unsupported (the native Samsung touchpad channel has no observable effect) and returns a clear {supported:false} result. Coordinates default to DEVICE pixels; pass coordinateSpace 'logical' together with the device's dpr to send Marionette-style LOGICAL coordinates (e.g. 1200x675) — they are converted to device pixels before sending. dpr is never assumed; it must be supplied for logical space — but it no longer has to be GUESSED: flutter_geometry reports the device's real ratio and screen sizes. MACOS (via `cliclick`): 'move' moves the REAL cursor (`m:`) and coordinates are WINDOW-RELATIVE by default — translated through the target window's LIVE bounds (0,0 = its own top-left), so a script survives the window moving; pass `absolute: true` to send raw screen points instead. 'click' clicks at the current cursor position (`c:`, or `dc:` for a double-click via `double: true`). 'scroll' is UNSUPPORTED on macOS — cliclick 5.1 has no scroll verb; use flutter_key (page-up/page-down/arrow keys) instead. macOS pointerMove VERIFIES the cursor actually moved (reads it back) and fails loudly if not — the signature of a DENIED Accessibility grant (flutter_info probes this explicitly). NOTE: this exposes the logical→device pointer primitive only; element-geometry→tap orchestration lives in the agent/skill layer (this MCP does not call Marionette).",
       inputSchema: {
         type: "object",
         properties: {
@@ -430,26 +440,39 @@ function buildFlutterTools(): ToolDefinition[] {
           },
           x: {
             type: "number",
-            description: "X coordinate for 'move' (device or logical per coordinateSpace).",
+            description:
+              "X coordinate for 'move' (device pixels / logical per coordinateSpace on Android/Tizen; window-relative points on macOS unless `absolute` is set).",
           },
           y: {
             type: "number",
-            description: "Y coordinate for 'move' (device or logical per coordinateSpace).",
+            description:
+              "Y coordinate for 'move' (device pixels / logical per coordinateSpace on Android/Tizen; window-relative points on macOS unless `absolute` is set).",
           },
           dy: {
             type: "number",
-            description: "Vertical delta for 'scroll' (positive = down).",
+            description:
+              "Vertical delta for 'scroll' (positive = down). N/A on macOS (unsupported).",
           },
           coordinateSpace: {
             type: "string",
             enum: ["device", "logical"],
             description:
-              "Coordinate space of x/y/dy. Default 'device'. 'logical' requires dpr and is converted to device pixels.",
+              "Coordinate space of x/y/dy. Default 'device'. 'logical' requires dpr and is converted to device pixels. Ignored on macOS (see `absolute` there instead).",
           },
           dpr: {
             type: "number",
             description:
-              "Device pixel ratio, required when coordinateSpace is 'logical'. Never assumed — devices differ.",
+              "Device pixel ratio, required when coordinateSpace is 'logical'. Never assumed — devices differ. Not used on macOS, whose points already are the addressable space.",
+          },
+          absolute: {
+            type: "boolean",
+            description:
+              "MACOS ONLY: when true, x/y are ABSOLUTE screen points rather than the default window-relative space (bypasses translation through the target window's bounds). Ignored on every other platform.",
+          },
+          double: {
+            type: "boolean",
+            description:
+              "MACOS ONLY, for action 'click': perform a double-click (`cliclick dc:`) instead of a single click. Ignored on every other platform.",
           },
         },
         required: ["action"],
