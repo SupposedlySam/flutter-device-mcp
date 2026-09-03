@@ -202,6 +202,25 @@ export class AndroidAdapter implements PlatformAdapter {
   private inputController: InputController | undefined;
 
   /**
+   * The device pin the current input call asked for, read by the cached
+   * controller's lazy serial resolver. Set on every {@link input} call — to
+   * `undefined` when the call named no device — so a pin never outlives the call
+   * that supplied it.
+   */
+  private inputDevicePin: string | undefined;
+
+  /**
+   * The `deviceWarning` from the most recent device resolution the cached
+   * controller's lazy resolver performed for the CURRENT {@link input} call —
+   * read back by {@link inputDeviceWarning}. Reset to `undefined` on every
+   * {@link input} call (same lifetime as {@link inputDevicePin}) so a warning
+   * never outlives the call that produced it, and set by the resolver closure
+   * each time it actually runs (`pointerMove` included — it resolves the device
+   * purely to surface a stale-pin warning, even though it sends no adb event).
+   */
+  private lastInputDeviceWarning: string | undefined;
+
+  /**
    * The launch mode the pending/last deploy resolved, captured from the deploy's
    * `install` step (which runs before {@link launchAndCaptureUri}). `flutter run`
    * takes no `--no-launch`, so the launch is the ONE place the mode can be
@@ -359,7 +378,11 @@ export class AndroidAdapter implements PlatformAdapter {
    * `preference.udid` pins a specific target for THIS call — on Android the adb
    * serial IS the id every consumer uses, so a serial (or model name) is matched
    * exactly like the `FLUTTER_DEVICE_ANDROID_DEVICE` pin it overrides, self-heal
-   * and all. `preference.kind` has no Android meaning (there is no
+   * and all. It is what makes a two-target host workable at all: discovery takes
+   * the first ONLINE device, so a physical phone that is attached but unusable
+   * (PIN locked, where Flutter stops building and no work can be driven) wins
+   * every call, and the env pin that would redirect it cannot be changed without
+   * a host reload. `preference.kind` has no Android meaning (there is no
    * device-vs-simulator id split here) and is ignored.
    */
   async discoverDevice(
@@ -383,7 +406,8 @@ export class AndroidAdapter implements PlatformAdapter {
     }
     const resolution = resolveAndroidTarget(
       preference.udid ?? this.config.device,
-      devicesOut.stdout
+      devicesOut.stdout,
+      preference.udid ? "call" : "env"
     );
     if (!resolution) {
       throw new McpError(
@@ -578,14 +602,16 @@ export class AndroidAdapter implements PlatformAdapter {
    * Capture the current screen via `adb -s <serial> exec-out screencap -p`,
    * redirecting the raw PNG bytes to disk. `exec-out` (not `shell`) avoids the
    * CRLF byte-mangling that corrupts a `shell screencap -p` redirect. Resolves
-   * the device the normal way (pin/self-heal) so the capture follows the same
-   * target as deploy/lifecycle.
+   * the device the normal way (per-call pin > env pin > self-heal) so the
+   * capture follows the same target as deploy/lifecycle — including the target a
+   * caller pinned for this one call.
    */
   async screenshot(opts: {
     outPath?: string;
     includeBase64?: boolean;
+    deviceUdid?: string;
   }): Promise<ScreenshotResult> {
-    const resolution = await this.discoverDevice();
+    const resolution = await this.discoverDevice({ udid: opts.deviceUdid });
     const outPath = opts.outPath ?? defaultScreenshotPath("android");
     const result = await runShell(
       buildAdbScreencapCommand(resolution.target, outPath),
@@ -626,6 +652,7 @@ export class AndroidAdapter implements PlatformAdapter {
     durationSeconds: number;
     fps: number;
     format: RecordFormat;
+    deviceUdid?: string;
   }): Promise<RecordResult> {
     const wantGif = opts.format === "gif";
     const ffmpeg = wantGif ? locateFfmpeg() : undefined;
@@ -642,7 +669,7 @@ export class AndroidAdapter implements PlatformAdapter {
       };
     }
 
-    const resolution = await this.discoverDevice();
+    const resolution = await this.discoverDevice({ udid: opts.deviceUdid });
     const duration = Math.min(
       Math.max(1, opts.durationSeconds),
       ANDROID_MAX_DURATION_SECONDS
@@ -821,17 +848,34 @@ export class AndroidAdapter implements PlatformAdapter {
    * Flutter view, non-debug builds, and D-pad navigation (Android TV).
    *
    * The serial is resolved lazily per send through the normal device resolution
-   * (pin/self-heal), so a multi-device host targets the same device as
-   * deploy/lifecycle. Cached so the selected mode and the staged pointer
-   * position survive across tool calls.
+   * (per-call pin > env pin > self-heal), so a multi-device host targets the
+   * same device as deploy/lifecycle. Cached so the selected mode and the staged
+   * pointer position survive across tool calls.
+   *
+   * A per-call `preference.udid` is recorded on the adapter rather than baked
+   * into a fresh controller, because a new controller would drop the staged
+   * pointer position that a `move` sets and a `click` consumes — the pin has to
+   * change the target without resetting the plane. Recording it here mirrors how
+   * the launch mode is resolved at install time and read by the launch.
    */
-  input(): InputController {
+  input(preference: DeviceTargetPreference = {}): InputController {
+    this.inputDevicePin = preference.udid;
+    this.lastInputDeviceWarning = undefined;
     if (!this.inputController) {
-      this.inputController = new AndroidInputController(
-        async () => (await this.discoverDevice()).target
-      );
+      this.inputController = new AndroidInputController(async () => {
+        const resolution = await this.discoverDevice({
+          udid: this.inputDevicePin,
+        });
+        this.lastInputDeviceWarning = resolution.warning;
+        return resolution.target;
+      });
     }
     return this.inputController;
+  }
+
+  /** See {@link PlatformAdapter.inputDeviceWarning}. */
+  inputDeviceWarning(): string | undefined {
+    return this.lastInputDeviceWarning;
   }
 }
 

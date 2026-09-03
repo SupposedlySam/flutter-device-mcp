@@ -464,14 +464,18 @@ export class CommandCore {
   }
 
   // =========== uninstall ==========
-  async uninstall(args: CommonArgs): Promise<CommandOutput> {
+  async uninstall(
+    args: CommonArgs & { device_udid?: string }
+  ): Promise<CommandOutput> {
     const adapter = this.adapterFor(args);
     return this.guard(
       "flutter_uninstall",
       { platform: adapter.platform, appId: adapter.appId },
       async () => {
         if (!adapter.appId) return this.missingAppId(adapter, "uninstall");
-        const resolution = await adapter.discoverDevice();
+        const resolution = await adapter.discoverDevice({
+          udid: args.device_udid,
+        });
         const device = resolution.target;
         const result = await adapter.uninstall(device, adapter.appId);
         const notInstalled = /not installed|no such|does not exist/i.test(
@@ -523,7 +527,7 @@ export class CommandCore {
   private async lifecycleOp(
     toolName: string,
     verb: "terminate" | "background" | "foreground",
-    args: CommonArgs,
+    args: CommonArgs & { device_udid?: string },
     note: string
   ): Promise<CommandOutput> {
     const adapter = this.adapterFor(args);
@@ -539,7 +543,9 @@ export class CommandCore {
         };
       }
       if (!adapter.appId) return this.missingAppId(adapter, verb);
-      const resolution = await adapter.discoverDevice();
+      const resolution = await adapter.discoverDevice({
+        udid: args.device_udid,
+      });
       const device = resolution.target;
       const result = await adapter.lifecycle[verb](device, adapter.appId);
       return {
@@ -555,7 +561,7 @@ export class CommandCore {
     });
   }
 
-  terminate(args: CommonArgs): Promise<CommandOutput> {
+  terminate(args: CommonArgs & { device_udid?: string }): Promise<CommandOutput> {
     return this.lifecycleOp(
       "flutter_terminate",
       "terminate",
@@ -564,7 +570,7 @@ export class CommandCore {
     );
   }
 
-  background(args: CommonArgs): Promise<CommandOutput> {
+  background(args: CommonArgs & { device_udid?: string }): Promise<CommandOutput> {
     return this.lifecycleOp(
       "flutter_background",
       "background",
@@ -573,7 +579,7 @@ export class CommandCore {
     );
   }
 
-  foreground(args: CommonArgs): Promise<CommandOutput> {
+  foreground(args: CommonArgs & { device_udid?: string }): Promise<CommandOutput> {
     return this.lifecycleOp(
       "flutter_foreground",
       "foreground",
@@ -822,7 +828,11 @@ export class CommandCore {
 
   // =========== screenshot ==========
   async screenshot(
-    args: CommonArgs & { output_path?: string; include_base64?: boolean }
+    args: CommonArgs & {
+      output_path?: string;
+      include_base64?: boolean;
+      device_udid?: string;
+    }
   ): Promise<CommandOutput> {
     const adapter = this.adapterFor(args);
     return this.guard(
@@ -840,6 +850,7 @@ export class CommandCore {
         const result = await adapter.screenshot({
           outPath: args.output_path,
           includeBase64: args.include_base64,
+          deviceUdid: args.device_udid,
         });
         return { platform: adapter.platform, ...result };
       }
@@ -962,7 +973,7 @@ export class CommandCore {
 
   // =========== key ==========
   async key(
-    args: CommonArgs & { key?: string; text?: string }
+    args: CommonArgs & { key?: string; text?: string; device_udid?: string }
   ): Promise<CommandOutput> {
     const adapter = this.adapterFor(args);
     return this.guard(
@@ -982,7 +993,7 @@ export class CommandCore {
               "(a string to type into the focused field)."
           );
         }
-        const input = adapter.input();
+        const input = adapter.input({ udid: args.device_udid });
 
         if (hasText) {
           // Text injection is an OPTIONAL controller capability (Android's
@@ -1011,6 +1022,7 @@ export class CommandCore {
             mode: input.mode,
             text: args.text,
             sent: true,
+            deviceWarning: adapter.inputDeviceWarning?.(),
           };
         }
 
@@ -1026,6 +1038,7 @@ export class CommandCore {
           mode: input.mode,
           key: args.key,
           sent: true,
+          deviceWarning: adapter.inputDeviceWarning?.(),
         };
       }
     );
@@ -1042,6 +1055,7 @@ export class CommandCore {
       dpr?: number;
       absolute?: boolean;
       double?: boolean;
+      device_udid?: string;
     }
   ): Promise<CommandOutput> {
     const adapter = this.adapterFor(args);
@@ -1049,7 +1063,7 @@ export class CommandCore {
       "flutter_pointer",
       { platform: adapter.platform, action: args.action },
       async () => {
-        const input = adapter.input();
+        const input = adapter.input({ udid: args.device_udid });
         switch (args.action) {
           case "move": {
             const { point, coordinateSpace } = resolvePointerTarget(args);
@@ -1070,6 +1084,7 @@ export class CommandCore {
               absolute: args.absolute,
               devicePosition: point,
               sent: true,
+              deviceWarning: adapter.inputDeviceWarning?.(),
             };
           }
           case "click": {
@@ -1110,6 +1125,7 @@ export class CommandCore {
               mode: input.mode,
               action: "click",
               sent: true,
+              deviceWarning: adapter.inputDeviceWarning?.(),
               ...(staged
                 ? {
                     coordinateSpace: staged.coordinateSpace,
@@ -1137,6 +1153,7 @@ export class CommandCore {
               coordinateSpace,
               deviceDy: dy,
               sent: true,
+              deviceWarning: adapter.inputDeviceWarning?.(),
             };
           }
           default:

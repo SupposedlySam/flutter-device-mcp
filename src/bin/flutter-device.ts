@@ -112,6 +112,11 @@ Commands:
 Global flags:
   --platform <p>      Target platform (default from config; else ios)
   --app-dir <dir>     Path to the Flutter app (default: nearest pubspec.yaml)
+  --device-udid <id>  Pin WHICH device this call targets, for this call only, overriding the
+                      platform's env pin (Android: an adb serial or the model name adb reports;
+                      iOS/tvOS: a flutter id, a devicectl id, or a device/simulator name).
+                      Accepted by deploy, uninstall, terminate, background, foreground,
+                      screenshot, record, key, pointer and geometry.
 
 Every command prints a JSON result and exits non-zero on failure.`;
 
@@ -127,6 +132,10 @@ async function run(): Promise<number> {
   const common: CommonArgs = { platform: parsed.platform };
   const f = parsed.flags;
   const merge = (extra: Record<string, unknown>) => ({ ...common, ...extra });
+  // The per-call device pin. `merge(f)` already carries it for the commands
+  // that forward the whole flag bag; the ones below build their args explicitly
+  // and would otherwise ACCEPT --device-udid and silently ignore it.
+  const devicePin = f.device_udid as string | undefined;
 
   let result: Record<string, unknown>;
   switch (parsed.command) {
@@ -144,20 +153,20 @@ async function run(): Promise<number> {
       result = await core.deploy(merge(f));
       break;
     case "uninstall":
-      result = await core.uninstall(common);
+      result = await core.uninstall({ ...common, device_udid: devicePin });
       break;
     case "kill-stale":
     case "kill_stale":
       result = await core.killStale(common);
       break;
     case "terminate":
-      result = await core.terminate(common);
+      result = await core.terminate({ ...common, device_udid: devicePin });
       break;
     case "background":
-      result = await core.background(common);
+      result = await core.background({ ...common, device_udid: devicePin });
       break;
     case "foreground":
-      result = await core.foreground(common);
+      result = await core.foreground({ ...common, device_udid: devicePin });
       break;
     case "hot-reload":
     case "hot_reload":
@@ -182,6 +191,7 @@ async function run(): Promise<number> {
         ...common,
         key: f.key as string | undefined,
         text: f.text as string | undefined,
+        device_udid: devicePin,
       });
       break;
     case "geometry":

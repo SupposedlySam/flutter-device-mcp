@@ -82,6 +82,23 @@ export function isOnline(d: AdbDevice): boolean {
   return d.state === "device";
 }
 
+/**
+ * Where a pin came from, so a self-heal warning names the knob the caller can
+ * actually turn: the `FLUTTER_DEVICE_ANDROID_DEVICE` env var (which only a host
+ * reload can change) or the per-call `device_udid` argument (which needs no
+ * reload). An unattended run that asked for the emulator and silently landed on
+ * the physical phone cannot tell those apart from a message that always blames
+ * the env var.
+ */
+export type AndroidPinOrigin = "env" | "call";
+
+/** Name a pin and where it came from, for a warning message. */
+function describePin(pin: string, origin: AndroidPinOrigin): string {
+  return origin === "call"
+    ? `The per-call device pin (device_udid) names ${pin}`
+    : `FLUTTER_DEVICE_ANDROID_DEVICE is pinned to ${pin}`;
+}
+
 /** True when a pin string matches a device by serial or (case-insensitive) model. */
 function pinMatches(pin: string, d: AdbDevice): boolean {
   const p = pin.trim().toLowerCase();
@@ -107,19 +124,25 @@ function toResolution(
 /**
  * Pick the Android device to operate on.
  *
- * A pin (serial or model name, via `FLUTTER_DEVICE_ANDROID_DEVICE`) is authoritative
- * while it matches an ONLINE device; otherwise it self-heals to the first online
- * device (with a warning), then any listed device, mirroring the Tizen/iOS
- * pattern. Offline/unauthorized devices are never auto-selected — when no online
- * device is usable, resolution still returns the best-effort first listed device
- * as `discovered-offline` with a warning. If ANY connected device is
- * unauthorized (even in a mixed offline+unauthorized state), the warning carries
- * the exact "accept the RSA prompt on the device" guidance rather than a bare
- * "no devices". Returns null when nothing is listed at all.
+ * A pin (serial or model name — a per-call `device_udid` argument or the
+ * `FLUTTER_DEVICE_ANDROID_DEVICE` env var) is authoritative while it matches an
+ * ONLINE device; otherwise it self-heals to the first online device (with a
+ * warning), then any listed device, mirroring the Tizen/iOS pattern.
+ * Offline/unauthorized devices are never auto-selected — when no online device
+ * is usable, resolution still returns the best-effort first listed device as
+ * `discovered-offline` with a warning. If ANY connected device is unauthorized
+ * (even in a mixed offline+unauthorized state), the warning carries the exact
+ * "accept the RSA prompt on the device" guidance rather than a bare "no
+ * devices". Returns null when nothing is listed at all.
+ *
+ * `pinOrigin` only shapes the warning wording — selection is identical either
+ * way, so a per-call pin self-heals exactly as an env pin does rather than
+ * hard-failing a caller who named a device that just went offline.
  */
 export function resolveAndroidTarget(
   pinned: string | undefined,
-  adbDevicesOutput: string | undefined
+  adbDevicesOutput: string | undefined,
+  pinOrigin: AndroidPinOrigin = "env"
 ): DeviceResolution | null {
   const devices = parseAdbDevices(adbDevicesOutput ?? "");
   if (devices.length === 0) return null;
@@ -146,9 +169,9 @@ export function resolveAndroidTarget(
       return toResolution(
         online,
         "discovered",
-        `FLUTTER_DEVICE_ANDROID_DEVICE is pinned to ${pin}, but that target is not an ` +
-          `online adb device (stale pin — it may be unplugged, offline, or ` +
-          `unauthorized). Using the first online device ${online.serial} instead.`
+        `${describePin(pin, pinOrigin)}, but that target is not an online adb ` +
+          `device (stale pin — it may be unplugged, offline, or unauthorized). ` +
+          `Using the first online device ${online.serial} instead.`
       );
     }
     if (matched) {
@@ -163,9 +186,9 @@ export function resolveAndroidTarget(
       target: pin,
       source: "stale-pin",
       warning:
-        `FLUTTER_DEVICE_ANDROID_DEVICE is pinned to ${pin}, but that target is not a ` +
-        `connected adb device and none was found to fall back to. Proceeding ` +
-        `with the pin; expect failures if it is not connected.`,
+        `${describePin(pin, pinOrigin)}, but that target is not a connected adb ` +
+        `device and none was found to fall back to. Proceeding with the pin; ` +
+        `expect failures if it is not connected.`,
     };
   }
 
