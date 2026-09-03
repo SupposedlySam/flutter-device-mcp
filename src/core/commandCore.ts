@@ -819,16 +819,40 @@ export class CommandCore {
               "Redeploy with flutter_deploy.",
           };
         }
+        // Confirmed (`true`) and unwatched (`undefined`) both land here, and
+        // they are different facts: only the first one saw the flutter tool act.
+        // So `confirmed` is passed STRAIGHT THROUGH rather than dropped — a
+        // caller that cannot see the difference has no way to distinguish a
+        // restart that happened from one nobody looked at — and the note
+        // branches instead of asserting main() re-ran in both cases.
+        //
+        // Unwatched stays a success rather than becoming a failure: a
+        // CONTRADICTED restart (above) waited out the confirmation window and
+        // saw nothing, which is positive evidence; an unwatched one has no
+        // evidence either way and a write to a live pty-bridged FIFO normally
+        // does reach flutter, so reporting failure would send the caller into
+        // an unnecessary redeploy. The defect was the UNQUALIFIED success, not
+        // the success. This mirrors the unconfirmed-reload shape above on
+        // purpose: the pair is only readable if both say "unverified" the same
+        // way.
         return {
           platform: adapter.platform,
           success: true,
           triggered: true,
+          confirmed: outcome.confirmed,
           via: outcome.via,
           operation: outcome.kind,
           device: record.device,
           controlFifoPath: record.controlFifoPath,
           note:
-            "Sent `R` to the running flutter daemon's stdin over the pty control channel — a hot " +
+            (outcome.confirmed
+              ? "Sent `R` to the running flutter daemon's stdin over the pty control channel and " +
+                "SAW the flutter tool acknowledge it — a hot "
+              : "Sent `R` to the running flutter daemon's stdin over the pty control channel. NOT " +
+                "CONFIRMED (no launch log to watch), so treat the restart as UNVERIFIED: do not " +
+                "assume main() re-ran or that in-memory state was dropped — check the app, or " +
+                "redeploy with flutter_deploy to get a launch log this can be confirmed against. " +
+                "A hot ") +
             "RESTART: re-runs main() and drops in-memory state, while KEEPING the process, its VM " +
             "service URI, and any driver connection alive (no redeploy, no new URI).",
         };
