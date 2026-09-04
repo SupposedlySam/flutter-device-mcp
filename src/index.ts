@@ -26,7 +26,7 @@ import {
   resolveAppDirWith,
   validateExplicitAppDir,
 } from "./config/appDir.js";
-import { InputMode } from "./types.js";
+import { BuildMode, InputMode } from "./types.js";
 
 class FlutterDeviceServer {
   private readonly server: Server;
@@ -130,6 +130,7 @@ class FlutterDeviceServer {
             await core.build({
               ...common,
               profile: args.profile as string | undefined,
+              mode: args.mode as BuildMode | undefined,
               debug: args.debug as boolean | undefined,
               dart_define: args.dart_define as
                 | Record<string, string>
@@ -145,6 +146,7 @@ class FlutterDeviceServer {
           return this.json(
             await core.deploy({
               ...common,
+              mode: args.mode as BuildMode | undefined,
               no_launch: args.no_launch as boolean | undefined,
               timeout_ms: args.timeout_ms as number | undefined,
               dart_define: args.dart_define as
