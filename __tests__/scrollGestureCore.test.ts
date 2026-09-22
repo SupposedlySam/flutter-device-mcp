@@ -22,6 +22,10 @@ jest.unstable_mockModule("../src/launchRegistry.js", () => ({
   clearLaunch: jest.fn(),
   clearLaunches: jest.fn(),
   findLaunch: jest.fn(() => undefined),
+  // CommandCore's hot tools go through resolveLaunch (it reports two live
+  // launches as ambiguous rather than picking the newest); nothing is recorded
+  // in this suite, so it answers "none".
+  resolveLaunch: jest.fn(() => ({ kind: "none" })),
   readRecords: jest.fn(() => []),
 }));
 jest.unstable_mockModule("../src/marionetteProbe.js", () => ({
