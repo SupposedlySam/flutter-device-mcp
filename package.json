@@ -32,7 +32,8 @@
     "cli": "node dist/bin/flutter-device.js",
     "dev": "tsx watch src/index.ts",
     "test": "node --experimental-vm-modules ./node_modules/jest/bin/jest.js",
-    "lint": "eslint src/",
+    "lint": "eslint src/ && npm run typecheck:tests",
+    "typecheck:tests": "tsc -p tsconfig.test.json",
     "inspector": "npx @modelcontextprotocol/inspector dist/index.js"
   },
   "keywords": [

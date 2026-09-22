@@ -256,6 +256,8 @@ class FlutterDeviceServer {
               dpr: args.dpr as number | undefined,
               absolute: args.absolute as boolean | undefined,
               double: args.double as boolean | undefined,
+              duration_ms: args.duration_ms as number | undefined,
+              verify: args.verify as boolean | undefined,
               device_udid: args.device_udid as string | undefined,
             })
           );

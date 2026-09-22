@@ -1,5 +1,6 @@
 import { jest } from "@jest/globals";
 import { mockBuildPtyCaptureCommand } from "./support/mockBuildPtyCaptureCommand.js";
+import type { PlatformAdapter } from "../src/adapters/platformAdapter.js";
 
 // Mock the shell layer so we can assert exactly which commands the TizenAdapter
 // issues (behavior-identity with the former standalone server) without spawning
@@ -321,7 +322,14 @@ describe("WebOSAdapter.screenshot is unsupported (no wired capture path)", () =>
 
 describe("TizenAdapter.record is unsupported (sdb shell disabled — guardrail)", () => {
   it("returns {supported:false} with a reason + Marionette hint, shelling nothing", async () => {
-    const res = await tizen().record!({
+    // Call record() through PlatformAdapter, which is how commandCore reaches
+    // it. The contract is `record?(opts)`; Tizen/webOS implement `record()` with
+    // NO parameters (legal — fewer params is assignable), so handing an options
+    // object to the concrete class is a type error even though it is exactly
+    // what happens at runtime. The annotation is a checked assignment, not a
+    // cast: it also pins that TizenAdapter really does satisfy the contract.
+    const adapter: PlatformAdapter = tizen();
+    const res = await adapter.record!({
       durationSeconds: 5,
       fps: 2,
       format: "mp4",
@@ -341,7 +349,9 @@ describe("TizenAdapter.record is unsupported (sdb shell disabled — guardrail)"
 
 describe("WebOSAdapter.record is unsupported (no wired recording path)", () => {
   it("returns {supported:false} with a reason", async () => {
-    const res = await webos().record!({
+    // Through PlatformAdapter for the same reason as the Tizen case above.
+    const adapter: PlatformAdapter = webos();
+    const res = await adapter.record!({
       durationSeconds: 5,
       fps: 2,
       format: "mp4",

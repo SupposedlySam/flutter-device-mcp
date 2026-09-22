@@ -11,6 +11,7 @@
  */
 import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import { ScreenSize } from "./deviceGeometry.js";
+import { ANDROID_SWIPE_MAX_DURATION_MS } from "./input/androidInputController.js";
 import { logicalToDevicePx, Point } from "./input/dpr.js";
 import { ToolRoute } from "./toolRouting.js";
 import { CommandResult, UnsupportedInputError } from "./types.js";
@@ -71,16 +72,27 @@ export function resolvePointerTarget(args: {
 }
 
 /**
- * Resolve a scroll `dy` into a DEVICE-space vertical delta.
+ * Resolve a scroll `dy` into a DEVICE-space vertical delta, plus the optional
+ * duration that decides how FAST the resulting drag is.
  *
- * Same rules as {@link resolvePointerTarget}: `device` by default; `logical`
- * scales via the DPR helper with `dpr` required.
+ * Same coordinate rules as {@link resolvePointerTarget}: `device` by default;
+ * `logical` scales via the DPR helper with `dpr` required. `duration_ms` is not
+ * scaled — it is milliseconds in every space.
+ *
+ * The duration is range-checked HERE, before any device is resolved or shelled
+ * out to, so a typo costs nothing instead of an adb round-trip and a gesture
+ * nobody wanted.
  */
 export function resolveScrollDelta(args: {
   dy?: unknown;
   coordinateSpace?: unknown;
   dpr?: unknown;
-}): { dy: number; coordinateSpace: "device" | "logical" } {
+  duration_ms?: unknown;
+}): {
+  dy: number;
+  coordinateSpace: "device" | "logical";
+  durationMs?: number;
+} {
   const coordinateSpace = (args.coordinateSpace as "device" | "logical") ?? "device";
   if (typeof args.dy !== "number") {
     throw new McpError(
@@ -88,6 +100,7 @@ export function resolveScrollDelta(args: {
       "pointer scroll requires a numeric dy."
     );
   }
+  const durationMs = resolveScrollDurationMs(args.duration_ms);
   if (coordinateSpace === "logical") {
     if (typeof args.dpr !== "number") {
       throw new McpError(
@@ -98,9 +111,34 @@ export function resolveScrollDelta(args: {
     return {
       dy: logicalToDevicePx({ x: 0, y: args.dy }, args.dpr).y,
       coordinateSpace,
+      ...(durationMs !== undefined ? { durationMs } : {}),
     };
   }
-  return { dy: args.dy, coordinateSpace };
+  return {
+    dy: args.dy,
+    coordinateSpace,
+    ...(durationMs !== undefined ? { durationMs } : {}),
+  };
+}
+
+/** Validate the optional `duration_ms` scroll argument. */
+function resolveScrollDurationMs(value: unknown): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    throw new McpError(
+      ErrorCode.InvalidParams,
+      "duration_ms must be a positive number of milliseconds."
+    );
+  }
+  if (value > ANDROID_SWIPE_MAX_DURATION_MS) {
+    throw new McpError(
+      ErrorCode.InvalidParams,
+      `duration_ms must be at most ${ANDROID_SWIPE_MAX_DURATION_MS}ms — the ` +
+        "swipe send blocks for the whole gesture, so a longer one is killed " +
+        "mid-drag and reported as a failed send rather than as a bad argument."
+    );
+  }
+  return value;
 }
 
 /** Caller-supplied Flutter view metrics to cross-check geometry against. */
