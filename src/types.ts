@@ -214,8 +214,17 @@ export interface InputController {
    * Scroll by a DEVICE-pixel vertical delta (positive = down). May throw
    * {@link UnsupportedInputError} on focus-based platforms (e.g. Tizen) that
    * have no free cursor — use {@link key} for navigation there instead.
+   *
+   * Returns a {@link PointerScrollOutcome} where the controller synthesizes the
+   * gesture itself and can therefore say what it actually did (Android, whose
+   * scroll is an `input swipe` bounded by the screen). Returns void where the
+   * platform's scroll is a fire-and-forget frame (webOS) — a caller must treat
+   * an absent outcome as "no detail", never as "nothing happened".
    */
-  pointerScroll(dy: number, opts?: PointerCoordinateOpts): Promise<void>;
+  pointerScroll(
+    dy: number,
+    opts?: PointerScrollOpts
+  ): Promise<PointerScrollOutcome | void>;
   /**
    * Type a text string into the currently-focused field. OPTIONAL — implemented
    * where the platform has an OS-level text-injection channel (Android:
@@ -251,6 +260,68 @@ export interface PointerCoordinateOpts {
 export interface PointerClickOpts {
   /** When true, perform a double-click instead of a single click. */
   double?: boolean;
+}
+
+/**
+ * Options for {@link InputController.pointerScroll}.
+ *
+ * `durationMs` exists because a synthetic scroll has TWO independent variables —
+ * how far the finger travels and how long it takes — and only the first was ever
+ * reachable from a caller. Where the platform's scroll is a timed drag (Android's
+ * `input swipe`), duration IS the gesture's speed, and speed decides whether the
+ * app reads a drag or a fling. Controllers whose scroll has no duration ignore it.
+ */
+export interface PointerScrollOpts extends PointerCoordinateOpts {
+  /** Duration of the synthetic drag in ms. Omitted, the controller's default. */
+  durationMs?: number;
+  /**
+   * Ask the controller to check whether the screen actually changed and report
+   * it in {@link PointerScrollOutcome.verification}. Opt-in: it costs two extra
+   * device round-trips plus a settle wait.
+   */
+  verify?: boolean;
+}
+
+/**
+ * What a scroll verification concluded.
+ *
+ * The three states are NOT symmetric, and a caller must not read them as a
+ * boolean. `unchanged` is strong evidence the gesture did nothing — nothing on
+ * screen moved at all. `changed` is weak: it says some pixel differs, which the
+ * gesture may or may not be responsible for (a clock, a spinner, a video). And
+ * `unavailable` means the check itself could not run, which is neither.
+ */
+export type PointerScrollVerification = "changed" | "unchanged" | "unavailable";
+
+/**
+ * What a scroll actually did, as opposed to what was asked for.
+ *
+ * A bare success on a scroll is close to meaningless: the gesture is synthesized
+ * from a requested delta that the screen's own bounds can truncate, at a speed
+ * the request never mentions. This reports the gesture that was really sent so a
+ * no-op is diagnosable from the response instead of by bisecting the app.
+ */
+export interface PointerScrollOutcome {
+  /** The DEVICE-pixel delta the caller asked for. */
+  requestedDy: number;
+  /** The delta actually travelled, after bounding to the screen. */
+  appliedDy: number;
+  /** True when the screen's bounds truncated the request. */
+  clamped: boolean;
+  /** Where the synthetic finger went down. */
+  from: { x: number; y: number };
+  /** Where it lifted. */
+  to: { x: number; y: number };
+  /** How long the drag took. */
+  durationMs: number;
+  /** `|appliedDy| / durationMs` — the variable a caller cannot see otherwise. */
+  speedPxPerMs: number;
+  /** Present only when `verify` was requested. */
+  verification?: PointerScrollVerification;
+  /** Why the verification concluded what it did. */
+  verificationDetail?: string;
+  /** Advisory notes about the gesture that was sent (clamping, speed). */
+  notes?: string[];
 }
 
 // =========== ERRORS ==========

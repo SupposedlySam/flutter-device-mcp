@@ -92,6 +92,52 @@ describe("resolveScrollDelta", () => {
   it("throws InvalidParams when dy is not numeric", () => {
     expect(() => resolveScrollDelta({})).toThrow(/numeric dy/);
   });
+
+  it("carries duration_ms through as the gesture's speed control", () => {
+    expect(resolveScrollDelta({ dy: 40, duration_ms: 600 })).toEqual({
+      dy: 40,
+      coordinateSpace: "device",
+      durationMs: 600,
+    });
+  });
+
+  it("does NOT scale duration_ms with the coordinate space — ms are ms", () => {
+    const result = resolveScrollDelta({
+      dy: 100,
+      coordinateSpace: "logical",
+      dpr: 2,
+      duration_ms: 600,
+    });
+    expect(result).toEqual({
+      dy: 200, // scaled
+      coordinateSpace: "logical",
+      durationMs: 600, // not scaled
+    });
+  });
+
+  it("omits durationMs entirely when the caller did not ask for one", () => {
+    expect(resolveScrollDelta({ dy: 40 })).not.toHaveProperty("durationMs");
+  });
+
+  it("rejects a non-positive or non-numeric duration_ms", () => {
+    expect(() => resolveScrollDelta({ dy: 40, duration_ms: 0 })).toThrow(
+      /positive number of milliseconds/
+    );
+    expect(() => resolveScrollDelta({ dy: 40, duration_ms: -100 })).toThrow(
+      /positive number of milliseconds/
+    );
+    expect(() => resolveScrollDelta({ dy: 40, duration_ms: "600" })).toThrow(
+      /positive number of milliseconds/
+    );
+  });
+
+  it("rejects a duration_ms the send timeout would kill mid-drag", () => {
+    // Caught here, before a device is resolved, so the caller is told it was a
+    // bad argument rather than being handed a failed adb send to interpret.
+    expect(() => resolveScrollDelta({ dy: 40, duration_ms: 30000 })).toThrow(
+      /at most 10000ms/
+    );
+  });
 });
 
 describe("resolveViewMetrics", () => {

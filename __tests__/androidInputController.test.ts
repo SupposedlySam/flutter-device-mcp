@@ -2,14 +2,20 @@ import { jest } from "@jest/globals";
 import {
   AndroidInputController,
   ANDROID_KEYCODES,
+  ANDROID_SCROLL_SETTLE_MS,
   ANDROID_SWIPE_DURATION_MS,
+  ANDROID_SWIPE_MAX_DURATION_MS,
   buildAdbKeyeventCommand,
+  buildAdbScreenHashCommand,
   buildAdbSwipeCommand,
   buildAdbTapCommand,
   buildAdbTextCommand,
   escapeAdbText,
   normalizeAndroidKey,
+  parseScreenHash,
   parseWmSize,
+  planAndroidScroll,
+  resolveSwipeDurationMs,
 } from "../src/input/androidInputController.js";
 import {
   filePointerStage,
@@ -55,8 +61,40 @@ function controller(
   stage: PointerStage = memoryPointerStage(),
   resolveSerial: () => Promise<string> = async () => SERIAL
 ) {
-  return new AndroidInputController(resolveSerial, run, stage);
+  return new AndroidInputController(
+    resolveSerial,
+    run,
+    stage,
+    async () => {} // no settle wait in tests
+  );
 }
+
+/** A runner whose `wm size` answers with a fixed screen, used by scroll cases. */
+function runnerOnScreen(width: number, height: number, hashes: string[] = []) {
+  const queue = [...hashes];
+  return jest.fn<RunShell>(async (cmd) => {
+    const command = cmd as string;
+    if (command.includes("wm size")) {
+      return { ...okResult, combined: `Physical size: ${width}x${height}` };
+    }
+    if (command.includes("md5sum")) {
+      const next = queue.shift();
+      if (next === undefined) return { ...okResult, success: false };
+      return { ...okResult, combined: `${next}  -` };
+    }
+    return okResult;
+  });
+}
+
+/** The `input swipe` command a runner was asked to send. */
+function sentSwipe(run: jest.Mock<RunShell>): string {
+  return run.mock.calls
+    .map(([c]) => c as string)
+    .find((c) => c.includes("input swipe"))!;
+}
+
+const HASH_A = "0123456789abcdef0123456789abcdef";
+const HASH_B = "fedcba9876543210fedcba9876543210";
 
 describe("normalizeAndroidKey", () => {
   it("maps the exposed short names to their Android keycodes", () => {
@@ -358,6 +396,314 @@ describe("AndroidInputController", () => {
       .map(([c]) => c as string)
       .find((c) => c.includes("input swipe"))!;
     expect(swipe).toContain("swipe 540 100 540 0 ");
+  });
+
+  it("pointerScroll reports the gesture it sent, not a bare success", async () => {
+    const scrollRun = runnerOnScreen(1080, 2340);
+    const input = controller(scrollRun);
+    await input.pointerMove(540, 1200);
+
+    const outcome = await input.pointerScroll(400);
+
+    expect(outcome).toMatchObject({
+      requestedDy: 400,
+      appliedDy: 400,
+      clamped: false,
+      from: { x: 540, y: 1200 },
+      to: { x: 540, y: 800 },
+      durationMs: ANDROID_SWIPE_DURATION_MS,
+    });
+  });
+
+  it("pointerScroll sends a caller-supplied duration instead of the default", async () => {
+    const scrollRun = runnerOnScreen(1080, 2340);
+    const input = controller(scrollRun);
+    await input.pointerMove(540, 1200);
+
+    const outcome = await input.pointerScroll(400, { durationMs: 600 });
+
+    expect(sentSwipe(scrollRun)).toBe(
+      `adb -s '${SERIAL}' shell input swipe 540 1200 540 800 600`
+    );
+    expect(outcome).toMatchObject({ durationMs: 600, speedPxPerMs: 0.667 });
+  });
+
+  it("pointerScroll bounds a duration above the max rather than timing the send out", async () => {
+    const scrollRun = runnerOnScreen(1080, 2340);
+    const input = controller(scrollRun);
+    await input.pointerMove(540, 1200);
+
+    await input.pointerScroll(400, { durationMs: 999999 });
+
+    expect(sentSwipe(scrollRun)).toContain(
+      `540 800 ${ANDROID_SWIPE_MAX_DURATION_MS}`
+    );
+  });
+});
+
+describe("planAndroidScroll", () => {
+  const anchor = { x: 720, y: 1600 };
+  const screenHeight = 2960;
+
+  it("reports a request the screen truncated as clamped, with the real travel", () => {
+    const plan = planAndroidScroll({
+      anchor,
+      dy: 9000,
+      screenHeight,
+      durationMs: 300,
+    });
+
+    expect(plan.requestedDy).toBe(9000);
+    expect(plan.appliedDy).toBe(1600); // anchor to the top edge, nothing more
+    expect(plan.clamped).toBe(true);
+    expect(plan.to).toEqual({ x: 720, y: 0 });
+  });
+
+  it("emits the IDENTICAL gesture for any dy past the bound — raising it is never the fix", () => {
+    const plans = [2000, 9000, 100000].map((dy) =>
+      planAndroidScroll({ anchor, dy, screenHeight, durationMs: 300 })
+    );
+
+    // The distinguishing claim: the requests differ by 50x and the gestures do
+    // not differ at all, which is why seven retries at a bigger dy changed
+    // nothing. Asserting only that each is "clamped" would pass even if travel
+    // still grew with dy.
+    for (const plan of plans) {
+      expect(plan.to).toEqual(plans[0].to);
+      expect(plan.appliedDy).toBe(plans[0].appliedDy);
+      expect(plan.durationMs).toBe(plans[0].durationMs);
+      expect(plan.speedPxPerMs).toBe(plans[0].speedPxPerMs);
+    }
+    expect(plans.map((p) => p.requestedDy)).toEqual([2000, 9000, 100000]);
+  });
+
+  it("turns a larger dy into SPEED, not distance, once travel is at the bound", () => {
+    const modest = planAndroidScroll({
+      anchor,
+      dy: 400,
+      screenHeight,
+      durationMs: 300,
+    });
+    const excessive = planAndroidScroll({
+      anchor,
+      dy: 9000,
+      screenHeight,
+      durationMs: 300,
+    });
+
+    expect(modest.speedPxPerMs).toBeCloseTo(1.333, 3);
+    expect(excessive.speedPxPerMs).toBeCloseTo(5.333, 3);
+    // Same duration for both: the ONLY thing the bigger dy bought was velocity.
+    expect(excessive.durationMs).toBe(modest.durationMs);
+  });
+
+  it("lets duration reach a speed dy cannot, at identical travel", () => {
+    const flick = planAndroidScroll({
+      anchor,
+      dy: 9000,
+      screenHeight,
+      durationMs: 300,
+    });
+    const drag = planAndroidScroll({
+      anchor,
+      dy: 9000,
+      screenHeight,
+      durationMs: 600,
+    });
+
+    expect(drag.appliedDy).toBe(flick.appliedDy);
+    expect(drag.speedPxPerMs).toBeCloseTo(flick.speedPxPerMs / 2, 3);
+  });
+
+  it("says raising dy cannot help, in the note attached to a clamped plan", () => {
+    const plan = planAndroidScroll({
+      anchor,
+      dy: 9000,
+      screenHeight,
+      durationMs: 300,
+    });
+
+    expect(plan.notes.join(" ")).toMatch(/Raising dy CANNOT scroll further/);
+    expect(plan.notes.join(" ")).toMatch(/duration_ms/);
+  });
+
+  it("leaves an in-bounds request alone and unremarked", () => {
+    const plan = planAndroidScroll({
+      anchor,
+      dy: 400,
+      screenHeight,
+      durationMs: 300,
+    });
+
+    expect(plan.clamped).toBe(false);
+    expect(plan.appliedDy).toBe(400);
+    expect(plan.notes).toEqual([]);
+  });
+
+  it("flags a plan whose swipe never leaves its starting point", () => {
+    const plan = planAndroidScroll({
+      anchor,
+      dy: 0,
+      screenHeight,
+      durationMs: 300,
+    });
+
+    expect(plan.appliedDy).toBe(0);
+    expect(plan.notes.join(" ")).toMatch(/no gesture travel was sent at all/);
+  });
+
+  it("bounds a downward scroll at the bottom edge too", () => {
+    const plan = planAndroidScroll({
+      anchor: { x: 720, y: 2900 },
+      dy: -9000,
+      screenHeight,
+      durationMs: 300,
+    });
+
+    expect(plan.to).toEqual({ x: 720, y: 2959 }); // height - 1
+    expect(plan.clamped).toBe(true);
+    expect(plan.notes.join(" ")).toMatch(/bottom of the screen/);
+  });
+});
+
+describe("resolveSwipeDurationMs", () => {
+  it("defaults when the caller supplied nothing", () => {
+    expect(resolveSwipeDurationMs()).toBe(ANDROID_SWIPE_DURATION_MS);
+  });
+
+  it("honors a supplied duration", () => {
+    expect(resolveSwipeDurationMs(600)).toBe(600);
+  });
+
+  it("caps at the max the send timeout allows", () => {
+    expect(resolveSwipeDurationMs(60000)).toBe(ANDROID_SWIPE_MAX_DURATION_MS);
+  });
+
+  it("falls back to the default rather than refusing to scroll on a NaN", () => {
+    expect(resolveSwipeDurationMs(Number.NaN)).toBe(ANDROID_SWIPE_DURATION_MS);
+  });
+});
+
+describe("scroll verification", () => {
+  it("hashes the raw framebuffer on-device so only a digest crosses the wire", () => {
+    expect(buildAdbScreenHashCommand(SERIAL)).toBe(
+      `adb -s '${SERIAL}' shell 'screencap | md5sum'`
+    );
+    // NOT `screencap -p`: a PNG re-encode is a second chance for two identical
+    // screens to hash differently, which would read as "it scrolled".
+    expect(buildAdbScreenHashCommand(SERIAL)).not.toContain("-p");
+  });
+
+  it("parses a digest out of md5sum output", () => {
+    expect(parseScreenHash(`${HASH_A}  -\n`)).toBe(HASH_A);
+    expect(parseScreenHash("md5sum: not found")).toBeUndefined();
+  });
+
+  it("reports 'unchanged' when the screen is byte-identical after the swipe", async () => {
+    const scrollRun = runnerOnScreen(1080, 2340, [HASH_A, HASH_A]);
+    const input = controller(scrollRun);
+    await input.pointerMove(540, 1200);
+
+    const outcome = await input.pointerScroll(400, { verify: true });
+
+    expect(outcome.verification).toBe("unchanged");
+    // The point of the state: it names the input plane as WORKING, so nobody
+    // goes hunting a dead Dart VM service over a gesture the app simply ignored.
+    expect(outcome.verificationDetail).toMatch(/gesture reached the device/);
+  });
+
+  it("reports 'changed' when the screen differs, and says why that is weak", async () => {
+    const scrollRun = runnerOnScreen(1080, 2340, [HASH_A, HASH_B]);
+    const input = controller(scrollRun);
+    await input.pointerMove(540, 1200);
+
+    const outcome = await input.pointerScroll(400, { verify: true });
+
+    expect(outcome.verification).toBe("changed");
+    expect(outcome.verificationDetail).toMatch(/weaker evidence/);
+  });
+
+  it("reports 'unavailable' — never 'unchanged' — when the check cannot run", async () => {
+    // A device without md5sum, or a secure surface refusing capture. Calling
+    // that "unchanged" would invent a no-op the tool never observed.
+    const scrollRun = runnerOnScreen(1080, 2340, []);
+    const input = controller(scrollRun);
+    await input.pointerMove(540, 1200);
+
+    const outcome = await input.pointerScroll(400, { verify: true });
+
+    expect(outcome.verification).toBe("unavailable");
+    expect(sentSwipe(scrollRun)).toBeDefined(); // the gesture still went out
+  });
+
+  it("reports 'unavailable' when only the post-gesture hash fails", async () => {
+    const scrollRun = runnerOnScreen(1080, 2340, [HASH_A]);
+    const input = controller(scrollRun);
+    await input.pointerMove(540, 1200);
+
+    expect((await input.pointerScroll(400, { verify: true })).verification).toBe(
+      "unavailable"
+    );
+  });
+
+  it("lets the screen settle BETWEEN the swipe and the second hash", async () => {
+    // `input swipe` returns once the gesture is injected, which is before the
+    // app has drawn its response. Hashing straight afterwards would call a
+    // scroll that worked "unchanged".
+    const order: string[] = [];
+    const scrollRun = jest.fn<RunShell>(async (cmd) => {
+      const command = cmd as string;
+      if (command.includes("wm size")) {
+        return { ...okResult, combined: "Physical size: 1080x2340" };
+      }
+      if (command.includes("md5sum")) {
+        order.push("hash");
+        return { ...okResult, combined: `${HASH_A}  -` };
+      }
+      if (command.includes("input swipe")) order.push("swipe");
+      return okResult;
+    });
+    const waits: number[] = [];
+    const input = new AndroidInputController(
+      async () => SERIAL,
+      scrollRun as unknown as (c: string, o?: unknown) => Promise<CommandResult>,
+      memoryPointerStage(),
+      async (ms) => {
+        order.push(`wait:${ms}`);
+        waits.push(ms);
+      }
+    );
+    await input.pointerMove(540, 1200);
+
+    await input.pointerScroll(400, { verify: true });
+
+    expect(order).toEqual([
+      "hash",
+      "swipe",
+      `wait:${ANDROID_SCROLL_SETTLE_MS}`,
+      "hash",
+    ]);
+    expect(waits).toEqual([ANDROID_SCROLL_SETTLE_MS]);
+  });
+
+  it("takes no screen hashes at all unless verification was asked for", async () => {
+    const scrollRun = runnerOnScreen(1080, 2340, [HASH_A, HASH_B]);
+    const input = controller(scrollRun);
+    await input.pointerMove(540, 1200);
+
+    const outcome = await input.pointerScroll(400);
+
+    expect(
+      scrollRun.mock.calls.filter(([c]) => (c as string).includes("md5sum"))
+    ).toHaveLength(0);
+    expect(outcome.verification).toBeUndefined();
+  });
+});
+
+describe("AndroidInputController (text, sends, mode)", () => {
+  let run: jest.Mock<RunShell>;
+  beforeEach(() => {
+    run = jest.fn<RunShell>(async () => okResult);
   });
 
   it("text() sends the escaped string through `input text`", async () => {

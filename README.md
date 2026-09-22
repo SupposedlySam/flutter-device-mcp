@@ -383,6 +383,38 @@ allowed. `flutter_pointer` accepts `coordinateSpace: "logical"` with an
 explicit `dpr` when you do want VM-service-style logical coordinates;
 `flutter_geometry` reports the real ratio so `dpr` never has to be guessed.
 
+**A scroll reports the gesture it sent (Android), under `gesture`.** A swipe
+has two independent variables and `dy` only reaches one of them, which made an
+ineffective scroll indistinguishable from a working one:
+
+- **Distance is bounded by the screen.** The swipe runs from the anchor to the
+  screen edge and no further, so `dy: 9000` from `y=1600` travels 1600px, not
+  9000. `gesture.requestedDy` vs `gesture.appliedDy` and `gesture.clamped` say
+  so instead of leaving you to infer it.
+- **Past that bound, a bigger `dy` buys speed, not distance.** The duration is
+  fixed, so the same travel in the same time — a larger `dy` emits the
+  *byte-identical* command. "It didn't scroll, ask for more" is not a fix, and
+  it is the natural first reaction, so the response says this in
+  `gesture.notes`.
+- **`duration_ms` is the variable you actually want** (default 300, max
+  10000). It is the gesture's speed: short is a flick that carries fling
+  velocity into the app, long is a slow drag. A scrollable that ignores one can
+  accept the other, so this is the first thing to change when the swipe lands
+  but nothing moves — try 600–800. `gesture.speedPxPerMs` reports the result.
+- **`verify: true`** fingerprints the screen on-device (`screencap | md5sum`,
+  both sides of the pipe running there, so only a digest crosses the wire)
+  before and after, and reports `gesture.verification`. Read the three states
+  asymmetrically: `unchanged` is strong evidence the gesture did nothing *and
+  that the input plane is fine* (so nobody goes hunting a dead Dart VM
+  service), `changed` is weak (a clock or animation also counts), and
+  `unavailable` means the check could not run and says nothing either way.
+
+The default duration stays 300ms deliberately. A slower drag is not strictly
+better — it carries less velocity, so a surface that relies on fling momentum
+travels further at the current speed than at a slower one, and raising the
+default to rescue one surface would quietly shorten every scroll that works
+today.
+
 **Provenance.** The Android, iOS and Tizen rows above were verified on a
 device in the sibling codebase this server tracks (not re-run in this repo):
 BACK popped three routes on a physical Android handset and a move-plus-click
@@ -390,6 +422,11 @@ at screenshot-read device pixels landed on the intended tab; iOS's key/pointer
 verbs returned `{supported:false}`; Tizen's pointer move returned
 `{supported:false}`, pointing at the key verb. The macOS and tvOS rows come
 from the recorded platform model rather than a verified session, there too.
+The scroll behaviour above was measured the same way — on a physical handset in
+that sibling codebase, where a bottom sheet refused seven consecutive scrolls at
+increasing `dy` (every one of them the byte-identical command) and moved on the
+first try at an explicit 600ms duration. Why a fast drag can do nothing on such
+a surface was never measured, and nothing here claims to know.
 
 ## Deep links (`flutter_open_url`)
 
