@@ -34,6 +34,15 @@ const okResult: CommandResult = {
 };
 
 /**
+ * The shell-runner seam AndroidInputController is constructed with. Naming it
+ * lets the mocks below carry this signature instead of a bare `jest.Mock`, whose
+ * unparameterized return type made `mockResolvedValue` infer `never` — an error
+ * `npm test` cannot see (ts-jest transpiles without type diagnostics) and one
+ * that also forced the `as unknown as` double-cast this replaces.
+ */
+type RunShell = (cmd: string, opts?: unknown) => Promise<CommandResult>;
+
+/**
  * A controller with an injected runner + a fixed serial resolver.
  *
  * The pointer stage is injected too, defaulting to a FRESH in-memory stage per
@@ -42,15 +51,11 @@ const okResult: CommandResult = {
  * case into the next. Pass a shared stage to exercise the cross-process path.
  */
 function controller(
-  run: jest.Mock,
+  run: jest.Mock<RunShell>,
   stage: PointerStage = memoryPointerStage(),
   resolveSerial: () => Promise<string> = async () => SERIAL
 ) {
-  return new AndroidInputController(
-    resolveSerial,
-    run as unknown as (cmd: string, opts?: unknown) => Promise<CommandResult>,
-    stage
-  );
+  return new AndroidInputController(resolveSerial, run, stage);
 }
 
 describe("normalizeAndroidKey", () => {
@@ -160,10 +165,10 @@ describe("parseWmSize", () => {
 });
 
 describe("AndroidInputController", () => {
-  let run: jest.Mock;
+  let run: jest.Mock<RunShell>;
 
   beforeEach(() => {
-    run = jest.fn(async () => okResult) as jest.Mock;
+    run = jest.fn<RunShell>(async () => okResult);
   });
 
   it("key() resolves the serial lazily and sends the mapped keyevent", async () => {
@@ -229,11 +234,11 @@ describe("AndroidInputController", () => {
       // Two controllers over two stage instances = two server processes. No
       // shared object graph: the position can only travel through the file.
       await controller(
-        jest.fn(async () => okResult) as jest.Mock,
+        jest.fn<RunShell>(async () => okResult),
         filePointerStage(file)
       ).pointerMove(756, 2268);
 
-      const clickRun = jest.fn(async () => okResult) as jest.Mock;
+      const clickRun = jest.fn<RunShell>(async () => okResult);
       await controller(clickRun, filePointerStage(file)).pointerClick();
 
       expect(clickRun).toHaveBeenCalledWith(
@@ -245,11 +250,11 @@ describe("AndroidInputController", () => {
     it("anchors a scroll at the staged position from a SEPARATE controller too", async () => {
       const file = tmpStageFile();
       await controller(
-        jest.fn(async () => okResult) as jest.Mock,
+        jest.fn<RunShell>(async () => okResult),
         filePointerStage(file)
       ).pointerMove(540, 1200);
 
-      const scrollRun = jest.fn(async () => okResult) as jest.Mock;
+      const scrollRun = jest.fn<RunShell>(async () => okResult);
       await controller(scrollRun, filePointerStage(file)).pointerScroll(400);
 
       // The anchor is the staged (540,1200), not the wm-size screen center the
@@ -264,12 +269,12 @@ describe("AndroidInputController", () => {
     it("keys the stage by device, so a position staged for one serial is NOT tapped on another", async () => {
       const file = tmpStageFile();
       await controller(
-        jest.fn(async () => okResult) as jest.Mock,
+        jest.fn<RunShell>(async () => okResult),
         filePointerStage(file),
         async () => "emulator-5554"
       ).pointerMove(756, 2268);
 
-      const otherRun = jest.fn(async () => okResult) as jest.Mock;
+      const otherRun = jest.fn<RunShell>(async () => okResult);
       await expect(
         controller(
           otherRun,
@@ -283,7 +288,7 @@ describe("AndroidInputController", () => {
     it("reports the position a click would use, for the tool response", async () => {
       const file = tmpStageFile();
       const input = controller(
-        jest.fn(async () => okResult) as jest.Mock,
+        jest.fn<RunShell>(async () => okResult),
         filePointerStage(file)
       );
       expect(await input.pointerPosition()).toBeUndefined();
