@@ -187,6 +187,7 @@ All variables use the `FLUTTER_DEVICE_` prefix (`<PLATFORM>` is one of
 | `FLUTTER_DEVICE_<PLATFORM>_DEVICE` | Device pin (id / name / address) for a platform |
 | `FLUTTER_DEVICE_<PLATFORM>_APP_ID` | App / bundle id for a platform |
 | `FLUTTER_DEVICE_ANDROID_LAUNCH_MODE` | `debug` \| `profile` \| `release` (default Android mode) |
+| `FLUTTER_DEVICE_IOS_LAUNCH_MODE` | `debug` \| `profile` \| `release` (default iOS build + deploy-launch mode; see [iOS launch modes](#ios-launch-modes)) |
 | `FLUTTER_DEVICE_TIZEN_PROFILE` | Tizen device profile for `flutter-tizen build` |
 | `FLUTTER_DEVICE_TIZEN_SDK_PATH` | Tizen SDK data dir (the folder containing `platforms/`) for the rootstrap precheck; else `$TIZEN_SDK` / common locations |
 | `FLUTTER_DEVICE_TIZEN_API_VERSION` | Tizen api-version to target (e.g. `8.0`); else read from `tizen/tizen-manifest.xml` |
@@ -218,7 +219,7 @@ optional. Each platform under `platforms` accepts `device`, `appId`, and
 `preBuild` (an array of shell commands run in order, from `appDir`, **before** the
 build — the **fork-free extension point** for app-specific steps such as compiling
 a native engine); plus `tizenProfile` / `securityProfile` / `sdk` (Tizen),
-`androidLaunchMode` (Android), and `flutterTvosBinDir` (tvOS).
+`androidLaunchMode` (Android), `iosLaunchMode` (iOS), and `flutterTvosBinDir` (tvOS).
 
 **Tizen notes.** A Tizen TV is reached over the network, so `sdb` won't list it
 until connected — set `device` to the TV's IP and the tool **auto-runs
@@ -339,7 +340,7 @@ var — it came from.
 | `flutter_info` | Device + environment status and resolved config with provenance |
 | `flutter_setup` | Prepare the device for development |
 | `flutter_build` | Build the app package. `mode` picks release/profile/debug — reach for `profile` when measuring, since it is AOT-timed *and* keeps the VM service open. `dart_define` passes compile-time constants. macOS: `{supported:false}` — building/signing an arbitrary desktop app is out of scope |
-| `flutter_deploy` | **Install + launch through a pty and return the captured `ws://…/ws` VM Service URI** to hand to a driver. Runs the guardrails: kills the stale drivers holding **the device it is deploying to** first (a session on another device survives), recovers from `ENOSPC`, records the launch for hot reload/restart, and probes whether the build is Marionette-drivable. macOS: stages + launches a prebuilt signed `.app` (`app_path`/`app_url`); no VM Service URI exists there |
+| `flutter_deploy` | **Install + launch through a pty and return the captured `ws://…/ws` VM Service URI** to hand to a driver. Runs the guardrails: kills the stale drivers holding **the device it is deploying to** first (a session on another device survives), recovers from `ENOSPC`, records the launch for hot reload/restart, and probes whether the build is Marionette-drivable. iOS honors `mode` for the launch itself (see [iOS launch modes](#ios-launch-modes)). macOS: stages + launches a prebuilt signed `.app` (`app_path`/`app_url`); no VM Service URI exists there |
 | `flutter_open_url` | **Open a URL on the device — the deep-link driver.** Drives custom schemes (`myapp://…`) and `https://…` App Links / universal links through the real OS plumbing, so intent-filters and domain associations are actually exercised. Android + Apple **simulators**; a physical iPhone/Apple TV reports `{supported:false}` because Apple provides no url-open verb — see [Deep links](#deep-links-flutter_open_url) |
 | `flutter_uninstall` | Remove the app from the device |
 | `flutter_kill_stale` | Kill leftover launch processes. **iOS/Android: for ONE device** — the resolved target, or the one `device_udid` names — the `flutter run` driver whose process tree holds it, plus its children; another device's session is left running, and a driver that can't be tied to a device is reported with its pid rather than killed. **Tizen/webOS/tvOS/macOS: platform-wide** (`flutter-tizen`, `ares-launch`/`flutter-webos`, `flutter-tvos` and their children, or the staged macOS process) — those names can't belong to another platform, so no device is needed and the response says `scope: platform-wide`. `all_devices: true` is the iOS/Android opt-in hammer. With nothing attached on iOS/Android it kills nothing and says why. See [Teardown scope](#teardown-scope-one-deploy-at-a-time-per-device) |
@@ -487,6 +488,56 @@ daemon keeps its record and its hot reload. With TWO launches live and no
 `device` named, the hot tools report the ambiguity and the device list instead of
 picking the most recent one — a reload that silently drove the wrong device reads
 as a reload that did nothing.
+
+## iOS launch modes
+
+`flutter_build` and `flutter_deploy` pick the iOS Flutter compilation mode with the
+same precedence: explicit `mode` arg > the legacy `debug` boolean > the
+`FLUTTER_DEVICE_IOS_LAUNCH_MODE` env pin (or `iosLaunchMode` in the config file) >
+the default `debug`. The default is `debug` because **Marionette is gated on
+`kDebugMode`** — an app that calls `bootstrapMarionette()` only in debug registers
+no `ext.flutter.marionette.*` extension in profile or release. Because build and
+launch share this resolution, a plain build never produces a release artifact
+beside a debug launch, and `target: "simulator"` never composes the
+`--simulator --release` that flutter rejects.
+
+| `mode` | `debug` arg | `FLUTTER_DEVICE_IOS_LAUNCH_MODE` | build | deploy launch |
+|--------|-------------|----------------------------------|-------|---------------|
+| _(omitted)_ | _(omitted)_ | _(unset)_ | `--debug` | `--debug` |
+| _(omitted)_ | _(omitted)_ | `profile` | `--profile` | `--profile` |
+| _(omitted)_ | `true` | _(any)_ | `--debug` | `--debug` |
+| _(omitted)_ | `false` | _(any)_ | `--release` | _(no debug pin; falls through)_ |
+| `profile` | _(any)_ | _(any)_ | `--profile` | `--profile` |
+| `release` | _(any)_ | _(any)_ | `--release` | `--release` |
+
+**What a non-debug launch costs, and what it doesn't.** `--profile` is the mode
+that reproduces release-only code paths — under debug an attached debugger also
+keeps the app alive, so OS suspension isn't realistic, and a code path chosen by
+`kDebugMode` is simply never executed. The deploy still returns a **real**
+`ws://…/ws` URI for a profile launch (`flutter run` enables the VM service for
+every mode but release), so DevTools, the timeline and the built-in
+`ext.flutter.*` extensions all work — what is missing is only the app's own
+Marionette extension. The response says exactly that in `launchModeCaveat`, and
+reports the mode it actually launched in `launchMode` (an env pin is otherwise
+invisible). A profile launch carries no hot reload/restart control channel: it is
+a cold run.
+
+`--release` has no Dart VM service at all. The deploy returns an **empty** URI with
+`noVmServiceReason` explaining why, and `marionetteReady: false`, rather than an
+empty field that reads like a failed capture.
+
+**Why there is no VM-service discovery fallback.** A `flutter run --<mode>`
+pipeline is the only path that surfaces the URI. Measured on a macOS host driving
+a USB-attached iPhone: a profile-mode Dart VM Service is **not advertised over
+Bonjour** — enumerating every service type on every interface, including the
+`_apple-mobdev2`/`_rp-tunnel` USB-debug tunnels, never shows
+`_dartVmService._tcp` — and `flutter attach` against the same device produces no
+output before timing out. So the tool does not add a discovery step it knows
+cannot succeed. Instead, a non-debug launch watches for the runner coming up
+resident (`Flutter run key commands.`) and, after a short grace window with no URI
+printed, ends the wait with the explanation above — it never sits on the caller's
+full `timeout_ms` waiting for something that is not coming. A debug launch is
+unchanged: its URI is the success criterion, so it still waits the full timeout.
 
 ## Deep links (`flutter_open_url`)
 

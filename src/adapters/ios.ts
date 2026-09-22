@@ -46,7 +46,19 @@ import {
   buildPtyCaptureCommand,
   ControlChannel,
   launchAndCaptureUri as neutralLaunchAndCaptureUri,
+  SettleOptions,
 } from "../launchCapture.js";
+import {
+  IOS_DEFAULT_LAUNCH_MODE,
+  IOS_PROFILE_NO_VM_SERVICE_REASON,
+  IOS_RELEASE_NO_VM_SERVICE_REASON,
+  IOS_RESIDENT_SETTLE_SIGNATURES,
+  IOS_SETTLE_GRACE_MS,
+  IosLaunchMode,
+  iosFlutterModeFlag,
+  iosLaunchModeCaveat,
+  resolveIosLaunchMode,
+} from "../iosLaunchMode.js";
 import { logger } from "../logger.js";
 import {
   IosDeviceKind,
@@ -77,9 +89,9 @@ import {
   DeviceResolution,
   InputController,
   InputMode,
+  isLaunchFailure,
   LaunchOutcome,
   Platform,
-  resolveBuildMode,
   UnsupportedInputError,
 } from "../types.js";
 import {
@@ -182,6 +194,12 @@ export const IOS_FAILURE_SIGNATURES: RegExp[] = [
  * its VM-service URI (buffered under a plain pipe otherwise). This adapter owns
  * only the `flutter run` invocation; the cross-platform `script`/`/bin/sh -c`
  * wrapping is the shared helper's concern.
+ *
+ * `mode` is the compilation mode the deploy resolved (see
+ * {@link resolveIosLaunchMode}); it defaults to `debug`, which is what keeps the
+ * Dart VM service open AND the app Marionette-drivable (Marionette is gated on
+ * `kDebugMode`). It trails the older parameters so every existing call site keeps
+ * composing exactly the `--debug` launch it composed before.
  */
 export function buildIosPtyLaunchCommand(
   appDir: string,
@@ -189,7 +207,8 @@ export function buildIosPtyLaunchCommand(
   flutterCommand = "flutter",
   platform: NodeJS.Platform = process.platform,
   controlChannel?: ControlChannel,
-  extraArgs: string[] = []
+  extraArgs: string[] = [],
+  mode: IosLaunchMode = IOS_DEFAULT_LAUNCH_MODE
 ): string {
   // FULL `flutter run` pipeline — deliberately NOT --no-build (learned on-device):
   // the reliable iOS install+launch path is the full pipeline, which builds,
@@ -198,14 +217,14 @@ export function buildIosPtyLaunchCommand(
   // (unsigned artifact) + `flutter install`/`flutter run --no-build` produced a
   // bad/absent signature and failed at install with a MISLEADING signing error.
   // Letting `flutter run` own the build+sign+install is what worked first-try.
-  // --debug keeps the Dart VM service (and its URI) available for Marionette.
   // `udid` MUST be the FLUTTER id (ECID for a physical device), not the
   // devicectl UUID — the latter is not a valid `flutter run -d` target.
   // `extraArgs` carries already-quoted --dart-define tokens. The full pipeline
   // BUILDS here, so defines spliced in are what the installed app is compiled
   // with -- splicing them only into `flutter build ios` would miss the deploy.
   const suffix = extraArgs.length > 0 ? ` ${extraArgs.join(" ")}` : "";
-  const inner = `${flutterCommand} run --debug -d ${quote(udid)}` + suffix;
+  const inner =
+    `${flutterCommand} run ${iosFlutterModeFlag(mode)} -d ${quote(udid)}` + suffix;
   return buildPtyCaptureCommand({ inner, cwd: appDir, platform, controlChannel });
 }
 
@@ -287,6 +306,13 @@ export interface IosAdapterConfig {
   device?: string;
   /** The iOS bundle identifier. */
   appId: string;
+  /**
+   * The launch/build mode used when a deploy/build passes no explicit `mode` or
+   * `debug` arg — the resolved `FLUTTER_DEVICE_IOS_LAUNCH_MODE` env pin, or
+   * `undefined` to use {@link IOS_DEFAULT_LAUNCH_MODE} (`debug`). An explicit tool
+   * arg still overrides this (see {@link resolveIosLaunchMode}).
+   */
+  launchMode?: IosLaunchMode;
   /**
    * The flutter invocation to shell (e.g. "flutter" or "fvm flutter"). Optional;
    * defaults to the fvm-aware resolution over {@link IosAdapterConfig.appDir}.
@@ -427,9 +453,22 @@ export class IosAdapter implements PlatformAdapter {
   }
 
   /**
-   * Build the app for iOS via `flutter build`. Flags mirror the appliance build
-   * tool where they map: `debug` toggles debug/release; a `simulator` profile
-   * builds for the simulator; `skip_flutter` short-circuits to a no-op success
+   * Build the app for iOS via `flutter build`.
+   *
+   * The compilation mode follows the SAME resolution as the deploy launch
+   * ({@link resolveIosLaunchMode}): an explicit `mode` wins, then the legacy
+   * `debug` boolean, then the `FLUTTER_DEVICE_IOS_LAUNCH_MODE` env pin, then the
+   * default `debug`. That default is what makes a plain `flutter_build
+   * platform=ios` produce an artifact coherent with the debug launch a plain
+   * `flutter_deploy` performs — before, the two disagreed (the build defaulted to
+   * release while the launch was hardcoded `--debug`), so a build+deploy pair
+   * silently mixed modes. It also stops `profile: "simulator"` composing
+   * `--simulator --release`, which flutter rejects outright (release does not
+   * support a simulator).
+   *
+   * `opts.profile` is the SIMULATOR/device selector, not a compilation mode — the
+   * two words collide in this tool's vocabulary, and only `mode`/`debug` choose
+   * debug-vs-profile-vs-release. `skip_flutter` short-circuits to a no-op success
    * (there is no separate Rust engine on the iOS app path — `skip_rust` is
    * accepted for interface parity and ignored).
    */
@@ -468,11 +507,16 @@ export class IosAdapter implements PlatformAdapter {
 
     const forSimulator = opts.profile === "simulator";
     const flags = ["build", forSimulator ? "ios --simulator" : "ios"];
-    // 3-way mode, `mode` winning over the legacy `debug` boolean. Honored here
-    // rather than ignored so `mode: "profile"` means the same thing on iOS as
-    // everywhere else — an arg that is silently dropped on one platform is
-    // worse than one that is unsupported loudly.
-    flags.push(`--${resolveBuildMode({ mode: opts.mode, debug: opts.debug })}`);
+    // 3-way mode, `mode` winning over the legacy `debug` boolean, then the env
+    // pin, then debug. Honored here rather than ignored so `mode: "profile"`
+    // means the same thing on iOS as everywhere else — an arg that is silently
+    // dropped on one platform is worse than one that is unsupported loudly.
+    const mode = resolveIosLaunchMode({
+      explicitMode: opts.mode,
+      explicitDebug: opts.debug,
+      envMode: this.config.launchMode,
+    });
+    flags.push(iosFlutterModeFlag(mode));
     for (const token of dartDefineArgs(opts.dartDefine)) flags.push(quote(token));
     // `flutter build ios` does not code-sign by default; keep it that way for a
     // plain artifact build (install/run handle signing at deploy time).
@@ -866,20 +910,36 @@ export class IosAdapter implements PlatformAdapter {
    * Launch through a pty and capture the Dart VM Service URI — the mobile
    * equivalent of the Tizen deploy's URI capture, feeding the SAME neutral core
    * the iOS `flutter run` command + iOS failure signatures.
+   *
+   * `mode` selects the compilation mode (default `debug`; see
+   * {@link resolveIosLaunchMode}). Only debug is Marionette-drivable, so a
+   * non-debug launch additionally arms the neutral core's settle path: `--release`
+   * has no VM service at all, and a `--profile` run that comes up resident without
+   * printing one is not going to get one (a profile VM service is not advertised
+   * as `_dartVmService._tcp`, and `flutter attach` finds nothing). Both end the
+   * wait with an explained empty URI instead of holding the caller's whole
+   * timeout open for something that is not coming.
    */
   async launchAndCaptureUri(
     device: string,
     timeoutMs: number,
-    _mode?: BuildMode,
+    mode?: BuildMode,
     dartDefine?: Record<string, string>
   ): Promise<LaunchOutcome> {
+    const launchMode = resolveIosLaunchMode({
+      explicitMode: mode,
+      envMode: this.config.launchMode,
+    });
     // Allocate a durable control channel (FIFO + pty bridge) so
     // flutter_hot_reload/flutter_hot_restart can drive `r`/`R` on this running
     // daemon over the flutter tool's own stdin — the authoritative reload/restart
     // path. Undefined when the host can't provide both halves (no mkfifo, or no
     // usable python3): the launch still proceeds, reload falls back to the VM
-    // service, and restart reports that it cannot be driven.
-    const controlChannel = allocateControlChannel();
+    // service, and restart reports that it cannot be driven. A non-debug launch is
+    // a COLD run with no reload/restart to drive, so it gets no channel — an
+    // allocated one there would advertise an inner loop that cannot exist.
+    const controlChannel =
+      launchMode === "debug" ? allocateControlChannel() : undefined;
     // `device` is the FLUTTER id — the only id `flutter run -d` accepts.
     const command = buildIosPtyLaunchCommand(
       this.config.appDir,
@@ -887,15 +947,44 @@ export class IosAdapter implements PlatformAdapter {
       this.flutter,
       process.platform,
       controlChannel,
-      dartDefineArgs(dartDefine).map(quote)
+      dartDefineArgs(dartDefine).map(quote),
+      launchMode
     );
-    return neutralLaunchAndCaptureUri(
+    const outcome = await neutralLaunchAndCaptureUri(
       command,
       this.config.appDir,
       timeoutMs,
       IOS_FAILURE_SIGNATURES,
-      controlChannel?.fifoPath
+      controlChannel?.fifoPath,
+      IosAdapter.settleOptionsFor(launchMode)
     );
+    return isLaunchFailure(outcome)
+      ? outcome
+      : {
+          ...outcome,
+          launchMode,
+          launchModeCaveat: iosLaunchModeCaveat(launchMode) ?? undefined,
+        };
+  }
+
+  /**
+   * The settle contract for a launch mode: how the URI wait ends when no URI is
+   * coming. Debug returns `undefined` — its URI IS the success criterion, so a
+   * debug launch waits the full timeout and reports a timeout failure exactly as
+   * before. See {@link SettleOptions}.
+   */
+  private static settleOptionsFor(
+    mode: IosLaunchMode
+  ): SettleOptions | undefined {
+    if (mode === "debug") return undefined;
+    return {
+      signatures: IOS_RESIDENT_SETTLE_SIGNATURES,
+      graceMs: IOS_SETTLE_GRACE_MS,
+      reason:
+        mode === "release"
+          ? IOS_RELEASE_NO_VM_SERVICE_REASON
+          : IOS_PROFILE_NO_VM_SERVICE_REASON,
+    };
   }
 
   /**

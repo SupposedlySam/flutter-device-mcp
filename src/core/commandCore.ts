@@ -394,14 +394,34 @@ export class CommandCore {
       // it fail.
       const marionette: MarionetteProbeResult = outcome.vmServiceUriWs
         ? await this.probeMarionette(outcome.vmServiceUriWs)
-        : {
-            marionetteReady: null,
-            marionetteHint:
-              "This platform has no Dart VM service (macOS launches a prebuilt .app " +
-              "directly, not under `flutter run`), so an in-app driver such as " +
-              "Marionette does not apply. Drive it with flutter_pointer/flutter_key/" +
-              "flutter_screenshot instead.",
-          };
+        : outcome.noVmServiceReason
+          ? // The launch SUCCEEDED and the adapter knows why there is no URI (a
+            // release build has none; a settled non-debug run is not getting one).
+            // That is a determinate answer, so report `false` rather than the
+            // `null` that means "could not determine".
+            {
+              marionetteReady: false,
+              marionetteHint: outcome.noVmServiceReason,
+            }
+          : {
+              marionetteReady: null,
+              marionetteHint:
+                "This platform has no Dart VM service (macOS launches a prebuilt .app " +
+                "directly, not under `flutter run`), so an in-app driver such as " +
+                "Marionette does not apply. Drive it with flutter_pointer/flutter_key/" +
+                "flutter_screenshot instead.",
+            };
+      // A non-debug launch CAN hand back a live URI (profile keeps the VM service
+      // open) while still registering no ext.flutter.marionette.* extension, so the
+      // probe's bare "not ready" would send the caller hunting for a broken URI.
+      // The adapter states which half is missing; carry it into the hint so it
+      // cannot be missed.
+      const marionetteHint =
+        outcome.vmServiceUriWs && outcome.launchModeCaveat
+          ? [marionette.marionetteHint, outcome.launchModeCaveat]
+              .filter(Boolean)
+              .join(" ")
+          : marionette.marionetteHint;
 
       // Persist the launch so hot_reload/restart can reach this daemon later.
       // Skipped when there is no VM service to reconnect to (macOS).
@@ -455,7 +475,12 @@ export class CommandCore {
         deviceWarning,
         controlChannel: outcome.controlFifoPath ? true : undefined,
         controlChannelWarning:
-          outcome.vmServiceUriWs && !outcome.controlFifoPath
+          outcome.vmServiceUriWs &&
+          !outcome.controlFifoPath &&
+          // A non-debug launch is a COLD run with no reload/restart to drive, so
+          // its missing channel is the mode, not a host limitation. Reporting the
+          // host warning there would blame the wrong thing.
+          !outcome.launchModeCaveat
             ? NO_PTY_FORWARDER_REASON
             : undefined,
         environmentDiagnostic,
@@ -467,8 +492,11 @@ export class CommandCore {
         pid: outcome.pid,
         logPath: outcome.logPath,
         device,
+        launchMode: outcome.launchMode,
+        launchModeCaveat: outcome.launchModeCaveat,
+        noVmServiceReason: outcome.noVmServiceReason,
         marionetteReady: marionette.marionetteReady,
-        marionetteHint: marionette.marionetteHint,
+        marionetteHint,
         note,
       };
     });

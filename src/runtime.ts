@@ -64,6 +64,12 @@ export function buildRuntime(opts: ResolveConfigOptions = {}): Runtime {
     appDir,
     device: platforms.ios.device,
     appId: resolveAppId("ios", platforms.ios.appId, appDir),
+    // Default launch/build mode when a deploy/build passes no explicit
+    // `mode`/`debug` arg. `debug` (the default) keeps a plain deploy
+    // Marionette-drivable; set FLUTTER_DEVICE_IOS_LAUNCH_MODE to profile to pin
+    // the realistic-timing build — the one that reproduces release-only code
+    // paths — without passing args on every call.
+    launchMode: platforms.ios.iosLaunchMode,
   });
 
   const android = new AndroidAdapter({

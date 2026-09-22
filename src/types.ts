@@ -152,6 +152,28 @@ export interface LaunchResult {
    * VM-service path.
    */
   controlFifoPath?: string;
+  /**
+   * The compilation mode this launch actually ran in, as the adapter resolved it
+   * (an env pin is invisible to the caller otherwise). Absent on platforms that
+   * do not report a mode.
+   */
+  launchMode?: BuildMode;
+  /**
+   * Why this launch carries EMPTY `vmServiceUri*` fields. Set only when there is
+   * no URI and its absence is an answer rather than a failed capture — a release
+   * build has no VM service at all, and a non-debug launch that came up resident
+   * without printing one is not going to. An empty URI with no reason reads as a
+   * failure, which is exactly what this field exists to prevent.
+   */
+  noVmServiceReason?: string;
+  /**
+   * What this launch mode does NOT provide, when that is not obvious from the
+   * fields around it. A profile launch hands back a REAL VM-service URI and still
+   * registers no `ext.flutter.marionette.*` extension, so "not drivable" alone
+   * would send a caller hunting for a broken URI. Absent for a plain debug launch,
+   * which gives up nothing.
+   */
+  launchModeCaveat?: string;
 }
 
 export interface LaunchFailure {

@@ -24,9 +24,15 @@ const neutralLaunchAndCaptureUri =
       command: string,
       cwd: string,
       timeoutMs: number,
-      failureSignatures: RegExp[]
+      failureSignatures: RegExp[],
+      controlFifoPath?: string,
+      settle?: { signatures: RegExp[]; reason: string; graceMs?: number }
     ) => Promise<unknown>
   >();
+
+// Stands in as "no control channel" (undefined) since these tests have no live
+// daemon/FIFO — but as a spy, so a test can tell whether the launch ASKED for one.
+const allocateControlChannel = jest.fn<() => undefined>(() => undefined);
 
 jest.unstable_mockModule("../src/launchCapture.js", () => ({
   launchAndCaptureUri: neutralLaunchAndCaptureUri,
@@ -36,9 +42,7 @@ jest.unstable_mockModule("../src/launchCapture.js", () => ({
   // shared stand-in (pinned byte-for-byte to the real helper in
   // launchCapture.test.ts) rather than a per-file copy.
   buildPtyCaptureCommand: mockBuildPtyCaptureCommand,
-  // allocateControlChannel is called by the iOS launch; stand it in as "no
-  // control channel" (undefined) since these tests have no live daemon/FIFO.
-  allocateControlChannel: () => undefined,
+  allocateControlChannel,
 }));
 
 // The adapter reads the launch registry at its DEFAULT path — a real file on
@@ -84,6 +88,16 @@ function ios(device?: string) {
     appDir: IOS_APP_DIR,
     appId: IOS_APP_ID,
     device,
+    flutterCommand: "flutter",
+  });
+}
+
+/** An adapter carrying a FLUTTER_DEVICE_IOS_LAUNCH_MODE pin (the env precedence step). */
+function iosWithEnvMode(launchMode: "debug" | "profile" | "release") {
+  return new IosAdapter({
+    appDir: IOS_APP_DIR,
+    appId: IOS_APP_ID,
+    launchMode,
     flutterCommand: "flutter",
   });
 }
@@ -260,6 +274,7 @@ beforeEach(() => {
   findLaunch.mockReset();
   findLaunch.mockReturnValue(undefined);
   neutralLaunchAndCaptureUri.mockReset();
+  allocateControlChannel.mockClear();
   runShell.mockResolvedValue(okResult);
   neutralLaunchAndCaptureUri.mockResolvedValue({ failed: false });
 });
@@ -290,7 +305,10 @@ describe("IosAdapter.info", () => {
 });
 
 describe("IosAdapter.build", () => {
-  it("builds release ios by default and parses the .app path", async () => {
+  it("builds DEBUG ios by default and parses the .app path", async () => {
+    // BEHAVIOR DELTA (deliberate): the default was release while the deploy
+    // launch was hardcoded --debug, so a build+deploy pair silently mixed modes.
+    // The two now resolve through the same precedence and the same default.
     runShell.mockResolvedValue({
       ...okResult,
       combined: "Built build/ios/iphoneos/Runner.app (12.3MB)",
@@ -298,9 +316,49 @@ describe("IosAdapter.build", () => {
     const build = await ios().build({});
     const cmd = runShell.mock.calls[0][0] as string;
     expect(cmd).toContain("flutter build ios");
-    expect(cmd).toContain("--release");
+    expect(cmd).toContain("--debug");
+    expect(cmd).not.toContain("--release");
+    expect(cmd).not.toContain("--profile");
     expect(cmd).toContain("--no-codesign");
     expect(build.artifactPath).toBe("build/ios/iphoneos/Runner.app");
+  });
+
+  it("never composes the --simulator --release flutter rejects for a plain simulator build", async () => {
+    await ios().build({ profile: "simulator" });
+    const cmd = runShell.mock.calls[0][0] as string;
+    expect(cmd).toContain("flutter build ios --simulator");
+    expect(cmd).toContain("--debug");
+    expect(cmd).not.toContain("--release");
+  });
+
+  it("builds --profile for mode:'profile'", async () => {
+    await ios().build({ mode: "profile" });
+    const cmd = runShell.mock.calls[0][0] as string;
+    expect(cmd).toContain("flutter build ios");
+    expect(cmd).toContain("--profile");
+    expect(cmd).not.toContain("--debug");
+    expect(cmd).not.toContain("--release");
+  });
+
+  it("still builds --release for an explicit debug:false / mode:'release'", async () => {
+    await ios().build({ debug: false });
+    expect(runShell.mock.calls[0][0] as string).toContain("--release");
+    runShell.mockClear();
+    await ios().build({ mode: "release" });
+    expect(runShell.mock.calls[0][0] as string).toContain("--release");
+  });
+
+  it("lets mode beat the legacy debug flag, and both beat the env pin", async () => {
+    await iosWithEnvMode("release").build({ mode: "profile", debug: true });
+    expect(runShell.mock.calls[0][0] as string).toContain("--profile");
+    runShell.mockClear();
+    await iosWithEnvMode("release").build({ debug: true });
+    expect(runShell.mock.calls[0][0] as string).toContain("--debug");
+  });
+
+  it("uses the FLUTTER_DEVICE_IOS_LAUNCH_MODE pin when no arg selects a mode", async () => {
+    await iosWithEnvMode("profile").build({});
+    expect(runShell.mock.calls[0][0] as string).toContain("--profile");
   });
 
   it("builds debug for the simulator profile (no codesign flag)", async () => {
@@ -518,6 +576,106 @@ describe("IosAdapter.launchAndCaptureUri", () => {
     expect(command).toContain("SIM-UDID-1");
     expect(timeoutMs).toBe(4242);
     expect(failureSignatures).toBe(IOS_FAILURE_SIGNATURES);
+  });
+
+  it("composes --debug and still returns the captured URI when no mode is given", async () => {
+    neutralLaunchAndCaptureUri.mockResolvedValue({
+      vmServiceUriWs: "ws://127.0.0.1:51182/tok=/ws",
+      vmServiceUriHttp: "http://127.0.0.1:51182/tok=/",
+      logPath: "/tmp/l.log",
+      pid: 1,
+    });
+    const outcome = (await ios().launchAndCaptureUri("SIM-UDID-1", 1000)) as {
+      vmServiceUriWs: string;
+      launchMode?: string;
+      launchModeCaveat?: string;
+    };
+    const [command, , , , , settle] = neutralLaunchAndCaptureUri.mock.calls[0];
+    expect(command).toContain("flutter run --debug");
+    expect(outcome.vmServiceUriWs).toBe("ws://127.0.0.1:51182/tok=/ws");
+    expect(outcome.launchMode).toBe("debug");
+    // Debug gives nothing up, so there is no caveat and no settle short-circuit:
+    // its URI IS the success criterion, so it waits the full timeout.
+    expect(outcome.launchModeCaveat).toBeUndefined();
+    expect(settle).toBeUndefined();
+    // A debug launch is the hot reload/restart inner loop, so it asks for a channel.
+    expect(allocateControlChannel).toHaveBeenCalledTimes(1);
+  });
+
+  it("composes --profile for mode:'profile' and reports what that costs", async () => {
+    neutralLaunchAndCaptureUri.mockResolvedValue({
+      vmServiceUriWs: "ws://127.0.0.1:51182/tok=/ws",
+      vmServiceUriHttp: "http://127.0.0.1:51182/tok=/",
+      logPath: "/tmp/l.log",
+      pid: 1,
+    });
+    const outcome = (await ios().launchAndCaptureUri(
+      "SIM-UDID-1",
+      1000,
+      "profile"
+    )) as {
+      vmServiceUriWs: string;
+      launchMode?: string;
+      launchModeCaveat?: string;
+    };
+    const [command, , , , , settle] = neutralLaunchAndCaptureUri.mock.calls[0];
+    expect(command).toContain("flutter run --profile");
+    expect(command).not.toContain("--debug");
+    // The URI is REAL in profile (flutter enables the VM service for every mode
+    // but release) — the caveat is about Marionette, not about the URI.
+    expect(outcome.vmServiceUriWs).toBe("ws://127.0.0.1:51182/tok=/ws");
+    expect(outcome.launchMode).toBe("profile");
+    expect(outcome.launchModeCaveat).toMatch(/kDebugMode/);
+    // A profile run that comes up resident without a URI must not hold the whole
+    // timeout open, so the settle contract is armed with the profile reason.
+    expect(settle!.reason).toMatch(/_dartVmService\._tcp/);
+    expect(settle!.reason).toMatch(/flutter attach/);
+    expect(settle!.signatures.length).toBeGreaterThan(0);
+    // A cold run has no reload/restart to drive, so it must not advertise one.
+    expect(allocateControlChannel).not.toHaveBeenCalled();
+  });
+
+  it("composes --release and arms the no-VM-service settle reason", async () => {
+    await ios().launchAndCaptureUri("SIM-UDID-1", 1000, "release");
+    const [command, , , , , settle] = neutralLaunchAndCaptureUri.mock.calls[0];
+    expect(command).toContain("flutter run --release");
+    expect(settle!.reason).toMatch(/--release/);
+  });
+
+  it("uses the FLUTTER_DEVICE_IOS_LAUNCH_MODE pin when the deploy names no mode", async () => {
+    await iosWithEnvMode("profile").launchAndCaptureUri("SIM-UDID-1", 1000);
+    expect(neutralLaunchAndCaptureUri.mock.calls[0][0]).toContain(
+      "flutter run --profile"
+    );
+  });
+
+  it("lets an explicit mode beat the env pin", async () => {
+    await iosWithEnvMode("profile").launchAndCaptureUri(
+      "SIM-UDID-1",
+      1000,
+      "debug"
+    );
+    expect(neutralLaunchAndCaptureUri.mock.calls[0][0]).toContain(
+      "flutter run --debug"
+    );
+  });
+
+  it("leaves a launch FAILURE untouched (no mode fields bolted onto it)", async () => {
+    neutralLaunchAndCaptureUri.mockResolvedValue({
+      failed: true,
+      reason: "boom",
+      logPath: "/tmp/l.log",
+      pid: 1,
+      logTail: "",
+    });
+    const outcome = (await ios().launchAndCaptureUri(
+      "SIM-UDID-1",
+      1000,
+      "profile"
+    )) as unknown as Record<string, unknown>;
+    expect(outcome.failed).toBe(true);
+    expect(outcome.launchMode).toBeUndefined();
+    expect(outcome.launchModeCaveat).toBeUndefined();
   });
 });
 
