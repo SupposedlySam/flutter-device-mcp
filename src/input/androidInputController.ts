@@ -28,6 +28,14 @@
  * `pointerScroll` swipes vertically, anchored at the staged position or —
  * when none is staged — at the screen center read from `adb shell wm size`.
  *
+ * A swipe has two independent variables, distance and duration, and only the
+ * first used to be reachable from a caller — which made the second, speed, an
+ * uncontrolled consequence of the first. It also made an ineffective scroll
+ * silent: the request is bounded by the screen, so asking for more than fits
+ * quietly buys less travel than asked for, and the drag landing is not the same
+ * as the app acting on it. Both are now reported (see {@link planAndroidScroll})
+ * and the duration is an argument.
+ *
  * The stage is DURABLE and keyed by device (see pointerStage.ts), NOT a field on
  * this object. Holding it in memory made the move→click pair work only while one
  * server process happened to live across both calls; a restart or a host reload
@@ -49,6 +57,9 @@ import {
   InputController,
   InputMode,
   Platform,
+  PointerScrollOpts,
+  PointerScrollOutcome,
+  PointerScrollVerification,
 } from "../types.js";
 
 /**
@@ -74,11 +85,40 @@ export const ANDROID_KEYCODES: Readonly<Record<string, number>> = {
   HOME: 3, // KEYCODE_HOME
 };
 
-/** Duration of the vertical scroll swipe — long enough to register as a drag. */
+/**
+ * Default duration of the vertical scroll swipe.
+ *
+ * Inherited from this controller's first version, where it was asserted rather
+ * than measured, and kept as the default only because changing it is not free:
+ * a slower drag carries less velocity into the app, so a surface that relies on
+ * fling momentum travels FURTHER than the finger at this speed and less at a
+ * slower one. Raising the default to rescue one surface would quietly shorten
+ * every scroll that works today, so the duration is a per-call argument instead
+ * (`duration_ms`) and this stays put until a measurement says otherwise.
+ */
 export const ANDROID_SWIPE_DURATION_MS = 300;
+
+/**
+ * Ceiling on a caller-supplied swipe duration.
+ *
+ * `input swipe` blocks for the whole gesture, so the duration is bounded by the
+ * send timeout below — a longer one would be killed mid-drag and reported as a
+ * failed send rather than as the too-long argument it is.
+ */
+export const ANDROID_SWIPE_MAX_DURATION_MS = 10000;
 
 /** Timeout for a single `adb shell input` send. */
 const INPUT_TIMEOUT_MS = 15000;
+
+/**
+ * How long to let the screen settle before the post-scroll verification hash.
+ *
+ * `input swipe` returns once the gesture has been INJECTED, which is earlier
+ * than the app has drawn its response to it. Long enough for several frames to
+ * land; deliberately not long enough to wait out fling momentum, because the
+ * question being answered is "did anything move at all", not "where did it stop".
+ */
+export const ANDROID_SCROLL_SETTLE_MS = 250;
 
 /**
  * Normalize a caller-supplied key name to the token `input keyevent` takes.
@@ -168,6 +208,123 @@ export function buildAdbTextCommand(serial: string, text: string): string {
 }
 
 /**
+ * Build the ON-DEVICE screen fingerprint used to tell a no-op scroll from a
+ * real one: `screencap | md5sum`, both sides of the pipe running on the device.
+ *
+ * The raw framebuffer is hashed rather than `screencap -p`, for two reasons:
+ * raw bytes are a deterministic function of what is on screen (a PNG re-encode
+ * is an extra chance for two identical screens to hash differently, which would
+ * read as "it scrolled"), and nothing pays to compress ~17MB that is discarded.
+ *
+ * `shell` is correct here even though the screenshot path insists on `exec-out`:
+ * that rule is about the shell protocol's CRLF translation corrupting binary on
+ * the WIRE, and here the framebuffer never leaves the device — only the hex
+ * digest crosses, which is text.
+ */
+export function buildAdbScreenHashCommand(serial: string): string {
+  return `adb -s ${quote(serial)} shell ${quote("screencap | md5sum")}`;
+}
+
+/** Pull the digest out of `md5sum` output (`<hex>  -`), if it produced one. */
+export function parseScreenHash(output: string): string | undefined {
+  return output.match(/\b([0-9a-f]{32})\b/i)?.[1].toLowerCase();
+}
+
+/**
+ * Normalize a caller-supplied swipe duration, falling back to the default.
+ *
+ * Tolerant rather than throwing: an out-of-range value from a caller is rejected
+ * up at the tool boundary (before any device round-trip), so anything reaching
+ * here is either absent or already checked, and refusing to scroll over a stray
+ * NaN would be worse than scrolling at the default.
+ */
+export function resolveSwipeDurationMs(durationMs?: number): number {
+  if (durationMs === undefined || !Number.isFinite(durationMs)) {
+    return ANDROID_SWIPE_DURATION_MS;
+  }
+  return Math.min(
+    Math.max(1, Math.round(durationMs)),
+    ANDROID_SWIPE_MAX_DURATION_MS
+  );
+}
+
+/** The gesture a scroll request resolves to, before anything is sent. */
+export interface AndroidScrollPlan {
+  from: { x: number; y: number };
+  to: { x: number; y: number };
+  requestedDy: number;
+  appliedDy: number;
+  clamped: boolean;
+  durationMs: number;
+  speedPxPerMs: number;
+  notes: string[];
+}
+
+/**
+ * Work out the swipe a scroll request becomes — pure, so the relationship
+ * between the request and the gesture is inspectable without a device.
+ *
+ * The relationship is not the obvious one, and getting it wrong costs hours.
+ * Travel is bounded by the distance between the anchor and the screen edge,
+ * while duration is fixed, so past the point where the request is clamped a
+ * LARGER `dy` does not scroll further — it covers the same distance in the same
+ * time, which is to say the identical gesture. The intuition it violates is that
+ * "it didn't scroll, ask for more" is a fix; it produces a byte-identical
+ * command. Only `durationMs` and the anchor can change what is sent.
+ */
+export function planAndroidScroll(args: {
+  anchor: { x: number; y: number };
+  dy: number;
+  screenHeight?: number;
+  durationMs: number;
+}): AndroidScrollPlan {
+  const { anchor, durationMs } = args;
+  const requestedDy = Math.round(args.dy);
+  const maxY =
+    args.screenHeight !== undefined
+      ? args.screenHeight - 1
+      : Number.MAX_SAFE_INTEGER;
+  const toY = Math.min(Math.max(0, anchor.y - requestedDy), maxY);
+  const appliedDy = anchor.y - toY;
+  const clamped = appliedDy !== requestedDy;
+  const speedPxPerMs = Math.abs(appliedDy) / durationMs;
+
+  const notes: string[] = [];
+  if (clamped) {
+    const edge = requestedDy > 0 ? "top" : "bottom";
+    notes.push(
+      `Requested dy ${requestedDy} but the drag was bounded to ${appliedDy}px: ` +
+        `it starts at y=${anchor.y} and the ${edge} of the screen is ${Math.abs(
+          appliedDy
+        )}px away. Raising dy CANNOT scroll further — travel is already at the ` +
+        `edge while the duration is fixed, so a larger dy emits the identical ` +
+        `command. To scroll further, call scroll again; to scroll SLOWER (a drag ` +
+        `rather than a flick, which some surfaces treat very differently), pass ` +
+        `duration_ms; to lengthen one gesture, stage a lower anchor with action ` +
+        `'move' first.`
+    );
+  }
+  if (appliedDy === 0) {
+    notes.push(
+      `The swipe starts and ends at y=${anchor.y}, so no gesture travel was ` +
+        `sent at all. Check the anchor and the sign of dy (positive = scroll ` +
+        `down, which drags the finger UP).`
+    );
+  }
+
+  return {
+    from: { x: anchor.x, y: anchor.y },
+    to: { x: anchor.x, y: toY },
+    requestedDy,
+    appliedDy,
+    clamped,
+    durationMs,
+    speedPxPerMs: Number(speedPxPerMs.toFixed(3)),
+    notes,
+  };
+}
+
+/**
  * Parse `adb shell wm size` output into the device-pixel screen size.
  *
  * Prefers the "Override size" line (present when a size override is active —
@@ -211,7 +368,10 @@ export class AndroidInputController implements InputController {
      * on-disk stage so it survives this process; injected in tests (and usable
      * as an in-memory fallback) via {@link PointerStage}.
      */
-    private readonly stage: PointerStage = filePointerStage()
+    private readonly stage: PointerStage = filePointerStage(),
+    /** Settle wait between the two verification hashes. Injected in tests. */
+    private readonly delay: (ms: number) => Promise<void> = (ms) =>
+      new Promise((resolve) => setTimeout(resolve, ms))
   ) {}
 
   get mode(): InputMode {
@@ -272,9 +432,18 @@ export class AndroidInputController implements InputController {
   /**
    * Scroll by a device-pixel vertical delta via `input swipe` (positive = down,
    * so the finger swipes UP). Anchored at the staged position, else at the
-   * screen center from `wm size`. The end point is clamped to the screen.
+   * screen center from `wm size`. The end point is bounded by the screen.
+   *
+   * Returns the gesture it actually sent rather than nothing. A scroll has two
+   * ways to succeed at doing nothing — the request gets bounded down to a
+   * shorter drag than asked for, or the drag lands but the app ignores it — and
+   * a bare resolve made both indistinguishable from a scroll that worked. The
+   * plan is reported always; `opts.verify` additionally checks the screen.
    */
-  async pointerScroll(dy: number): Promise<void> {
+  async pointerScroll(
+    dy: number,
+    opts?: PointerScrollOpts
+  ): Promise<PointerScrollOutcome> {
     const serial = await this.resolveSerial();
     const size = await this.screenSize(serial);
     const anchor =
@@ -289,11 +458,96 @@ export class AndroidInputController implements InputController {
           "flutter_pointer action 'move' first to stage the anchor."
       );
     }
-    const maxY = size ? size.height - 1 : Number.MAX_SAFE_INTEGER;
-    const toY = Math.min(Math.max(0, anchor.y - Math.round(dy)), maxY);
+    const plan = planAndroidScroll({
+      anchor,
+      dy,
+      screenHeight: size?.height,
+      durationMs: resolveSwipeDurationMs(opts?.durationMs),
+    });
+
+    const before = opts?.verify ? await this.screenHash(serial) : undefined;
     await this.send(
-      buildAdbSwipeCommand(serial, anchor.x, anchor.y, anchor.x, toY)
+      buildAdbSwipeCommand(
+        serial,
+        plan.from.x,
+        plan.from.y,
+        plan.to.x,
+        plan.to.y,
+        plan.durationMs
+      )
     );
+
+    const { notes, ...gesture } = plan;
+    return {
+      ...gesture,
+      ...(opts?.verify ? await this.verifyScrolled(serial, before) : {}),
+      ...(notes.length ? { notes } : {}),
+    };
+  }
+
+  /**
+   * Compare the screen before and after the gesture.
+   *
+   * Reports three states, never a boolean, because they carry very different
+   * weight: `unchanged` is strong evidence the gesture did nothing, `changed`
+   * only says SOME pixel differs (a clock or an animation elsewhere counts), and
+   * a hash that could not be taken is neither — reporting an unusable check as
+   * "unchanged" would invent a failure, and as "changed" would hide one.
+   */
+  private async verifyScrolled(
+    serial: string,
+    before: string | undefined
+  ): Promise<{
+    verification: PointerScrollVerification;
+    verificationDetail: string;
+  }> {
+    if (!before) {
+      return {
+        verification: "unavailable",
+        verificationDetail:
+          "Could not fingerprint the screen before the gesture " +
+          "(`screencap | md5sum` produced no digest — some devices lack " +
+          "md5sum, and a secure surface refuses capture). The gesture was " +
+          "still sent; its effect is unverified.",
+      };
+    }
+    await this.delay(ANDROID_SCROLL_SETTLE_MS);
+    const after = await this.screenHash(serial);
+    if (!after) {
+      return {
+        verification: "unavailable",
+        verificationDetail:
+          "The screen was fingerprinted before the gesture but not after, so " +
+          "the two cannot be compared. The gesture was still sent.",
+      };
+    }
+    if (after === before) {
+      return {
+        verification: "unchanged",
+        verificationDetail:
+          `The screen was byte-identical ${ANDROID_SCROLL_SETTLE_MS}ms after ` +
+          "the swipe, so nothing on it moved — the gesture reached the device " +
+          "but the app did not act on it. The input plane is working; look at " +
+          "what is under the anchor and at the gesture's speed (pass a longer " +
+          "duration_ms to send a slow drag instead of a flick) before " +
+          "suspecting the app or the Dart VM service.",
+      };
+    }
+    return {
+      verification: "changed",
+      verificationDetail:
+        "The screen differs after the swipe. This is weaker evidence than it " +
+        "looks: it means some pixel changed, not necessarily that the intended " +
+        "surface scrolled — a clock, animation or video would also register.",
+    };
+  }
+
+  /** Fingerprint the current screen on-device; undefined when it cannot run. */
+  private async screenHash(serial: string): Promise<string | undefined> {
+    const result = await this.run(buildAdbScreenHashCommand(serial), {
+      timeoutMs: INPUT_TIMEOUT_MS,
+    });
+    return result.success ? parseScreenHash(result.combined) : undefined;
   }
 
   /** Type into the focused field via `input text` (escaped — see helpers). */

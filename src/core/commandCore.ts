@@ -1112,6 +1112,8 @@ export class CommandCore {
       dpr?: number;
       absolute?: boolean;
       double?: boolean;
+      duration_ms?: number;
+      verify?: boolean;
       device_udid?: string;
     }
   ): Promise<CommandOutput> {
@@ -1196,9 +1198,19 @@ export class CommandCore {
             };
           }
           case "scroll": {
-            const { dy, coordinateSpace } = resolveScrollDelta(args);
+            const { dy, coordinateSpace, durationMs } = resolveScrollDelta(args);
+            // The outcome is reported when the controller returns one, because
+            // `sent: true` alone cannot distinguish a scroll that worked from a
+            // request the screen's bounds truncated or one the app ignored —
+            // and a caller who cannot tell those apart reasonably concludes the
+            // whole plane is dead and goes looking in the wrong place.
+            let outcome;
             try {
-              await input.pointerScroll(dy, { absolute: args.absolute });
+              outcome = await input.pointerScroll(dy, {
+                absolute: args.absolute,
+                durationMs,
+                verify: args.verify,
+              });
             } catch (error) {
               const notSupported = mapUnsupportedInput(error, adapter.platform, "scroll");
               if (notSupported) return notSupported;
@@ -1212,6 +1224,7 @@ export class CommandCore {
               deviceDy: dy,
               sent: true,
               deviceWarning: adapter.inputDeviceWarning?.(),
+              ...(outcome ? { gesture: outcome } : {}),
             };
           }
           default:
