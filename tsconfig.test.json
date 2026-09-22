@@ -1,0 +1,58 @@
+{
+  // Typechecks the TESTS. Nothing else in this repo does, and it took two green
+  // checks to notice.
+  //
+  // THE GAP THIS CLOSES, measured 2026-09-22 on this tree. Neither existing
+  // check could see a type error in `__tests__/`:
+  //
+  //   `npm run build` and a bare `tsc --noEmit` use tsconfig.json, which
+  //   excludes `**/*.test.ts` so a test file never lands in dist/. Confirmed
+  //   with `tsc --noEmit --listFiles`: zero files under __tests__/.
+  //
+  //   `npm test` DOES compile every test, through ts-jest with
+  //   tsconfig.jest.json, which does include __tests__. But tsconfig.json sets
+  //   `isolatedModules: true`, so ts-jest takes its `transpileModule` branch
+  //   rather than building a LanguageService, and that branch reports SYNTACTIC
+  //   diagnostics only. A well-formed file with wrong types transpiles and runs
+  //   green. Measured, not assumed: when this config was added it reported 22
+  //   type errors across 4 test files that `npm test` ran 59/59 green.
+  //
+  //   `npm run lint` was `eslint src/` — it did not look at __tests__/ at all,
+  //   and eslint here is not type-aware anyway.
+  //
+  // So a test could reference a name that does not exist and stay invisible. In
+  // the sibling tree this was ported from that was not hypothetical: an
+  // out-of-scope variable sat inside an `Array.filter` predicate, and `filter`
+  // never calls its predicate on an empty array — so it would have thrown
+  // ReferenceError only once the array was non-empty, which is the one case the
+  // code existed to handle. Two checks that both look like coverage, and
+  // neither able to see it.
+  //
+  // WHY THIS EXTENDS tsconfig.jest.json rather than tsconfig.json: that is the
+  // program ts-jest actually compiles (`include: ["src", "__tests__"]`). Point
+  // the typecheck at the same config and it checks exactly what the suite runs,
+  // with one include list to maintain instead of two that drift apart. All this
+  // adds is `noEmit`, because tsconfig.jest.json carries an `outDir` for
+  // ts-jest's benefit and a typecheck should write nothing.
+  //
+  // WIRED INTO `npm run lint`, which is a departure from the sibling tree: it
+  // left the equivalent config unwired because 22 pre-existing errors made
+  // turning it on impossible. Those 22 were fixed here first (all in test-side
+  // fakes that did not satisfy the interface they stood in for — FakeSocket.on
+  // declaring one `(event: string, ...)` signature against a 4-overload
+  // interface, two record() calls made against a concrete class instead of the
+  // PlatformAdapter contract production uses, and an untyped `jest.Mock` whose
+  // `mockResolvedValue` inferred `never`). No production type was loosened to
+  // get there, which was the one shortcut worth refusing: it would have been
+  // worse than the gap this closes. An unwired check reporting 22 errors is a
+  // check nobody runs.
+  //
+  // Run it alone with `npm run typecheck:tests`.
+  //
+  // Verified to catch what the suite cannot: an out-of-scope name added to a
+  // test inside a `filter` over an empty array is reported here as
+  // `TS2304: Cannot find name`, while `npm test` stays green and counts the
+  // mutant as a passing test.
+  "extends": "./tsconfig.jest.json",
+  "compilerOptions": { "noEmit": true }
+}

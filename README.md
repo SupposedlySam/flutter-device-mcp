@@ -501,10 +501,32 @@ already-foregrounded app, which is what firing several links in a row looks like
 
 ```bash
 npm install
-npm run build      # tsc → dist/
-npm test           # jest
-npm run inspector  # launch the MCP Inspector against dist/index.js
+npm run build            # tsc → dist/
+npm test                 # jest
+npm run lint             # eslint src/ + typecheck the tests (see below)
+npm run typecheck:tests  # tsc -p tsconfig.test.json, on its own
+npm run inspector        # launch the MCP Inspector against dist/index.js
 ```
+
+### Why there is a separate typecheck for the tests
+
+`tsconfig.json` excludes `**/*.test.ts` so a test file never lands in `dist/`,
+which also means `npm run build` and a bare `tsc --noEmit` have never
+typechecked a test. `npm test` does not cover the gap either: `tsconfig.json`
+sets `isolatedModules: true`, so ts-jest transpiles each file instead of
+building a LanguageService, and reports **syntactic** diagnostics only. A
+well-formed test with wrong types compiles and runs green.
+
+`tsconfig.test.json` closes that. It extends `tsconfig.jest.json` — the config
+ts-jest actually compiles with — and adds nothing but `noEmit`, so the typecheck
+sees exactly the program the suite runs, with one include list rather than two
+that drift apart. `npm run lint` runs it.
+
+It is worth keeping honest: the failure that motivated it was an out-of-scope
+variable inside an `Array.filter` predicate. `tsc --noEmit` could not see the
+file, and `filter` never calls its predicate on an empty array — so the suite
+passed too, and it would have thrown `ReferenceError` only once the array was
+non-empty, which was the one case the code existed to handle.
 
 ## License
 

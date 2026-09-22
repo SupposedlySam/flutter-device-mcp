@@ -104,7 +104,22 @@ class FakeSocket implements VmSocket {
     this.closed = true;
     this.emit("close");
   }
-  on(event: string, cb: (arg?: unknown) => void): void {
+  // These overloads mirror VmSocket exactly, so the fake genuinely satisfies the
+  // interface it claims rather than only looking like it. Declaring ONLY the
+  // permissive signature below was the previous state, and it hid a real
+  // mismatch: it transpiles and runs green under `npm test` (ts-jest reports no
+  // type diagnostics at all) while not being assignable to the overloaded
+  // interface — one of the errors `npm run typecheck:tests` exists to surface.
+  //
+  // The IMPLEMENTATION signature stays permissive on purpose. The four listener
+  // shapes are heterogeneous (`(data: unknown)` vs `(err: Error)`), so no single
+  // strict signature covers them all, and one fan-out map beats a mapped type in
+  // a fake. Callers only ever see the four exact overloads above.
+  on(event: "open", cb: () => void): void;
+  on(event: "message", cb: (data: unknown) => void): void;
+  on(event: "close", cb: () => void): void;
+  on(event: "error", cb: (err: Error) => void): void;
+  on(event: string, cb: (arg?: any) => void): void {
     (this.handlers[event] ??= []).push(cb);
   }
   emit(event: string, arg?: unknown): void {

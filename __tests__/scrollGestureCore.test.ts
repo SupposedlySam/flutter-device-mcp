@@ -1,4 +1,5 @@
 import { jest } from "@jest/globals";
+import type { InputController } from "../src/types.js";
 
 /**
  * The scroll branch of the SHARED command core — the layer between the tool
@@ -48,7 +49,7 @@ const OUTCOME = {
 function fakeAdapter(scrollCalls: { dy: number; opts?: unknown }[]) {
   return {
     platform: "android",
-    input() {
+    input(): InputController {
       return {
         platform: "android",
         mode: "pointer" as const,
@@ -114,11 +115,11 @@ describe("flutter_pointer scroll through the command core", () => {
     // is left off rather than set to a falsy stand-in.
     const adapter = fakeAdapter([]);
     const input = adapter.input();
-    jest
-      .spyOn(adapter, "input")
-      .mockReturnValue({ ...input, async pointerScroll() {} } as ReturnType<
-        typeof adapter.input
-      >);
+    const silent: ReturnType<typeof adapter.input> = {
+      ...input,
+      async pointerScroll() {},
+    };
+    jest.spyOn(adapter, "input").mockReturnValue(silent);
 
     const result = (await coreFor(adapter).pointer({
       action: "scroll",
