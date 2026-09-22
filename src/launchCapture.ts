@@ -135,16 +135,44 @@ export function evaluateLaunchLog(
   return { kind: "pending" };
 }
 
+/**
+ * How a launch that will never print a VM-service URI ends its wait.
+ *
+ * A launch mode with no VM service (or a platform where the URI is unobtainable)
+ * would otherwise sit until the caller's whole timeout expired and then report a
+ * timeout FAILURE for a launch that actually succeeded. Instead the adapter names
+ * the log lines meaning "the runner came up resident" and the reason to report:
+ * once one matches and a short grace window passes with no URI, the poll returns a
+ * successful launch carrying empty URIs and {@link SettleOptions.reason}.
+ *
+ * The grace window is what keeps this honest on a runner that prints its settle
+ * line and its URI in the same burst (flutter's `printHelp` does exactly that) — a
+ * settle match alone is never taken as proof the URI is absent.
+ */
+export interface SettleOptions {
+  /** Log lines meaning the runner is up and resident. */
+  signatures: RegExp[];
+  /** Why no URI is coming, reported on the resulting LaunchResult. */
+  reason: string;
+  /** How long to keep looking for a URI after a settle match (default 5000ms). */
+  graceMs?: number;
+}
+
+/** Default grace window after a settle match; see {@link SettleOptions}. */
+export const DEFAULT_SETTLE_GRACE_MS = 5000;
+
 /** Poll a growing log file for the VM Service URI or a failure signature. */
 export async function pollLogForUri(
   logPath: string,
   timeoutMs: number,
   pid: number | undefined,
   failureSignatures: RegExp[],
-  controlFifoPath?: string
+  controlFifoPath?: string,
+  settle?: SettleOptions
 ): Promise<LaunchOutcome> {
   const deadline = Date.now() + timeoutMs;
   const pollInterval = 500;
+  let settledAt: number | undefined;
 
   // eslint-disable-next-line no-constant-condition
   while (true) {
@@ -174,6 +202,31 @@ export async function pollLogForUri(
         pid,
         logTail: tailString(contents, 60),
       };
+    }
+
+    // The runner is up but has printed no URI: end the wait once the grace window
+    // has passed rather than burning the caller's whole timeout on a URI that is
+    // not coming.
+    if (settle) {
+      if (
+        settledAt === undefined &&
+        settle.signatures.some((signature) => signature.test(contents))
+      ) {
+        settledAt = Date.now();
+      }
+      if (
+        settledAt !== undefined &&
+        Date.now() - settledAt >= (settle.graceMs ?? DEFAULT_SETTLE_GRACE_MS)
+      ) {
+        return {
+          vmServiceUriWs: "",
+          vmServiceUriHttp: "",
+          logPath,
+          pid,
+          controlFifoPath,
+          noVmServiceReason: settle.reason,
+        };
+      }
     }
 
     if (Date.now() > deadline) {
@@ -214,7 +267,8 @@ export async function launchAndCaptureUri(
   cwd: string,
   timeoutMs: number,
   failureSignatures: RegExp[],
-  controlFifoPath?: string
+  controlFifoPath?: string,
+  settle?: SettleOptions
 ): Promise<LaunchOutcome> {
   const logPath = createLogPath();
   const logStream = fs.openSync(logPath, "a");
@@ -243,7 +297,8 @@ export async function launchAndCaptureUri(
     timeoutMs,
     pid,
     failureSignatures,
-    controlFifoPath
+    controlFifoPath,
+    settle
   );
   try {
     fs.closeSync(logStream);

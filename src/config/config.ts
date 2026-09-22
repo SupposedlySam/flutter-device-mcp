@@ -18,6 +18,7 @@ import fs from "fs";
 import path from "path";
 import { Platform } from "../types.js";
 import { AndroidLaunchMode, parseAndroidLaunchModeEnv } from "../androidLaunchMode.js";
+import { IosLaunchMode, parseIosLaunchModeEnv } from "../iosLaunchMode.js";
 import { findAppDir, isFlutterAppDir, isFvmManaged } from "./appDir.js";
 
 /** Where a resolved value came from (for provenance in `info`/doctor output). */
@@ -50,6 +51,8 @@ export interface PlatformSettings {
   tizenSecurityProfile?: string;
   /** Android launch/build mode when a call passes no explicit `debug` arg. */
   androidLaunchMode?: AndroidLaunchMode;
+  /** iOS launch/build mode when a call passes no explicit `mode`/`debug` arg. */
+  iosLaunchMode?: IosLaunchMode;
   /** Directory holding the `flutter-tvos` bin, prepended to PATH for tvOS. */
   flutterTvosBinDir?: string;
   /**
@@ -130,6 +133,7 @@ interface ConfigFile {
         securityProfile?: string;
         sdk?: { dataPath?: string; apiVersion?: string };
         androidLaunchMode?: string;
+        iosLaunchMode?: string;
         flutterTvosBinDir?: string;
         appPath?: string;
         appUrl?: string;
@@ -246,6 +250,11 @@ export function resolveConfig(opts: ResolveConfigOptions = {}): ResolvedConfig {
         ? parseAndroidLaunchModeEnv(env[`${ENV_PREFIX}_ANDROID_LAUNCH_MODE`]) ??
           parseAndroidLaunchModeEnv(fromFile.androidLaunchMode)
         : undefined;
+    const iosLaunchMode =
+      p === "ios"
+        ? parseIosLaunchModeEnv(env[`${ENV_PREFIX}_IOS_LAUNCH_MODE`]) ??
+          parseIosLaunchModeEnv(fromFile.iosLaunchMode)
+        : undefined;
     platforms[p] = {
       device: envValue(env, `${ENV_PREFIX}_${P}_DEVICE`) ?? fromFile.device,
       appId: envValue(env, `${ENV_PREFIX}_${P}_APP_ID`) ?? fromFile.appId,
@@ -270,6 +279,7 @@ export function resolveConfig(opts: ResolveConfigOptions = {}): ResolvedConfig {
             fromFile.securityProfile
           : undefined,
       androidLaunchMode,
+      iosLaunchMode,
       flutterTvosBinDir:
         p === "tvos"
           ? envValue(env, `${ENV_PREFIX}_TVOS_FLUTTER_BIN`) ??

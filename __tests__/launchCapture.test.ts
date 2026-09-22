@@ -312,3 +312,72 @@ describe("pollLogForUri", () => {
     fs.rmSync(logPath, { force: true });
   });
 });
+
+describe("pollLogForUri settle contract (a launch with no URI coming)", () => {
+  const SETTLE = {
+    signatures: [/Flutter run key commands\./],
+    reason: "no VM service in this mode",
+    graceMs: 0,
+  };
+
+  it("ends the wait with an EXPLAINED empty URI instead of a timeout failure", async () => {
+    const logPath = createLogPath();
+    fs.writeFileSync(logPath, "Installing...\nFlutter run key commands.\n");
+    // The timeout is far longer than this test takes: it is the settle match,
+    // not the deadline, that ends the wait — which is the whole point.
+    const outcome = await pollLogForUri(logPath, 60000, 7, SIGS, undefined, SETTLE);
+    expect(isLaunchFailure(outcome)).toBe(false);
+    if (!isLaunchFailure(outcome)) {
+      expect(outcome.vmServiceUriWs).toBe("");
+      expect(outcome.noVmServiceReason).toBe("no VM service in this mode");
+      expect(outcome.pid).toBe(7);
+    }
+    fs.rmSync(logPath, { force: true });
+  });
+
+  it("still prefers a URI printed alongside the settle line", async () => {
+    // flutter's printHelp emits the settle line and the VM service line in ONE
+    // synchronous burst, so a settle match must never beat a URI that is there.
+    const logPath = createLogPath();
+    fs.writeFileSync(logPath, "Flutter run key commands.\n" + URI_LINE);
+    const outcome = await pollLogForUri(logPath, 2000, 7, SIGS, undefined, SETTLE);
+    expect(isLaunchFailure(outcome)).toBe(false);
+    if (!isLaunchFailure(outcome)) {
+      expect(outcome.vmServiceUriWs).toBe("ws://127.0.0.1:51182/tys47XX1iAw=/ws");
+      expect(outcome.noVmServiceReason).toBeUndefined();
+    }
+    fs.rmSync(logPath, { force: true });
+  });
+
+  it("keeps looking for the grace window before concluding no URI is coming", async () => {
+    const logPath = createLogPath();
+    fs.writeFileSync(logPath, "Flutter run key commands.\n");
+    // The URI lands after the settle line but well inside the grace window.
+    setTimeout(() => fs.appendFileSync(logPath, URI_LINE), 250);
+    const outcome = await pollLogForUri(logPath, 5000, 7, SIGS, undefined, {
+      ...SETTLE,
+      graceMs: 3000,
+    });
+    expect(isLaunchFailure(outcome)).toBe(false);
+    if (!isLaunchFailure(outcome)) {
+      expect(outcome.vmServiceUriWs).toBe("ws://127.0.0.1:51182/tys47XX1iAw=/ws");
+    }
+    fs.rmSync(logPath, { force: true });
+  });
+
+  it("still fails on a terminal signature rather than settling", async () => {
+    const logPath = createLogPath();
+    fs.writeFileSync(logPath, "Flutter run key commands.\nInstall failed: -12\n");
+    const outcome = await pollLogForUri(logPath, 2000, 7, SIGS, undefined, SETTLE);
+    expect(isLaunchFailure(outcome)).toBe(true);
+    fs.rmSync(logPath, { force: true });
+  });
+
+  it("leaves a launch with NO settle contract timing out exactly as before", async () => {
+    const logPath = createLogPath();
+    fs.writeFileSync(logPath, "Flutter run key commands.\n");
+    const outcome = await pollLogForUri(logPath, 200, undefined, SIGS);
+    expect(isLaunchFailure(outcome)).toBe(true);
+    fs.rmSync(logPath, { force: true });
+  });
+});
