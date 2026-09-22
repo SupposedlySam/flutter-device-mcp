@@ -1,5 +1,7 @@
 import { jest } from "@jest/globals";
 import fs from "fs";
+import os from "os";
+import path from "path";
 import { mockBuildPtyCaptureCommand } from "./support/mockBuildPtyCaptureCommand.js";
 
 // Mock the shell layer so we can assert exactly which flutter-tvos / xcrun /
@@ -303,20 +305,29 @@ describe("TvosAdapter.discoverDevice", () => {
 });
 
 describe("TvosAdapter.install / uninstall pick the right toolchain", () => {
-  it("device install uses devicectl with the Profile-appletvos Runner.app", async () => {
-    const adapter = tvos();
+  it("device install uses devicectl with the bundle the device BUILD writes", async () => {
+    // The expected directory is derived, not copied from the adapter: take the
+    // mode flag the adapter's own device build passes, and map it through
+    // flutter-tvos's rule (see flutterTvosStagingDir). The old assertion
+    // hardcoded the adapter's first-choice constant, `Profile-appletvos` — a
+    // directory flutter-tvos never writes — so it pinned the wrong path rather
+    // than the build/install agreement.
+    const adapter = tvosNoPathPrefix();
     mockDiscovery("device");
+    await adapter.build({});
     await adapter.discoverDevice();
     await adapter.install(ATV_ID, {});
-    const installCall = runShell.mock.calls
-      .map((c) => c[0] as string)
-      .find((c) => c.includes("devicectl device install app"));
+    const cmds = runShell.mock.calls.map((c) => c[0] as string);
+    const buildCall = cmds.find((c) => c.includes("flutter-tvos build tvos"));
+    const installCall = cmds.find((c) =>
+      c.includes("devicectl device install app")
+    );
+    expect(buildCall).toBeDefined();
     expect(installCall).toBeDefined();
     expect(installCall).toContain(ATV_ID);
-    // Matches launchDevice's `--profile` run — a debug device launch segfaults
-    // and release strips the VM service, so Profile-appletvos is the only
-    // config the device path actually produces.
-    expect(installCall).toContain("Profile-appletvos/Runner.app");
+    const staged = flutterTvosStagingDir(buildModeOf(buildCall!), "appletvos");
+    expect(installCall).toContain(`/build/tvos/${staged}/Runner.app`);
+    expect(installCall).not.toContain("Profile-appletvos");
   });
 
   it("simulator install uses simctl with the Debug-appletvsimulator Runner.app", async () => {
@@ -739,5 +750,102 @@ describe("findRunnerPid", () => {
       findRunnerPid(JSON.stringify({ result: { runningProcesses: [] } }))
     ).toBeUndefined();
     expect(findRunnerPid("not json")).toBeUndefined();
+  });
+});
+
+/**
+ * Where flutter-tvos stages a build, restated here from the toolchain rather
+ * than from the adapter so the tests can disagree with it.
+ * `lib/build_targets/application.dart` in flutter-tvos:
+ *   final configuration = buildInfo.buildInfo.isDebug ? 'Debug' : 'Release';
+ *   ... '$configuration-appletvos' / '$configuration-appletvsimulator'
+ * under `build/tvos/`. Profile is never a configuration it selects.
+ */
+function flutterTvosStagingDir(
+  mode: "debug" | "profile" | "release",
+  sdk: "appletvos" | "appletvsimulator"
+): string {
+  return `${mode === "debug" ? "Debug" : "Release"}-${sdk}`;
+}
+
+/** The Flutter build mode a `flutter-tvos build` command line selects. */
+function buildModeOf(cmd: string): "debug" | "profile" | "release" {
+  const m = cmd.match(/--(debug|profile|release)\b/);
+  if (!m) throw new Error(`no build-mode flag in: ${cmd}`);
+  return m[1] as "debug" | "profile" | "release";
+}
+
+describe("TvosAdapter.install resolves the bundle that is actually on disk", () => {
+  let appDir: string;
+
+  beforeEach(() => {
+    appDir = fs.mkdtempSync(path.join(os.tmpdir(), "tvos-install-"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(appDir, { recursive: true, force: true });
+  });
+
+  function stage(dir: string): string {
+    const app = path.join(appDir, "build", "tvos", dir, "Runner.app");
+    fs.mkdirSync(app, { recursive: true });
+    return app;
+  }
+
+  function adapterIn(dir: string) {
+    return new TvosAdapter({ appDir: dir, appId: TVOS_APP_ID });
+  }
+
+  function issued(sub: string): string {
+    const cmd = runShell.mock.calls
+      .map((c) => c[0] as string)
+      .find((c) => c.includes(sub));
+    expect(cmd).toBeDefined();
+    return cmd!;
+  }
+
+  it("installs the device build even when stale non-Release bundles sit beside it", async () => {
+    // A Profile-appletvos from a manual Xcode Profile run, a Debug-appletvos
+    // from a debug device build: neither is what the adapter builds, so neither
+    // may win over the Release-appletvos a `--profile` build writes.
+    stage("Profile-appletvos");
+    stage("Debug-appletvos");
+    const built = stage(flutterTvosStagingDir("profile", "appletvos"));
+    const adapter = adapterIn(appDir);
+    mockDiscovery("device");
+    await adapter.discoverDevice();
+    await adapter.install(ATV_ID, {});
+    expect(issued("devicectl device install app")).toContain(`'${built}'`);
+  });
+
+  it("does not fall back to a stale bundle the device build did not write", async () => {
+    // Only a leftover Debug-appletvos exists. Installing it would put a build
+    // that segfaults on-device onto the Apple TV; naming the path the build
+    // should have written makes the missing build the visible error instead.
+    stage("Debug-appletvos");
+    const adapter = adapterIn(appDir);
+    mockDiscovery("device");
+    await adapter.discoverDevice();
+    await adapter.install(ATV_ID, {});
+    const cmd = issued("devicectl device install app");
+    expect(cmd).toContain(
+      path.join(appDir, "build", "tvos", "Release-appletvos", "Runner.app")
+    );
+    expect(cmd).not.toContain("Debug-appletvos");
+  });
+
+  it("installs a --release simulator build when that is the one on disk", async () => {
+    const adapter = adapterIn(appDir);
+    await adapter.build({ profile: "simulator", debug: false });
+    const built = stage(
+      flutterTvosStagingDir(
+        buildModeOf(issued("flutter-tvos build tvos --simulator")),
+        "appletvsimulator"
+      )
+    );
+    mockDiscovery("simulator");
+    await adapter.discoverDevice();
+    await adapter.install(SIM_ID, {});
+    expect(issued("simctl install")).toContain(`'${built}'`);
   });
 });
