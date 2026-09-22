@@ -162,7 +162,16 @@ class FlutterDeviceServer {
         case "flutter_uninstall":
           return this.json(await core.uninstall(withDevicePin));
         case "flutter_kill_stale":
-          return this.json(await core.killStale(common));
+          return this.json(
+            await core.killStale({
+              ...common,
+              // Both scope the TEARDOWN, not just discovery, so dropping them
+              // here silently re-aims the kill at whatever device resolves
+              // first — the exact defect the device scoping removes.
+              device_udid: args.device_udid as string | undefined,
+              all_devices: args.all_devices as boolean | undefined,
+            })
+          );
         case "flutter_terminate":
           return this.json(await core.terminate(withDevicePin));
         case "flutter_background":

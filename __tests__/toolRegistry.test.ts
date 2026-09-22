@@ -86,6 +86,9 @@ describe("buildToolList (ListTools advertisement)", () => {
       "flutter_key",
       "flutter_pointer",
       "flutter_geometry",
+      // kill_stale addresses one device too: its teardown is SCOPED to that
+      // device's launch drivers, so a session on another device survives it.
+      "flutter_kill_stale",
     ];
 
     it.each(deviceAddressing)("%s accepts device_udid", (name) => {
@@ -93,20 +96,32 @@ describe("buildToolList (ListTools advertisement)", () => {
     });
 
     it("is not advertised on the tools that address no single device", () => {
-      // info/setup enumerate ALL devices, build resolves none, kill_stale kills
-      // host processes, the hot tools address a recorded launch by its own
-      // `device` field, and set_input_mode only records a mode.
+      // info/setup enumerate ALL devices, build resolves none, the hot tools
+      // address a recorded launch by its own `device` field, and set_input_mode
+      // only records a mode.
       for (const name of [
         "flutter_info",
         "flutter_setup",
         "flutter_build",
-        "flutter_kill_stale",
         "flutter_hot_reload",
         "flutter_hot_restart",
         "flutter_set_input_mode",
       ]) {
         expect(propsOf(name)).not.toContain("device_udid");
       }
+    });
+
+    it("advertises kill_stale's all_devices escape hatch, which its refusal names", () => {
+      // The refusal a device-scoped teardown returns when no device resolves
+      // tells the caller to pass all_devices. If the input stops being
+      // advertised, that instruction points at nothing.
+      const killStale = (
+        advertised.find((t) => t.name === "flutter_kill_stale")!.inputSchema as {
+          properties?: Record<string, { description: string }>;
+        }
+      ).properties!;
+      expect(killStale).toHaveProperty("all_devices");
+      expect(killStale.all_devices.description).toContain("regardless of device");
     });
 
     it("never describes itself as iOS-only", () => {

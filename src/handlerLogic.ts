@@ -227,22 +227,30 @@ export function mapUnsupportedInput(
 /**
  * Summarize an adapter's {@link CommandResult} map into the kill_stale response
  * payload, GENERIC over whatever keys the adapter returns. Each `<key>` yields a
- * `<key>Killed` boolean (true when that pkill exited 0 — pkill exits 0 when it
- * killed something, 1 when nothing matched) plus a `<key>Exit` entry under
- * `detail`.
+ * `<key>Killed` boolean (true when that teardown killed something — exit 0, the
+ * `pkill` convention the adapters keep) plus a `<key>Exit` entry under `detail`.
  *
  * Being generic means it reports the right keys for every platform whatever the
  * adapter names them — e.g. Tizen's `flutterTizen` and iOS's `flutterRun`/
  * `frontendServer` — rather than hardcoding one platform's keys.
+ *
+ * A `<key>Killed: false` is an OUTCOME, not a failure: nothing was running that
+ * belonged to this device. Device-scoped teardowns produce far more of those
+ * than a host-wide `pkill` did, which is why each key's note is carried through
+ * to `detail` — it is where "no launch driver found for emulator-5554" and
+ * "left running on another device: pid 8123" are said, and without it a caller
+ * reads a bare `false` and cannot tell those two apart.
  */
 export function summarizeKillStale(
   killed: Record<string, CommandResult>
 ): Record<string, unknown> {
   const summary: Record<string, unknown> = {};
-  const detail: Record<string, number | null | undefined> = {};
+  const detail: Record<string, unknown> = {};
   for (const [key, result] of Object.entries(killed)) {
     summary[`${key}Killed`] = result?.code === 0;
     detail[`${key}Exit`] = result?.code;
+    const note = result?.combined?.trim();
+    if (note) detail[`${key}Note`] = note;
   }
   summary.detail = detail;
   return summary;

@@ -481,15 +481,82 @@ describe("TvosAdapter.launchAndCaptureUri — simulator (loopback URI)", () => {
 });
 
 describe("TvosAdapter.killStale", () => {
-  it("kills the flutter-tvos run daemon, flutter_tools, and frontend_server", async () => {
-    await tvos().killStale();
-    const cmds = runShell.mock.calls.map((c) => c[0] as string);
-    // The `flutter-tvos` pattern covers the `flutter-tvos run` daemon.
-    expect(cmds.some((c) => c.includes("pkill -f 'flutter-tvos'"))).toBe(true);
-    expect(cmds.some((c) => c.includes("pkill -f 'flutter_tools'"))).toBe(true);
-    expect(cmds.some((c) => c.includes("pkill -f 'frontend_server'"))).toBe(
-      true
-    );
+  // The tvOS teardown used to `pkill -f flutter_tools` and `pkill -f
+  // frontend_server`, which on this host is every OTHER platform's session (an
+  // iOS/Android `flutter run` IS a flutter_tools snapshot) and the IDE's flutter
+  // daemon besides. Only the tvOS-named driver is matched now; the Dart
+  // snapshot and compiler come down as its children.
+  const PS_ROWS = [
+    "40011     1 /Users/dev/flutter-tvos/bin/flutter-tvos run --profile -d ATV",
+    "40012 40011 /Users/dev/dartvm /Users/dev/flutter_tools.snapshot run --profile -d ATV",
+    "40013 40012 /Users/dev/dartaotruntime /Users/dev/frontend_server_aot.dart.snapshot --sdk-root /x/",
+    "60010     1 fvm flutter run --debug -d 988a1b413950494c49",
+    "60011 60010 /Users/dev/dartvm /Users/dev/flutter_tools.snapshot run --debug -d 988a1b413950494c49",
+    "60012 60011 /Users/dev/dartaotruntime /Users/dev/frontend_server_aot.dart.snapshot --sdk-root /x/",
+    "11668 10348 /Users/dev/dartvm /Users/dev/flutter_tools.snapshot daemon",
+  ];
+
+  function mockProcesses(rows: string[]) {
+    const psTable = rows.join("\n") + "\n";
+    const psPairs =
+      rows.map((r) => r.trim().split(/\s+/).slice(0, 2).join(" ")).join("\n") +
+      "\n";
+    runShell.mockImplementation(async (cmd: string) => {
+      if (cmd.startsWith("ps -Awwo pid=,ppid=,command=")) {
+        return { ...okResult, stdout: psTable, combined: psTable };
+      }
+      if (cmd.startsWith("ps -Awwo pid=,ppid=")) {
+        return { ...okResult, stdout: psPairs, combined: psPairs };
+      }
+      return okResult;
+    });
+  }
+
+  function killedPids(): number[] {
+    const kill = runShell.mock.calls
+      .map((c) => c[0] as string)
+      .find((c) => c.startsWith("kill "));
+    if (!kill) return [];
+    return kill
+      .replace(/^kill\s+/, "")
+      .replace(/2>&1$/, "")
+      .trim()
+      .split(/\s+/)
+      .map(Number)
+      .sort((a, b) => a - b);
+  }
+
+  it("kills the flutter-tvos driver and its children only", async () => {
+    mockProcesses(PS_ROWS);
+    const killed = await tvos().killStale({ kind: "all-devices" });
+    expect(killedPids()).toEqual([40011, 40012, 40013]);
+    // The iPhone/Android session and the IDE's daemon are untouched: they are
+    // exactly what the old `pkill -f flutter_tools` took down.
+    for (const pid of [60010, 60011, 60012, 11668]) {
+      expect(killedPids()).not.toContain(pid);
+    }
+    expect(
+      runShell.mock.calls.some((c) => (c[0] as string).includes("pkill"))
+    ).toBe(false);
+    expect(killed.flutterTvos.code).toBe(0);
+    expect(killed.frontendServer.code).toBe(0);
+  });
+
+  it("REPORTS an orphaned Dart snapshot it can no longer identify", async () => {
+    // Its parent is gone, so nothing links it to tvOS rather than to an iPhone
+    // or an Android phone. Matching it by name is what killed those; naming it
+    // at least tells the caller what may still hold the device.
+    mockProcesses([
+      "40020     1 /Users/dev/dartvm /Users/dev/flutter_tools.snapshot run --profile -d ATV",
+    ]);
+    const killed = await tvos().killStale({ kind: "all-devices" });
+    expect(killedPids()).toEqual([]);
+    expect(killed.flutterTvos.combined).toContain("no longer identifiable");
+    expect(killed.flutterTvos.combined).toContain("40020");
+  });
+
+  it("declares a platform-wide teardown (one Apple TV is modelled)", () => {
+    expect(tvos().killStaleScope).toBe("platform");
   });
 });
 

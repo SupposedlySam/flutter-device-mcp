@@ -58,6 +58,13 @@ import {
   resolveIosTarget,
 } from "../iosDeviceTarget.js";
 import {
+  buildDeviceIdentity,
+  DeviceIdentity,
+  FLUTTER_RUN_DRIVER_PATTERNS,
+  killScopedLaunchDrivers,
+} from "../killStaleScope.js";
+import { findLaunch } from "../launchRegistry.js";
+import {
   parseSimulatorDestinations,
   resolveSimDestination,
   SimCandidate,
@@ -79,6 +86,8 @@ import {
   AppLifecycle,
   DeviceTargetPreference,
   InstallOptions,
+  KillStaleScope,
+  KillStaleScopeKind,
   PlatformAdapter,
   SystemPromptAction,
   SystemPromptController,
@@ -305,6 +314,13 @@ export interface IosAdapterConfig {
 
 export class IosAdapter implements PlatformAdapter {
   readonly platform: Platform = "ios";
+
+  /**
+   * Every session on this host is a `flutter run`, so only the device tells them
+   * apart: an unscoped teardown here could not help killing a session on a
+   * device the caller never named. See {@link killStale}.
+   */
+  readonly killStaleScope: KillStaleScopeKind = "device";
 
   /** Cached input controller so its selected mode survives across tool calls. */
   private inputController: InputController | undefined;
@@ -945,21 +961,66 @@ export class IosAdapter implements PlatformAdapter {
   }
 
   /**
-   * Kill leftover launch drivers that would hold the device/URI or wedge a
-   * subsequent deploy: the `flutter run` process and the Dart frontend/analysis
-   * servers it spawns. Mirrors the Tizen "one deploy at a time" guardrail.
+   * Kill the launch drivers holding THIS device, and nothing else.
+   *
+   * A `pkill -f "flutter run"` here took down every Flutter session on the host:
+   * the iPhone's, the Apple TV's, and an Android emulator's alike, since all of
+   * them are a `flutter run` and the pattern reads the whole command line. On the
+   * one Mac that drives all of those, an iOS deploy therefore killed whatever
+   * someone else was using. The teardown now attributes each driver process to a
+   * device — its `-d` argument (a flutter id, devicectl id or device name, all
+   * three of which name the same target) or a child naming the device — and
+   * signals only that device's drivers plus their children, which is what ties
+   * `frontend_server` to a session instead of killing every compiler on the host.
+   *
+   * Deliberately NOT caught: a `flutter run` that names no device anywhere in its
+   * subtree. Its pid is reported rather than guessed at.
    */
-  async killStale(): Promise<Record<string, CommandResult>> {
-    // Match on the flutter-run subcommand regardless of the launcher prefix
-    // (`flutter run` or `fvm flutter run`) so an fvm-wrapped launch is caught.
-    const flutterRun = await runShell(`pkill -f ${quote("flutter run")}`, {
-      timeoutMs: 10000,
+  async killStale(
+    scope: KillStaleScope
+  ): Promise<Record<string, CommandResult>> {
+    if (scope.kind === "all-devices") {
+      return killScopedLaunchDrivers({
+        driverPatterns: FLUTTER_RUN_DRIVER_PATTERNS,
+        driverKey: "flutterRun",
+        sweepOrphanCompilers: true,
+      });
+    }
+    const identity = await this.deviceIdentityFor(scope.device);
+    const recorded = findLaunch(this.platform, scope.device)?.pid;
+    return killScopedLaunchDrivers({
+      driverPatterns: FLUTTER_RUN_DRIVER_PATTERNS,
+      driverKey: "flutterRun",
+      identity,
+      knownTargetPids: recorded ? [recorded] : [],
+      deviceLabel: scope.device,
     });
-    const frontendServer = await runShell(
-      `pkill -f ${quote("frontend_server")}`,
-      { timeoutMs: 10000 }
-    );
-    return { flutterRun, frontendServer };
+  }
+
+  /**
+   * The target's identity for a teardown: which ids name it and it ALONE, which
+   * name another attached target, and whether it is the only one available.
+   *
+   * `flutter run -d` accepts a flutter id, a devicectl id or a device NAME, so
+   * all three have to be recognized as the same device — but a name is only an
+   * identity when nothing else answers to it. A physical iPhone is called
+   * `iPhone` by default, so a simulator named "iPhone 16 Pro" would otherwise
+   * take the phone's session down with it.
+   *
+   * Read live from {@link listTargets} (the same enumeration discovery uses)
+   * rather than from a cache: a cold or stale cache would answer about a host
+   * that is not the one being torn down. Every listed target takes part in the
+   * uniqueness check, available or not, since an unavailable one still explains
+   * who a name belongs to.
+   */
+  private async deviceIdentityFor(device: string): Promise<DeviceIdentity> {
+    const { physical, simulators } = await this.listTargets();
+    const devices = [...physical, ...simulators].map((d) => ({
+      id: d.udid,
+      aliases: [d.devicectlId, d.name],
+      available: d.available,
+    }));
+    return buildDeviceIdentity({ target: device, devices });
   }
 
   /**

@@ -60,6 +60,8 @@ import {
   AppLifecycle,
   DeviceTargetPreference,
   InstallOptions,
+  KillStaleScope,
+  KillStaleScopeKind,
   PlatformAdapter,
 } from "./platformAdapter.js";
 import { defaultScreenshotPath, ScreenshotResult } from "../screenshot.js";
@@ -231,6 +233,14 @@ function realOrSelf(p: string): string {
 
 export class MacosAdapter implements PlatformAdapter {
   readonly platform: Platform = "macos";
+
+  /**
+   * A macOS teardown identifies its target by PROCESS NAME (this session's
+   * staged bundle path, or the FLUTTER_DEVICE_MACOS_PROCESS_NAME pin) and
+   * refuses when that is ambiguous, so it never needed a device id — see
+   * {@link killStale}.
+   */
+  readonly killStaleScope: KillStaleScopeKind = "platform";
 
   private inputController: MacosInputController | undefined;
 
@@ -1006,7 +1016,9 @@ export class MacosAdapter implements PlatformAdapter {
    * bar; see {@link findMatchingPids}'s doc for the shared matching this
    * builds on.
    */
-  async killStale(): Promise<Record<string, CommandResult>> {
+  async killStale(
+    _scope: KillStaleScope
+  ): Promise<Record<string, CommandResult>> {
     const processName = this.processName ?? this.config.processName?.trim();
     if (!processName) {
       return {

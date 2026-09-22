@@ -50,7 +50,18 @@ import {
   launchAndCaptureUri as neutralLaunchAndCaptureUri,
 } from "../launchCapture.js";
 import { logger } from "../logger.js";
-import { resolveAndroidTarget } from "../androidDeviceTarget.js";
+import {
+  isOnline,
+  parseAdbDevices,
+  resolveAndroidTarget,
+} from "../androidDeviceTarget.js";
+import {
+  buildDeviceIdentity,
+  DeviceIdentity,
+  FLUTTER_RUN_DRIVER_PATTERNS,
+  killScopedLaunchDrivers,
+} from "../killStaleScope.js";
+import { findLaunch } from "../launchRegistry.js";
 import {
   AndroidLaunchMode,
   ANDROID_DEFAULT_LAUNCH_MODE,
@@ -102,6 +113,8 @@ import {
   AppLifecycle,
   DeviceTargetPreference,
   InstallOptions,
+  KillStaleScope,
+  KillStaleScopeKind,
   PlatformAdapter,
 } from "./platformAdapter.js";
 
@@ -198,6 +211,13 @@ export interface AndroidAdapterConfig {
 
 export class AndroidAdapter implements PlatformAdapter {
   readonly platform: Platform = "android";
+
+  /**
+   * Every session on this host is a `flutter run`, so only the device tells them
+   * apart: an unscoped teardown here could not help killing a session on a
+   * device the caller never named. See {@link killStale}.
+   */
+  readonly killStaleScope: KillStaleScopeKind = "device";
 
   /** Cached input controller so its selected mode survives across tool calls. */
   private inputController: InputController | undefined;
@@ -742,39 +762,75 @@ export class AndroidAdapter implements PlatformAdapter {
   }
 
   /**
-   * Kill leftover launch drivers that would hold the device/URI or wedge a
-   * subsequent deploy: the host-side `flutter run` process and the Dart
-   * frontend/analysis servers it spawns.
+   * Kill the launch drivers holding THIS device, and nothing else.
    *
-   * Matches BOTH modes this adapter can spawn — `flutter run --profile` and
-   * `flutter run --debug` (see {@link buildAndroidPtyLaunchCommand}) — so a stale
-   * DEBUG deploy is torn down too, keeping the "one deploy at a time" guardrail
-   * intact for debug launches (a `--profile`-only match would leak a wedged debug
-   * session). The mode is not a reliable cross-platform discriminator (iOS also
-   * launches `flutter run --debug -d`), so concurrent iOS+Android deploys on one
-   * host are unsupported — but iOS's own killStale already tears down any
-   * `flutter run`, so this is no more aggressive than the existing behavior.
+   * Every Android session on the host is a `flutter run` with the same shape, so
+   * the command line alone cannot tell them apart: a `pkill -f "flutter run
+   * --debug"` aimed at the emulator killed the physical phone's session too, and
+   * the `device_udid` that picked the emulator did nothing to protect it. So the
+   * teardown attributes each driver process to a device (its `-d` argument, or
+   * the `adb -s <serial>` child a live session keeps) and signals only the ones
+   * on the resolved target, together with their children — which is what ties
+   * `frontend_server` to a session at all, rather than killing every compiler on
+   * the host including the IDE's. See killStaleScope.ts for the attribution.
+   *
+   * Deliberately NOT caught: a `flutter run` no device can be attributed to.
+   * Its pid comes back in the result, because guessing is the defect above and
+   * staying silent about a possibly-wedged session is the other way to break a
+   * deploy.
+   *
+   * The launch MODE is no longer part of the match (it never discriminated
+   * anything — iOS launches `flutter run --debug -d` too); the device does.
    */
-  async killStale(): Promise<Record<string, CommandResult>> {
-    const flutterRunProfile = await runShell(
-      `pkill -f ${quote("flutter run --profile")}`,
-      { timeoutMs: 10000 }
-    );
-    const flutterRunDebug = await runShell(
-      `pkill -f ${quote("flutter run --debug")}`,
-      { timeoutMs: 10000 }
-    );
-    const frontendServer = await runShell(
-      `pkill -f ${quote("frontend_server")}`,
-      { timeoutMs: 10000 }
-    );
-    // Report the profile-kill under the generic `flutterRun` key the server's
-    // summarizeKillStale handles; expose the debug-kill alongside it.
-    return {
-      flutterRun: flutterRunProfile,
-      flutterRunDebug,
-      frontendServer,
-    };
+  async killStale(
+    scope: KillStaleScope
+  ): Promise<Record<string, CommandResult>> {
+    if (scope.kind === "all-devices") {
+      return killScopedLaunchDrivers({
+        driverPatterns: FLUTTER_RUN_DRIVER_PATTERNS,
+        driverKey: "flutterRun",
+        // The host-wide hammer is the only mode that takes orphaned compilers,
+        // matching what the previous blanket `pkill -f frontend_server` did.
+        sweepOrphanCompilers: true,
+      });
+    }
+    const identity = await this.deviceIdentityFor(scope.device);
+    // A pid this MCP recorded for the device at launch is ownership PROOF, so it
+    // is used ahead of anything inferred from a command line — and it is what
+    // tears down our own session whose argv names no device at all.
+    const recorded = findLaunch(this.platform, scope.device)?.pid;
+    return killScopedLaunchDrivers({
+      driverPatterns: FLUTTER_RUN_DRIVER_PATTERNS,
+      driverKey: "flutterRun",
+      identity,
+      knownTargetPids: recorded ? [recorded] : [],
+      deviceLabel: scope.device,
+    });
+  }
+
+  /**
+   * The target's identity for a teardown: which ids name it and it ALONE, which
+   * name another attached device, and whether it is the only one attached.
+   *
+   * Read live from `adb devices -l` rather than cached, because the answer
+   * decides what may be killed and a cache that has gone stale answers about a
+   * host that no longer exists. A model/product name is only kept as the
+   * target's when no other listed device reports the same one — two emulators
+   * booted from one AVD image report identical `model`/`product`, so treating
+   * either as an identity would let a teardown scoped to one kill the other.
+   *
+   * When adb cannot be read at all, only the serial names the target and nothing
+   * is claimed about other devices: a session naming something else is then
+   * reported rather than killed, which is the safe direction.
+   */
+  private async deviceIdentityFor(device: string): Promise<DeviceIdentity> {
+    const listed = await runShell("adb devices -l", { timeoutMs: 15000 });
+    const devices = parseAdbDevices(listed.stdout).map((d) => ({
+      id: d.serial,
+      aliases: [d.model, d.product],
+      available: isOnline(d),
+    }));
+    return buildDeviceIdentity({ target: device, devices });
   }
 
   /**

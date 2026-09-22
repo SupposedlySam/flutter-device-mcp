@@ -49,7 +49,12 @@ import {
   resolveBuildMode,
 } from "../types.js";
 import { dartDefineArgs } from "../dartDefine.js";
-import { InstallOptions, PlatformAdapter } from "./platformAdapter.js";
+import {
+  InstallOptions,
+  KillStaleScope,
+  KillStaleScopeKind,
+  PlatformAdapter,
+} from "./platformAdapter.js";
 import { ScreenshotResult } from "../screenshot.js";
 import { RecordResult } from "../recording.js";
 
@@ -146,6 +151,13 @@ export interface TizenAdapterConfig {
 
 export class TizenAdapter implements PlatformAdapter {
   readonly platform: Platform = "tizen";
+
+  /**
+   * `flutter-tizen` names this toolchain and no other, and one Tizen target is
+   * modelled, so the teardown needs no device — and can run before device
+   * discovery, where a wedged driver may be why discovery fails.
+   */
+  readonly killStaleScope: KillStaleScopeKind = "platform";
 
   /** Cached input controller so its selected mode survives across tool calls. */
   private inputController: InputController | undefined;
@@ -474,7 +486,17 @@ export class TizenAdapter implements PlatformAdapter {
     );
   }
 
-  async killStale(): Promise<Record<string, CommandResult>> {
+  /**
+   * Kill the Tizen build/launch drivers. The pattern names the Tizen toolchain
+   * itself, so unlike a bare `flutter run` match it cannot reach a mobile or
+   * tvOS session on the same host, and no device scope is needed: one Tizen
+   * target is modelled here (`.tizen-target` plus the live `sdb devices` pick).
+   * A host driving two TVs would need the per-device attribution the mobile
+   * adapters use.
+   */
+  async killStale(
+    _scope: KillStaleScope
+  ): Promise<Record<string, CommandResult>> {
     // One deploy/build at a time — a leftover flutter-tizen process holds the
     // device lock and wedges a concurrent install.
     const flutterTizen = await runShell(`pkill -f ${quote("flutter-tizen")}`, {

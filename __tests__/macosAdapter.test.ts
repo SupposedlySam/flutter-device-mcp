@@ -363,7 +363,7 @@ describe("MacosAdapter.launchAndCaptureUri", () => {
 
 describe("MacosAdapter.uninstall / killStale", () => {
   it("killStale no-ops (with a clear note) when nothing was launched this session and no pin is set", async () => {
-    const killed = await adapter().killStale();
+    const killed = await adapter().killStale({ kind: "all-devices" });
     expect(killed.previousLaunch.success).toBe(true);
     expect(killed.previousLaunch.combined).toMatch(/No macOS process name known/);
   });
@@ -395,7 +395,7 @@ describe("MacosAdapter.uninstall / killStale", () => {
       const a = adapter({ appPath: srcApp });
       await a.install("local", {});
       await a.launchAndCaptureUri("local", 5000);
-      const killed = await a.killStale();
+      const killed = await a.killStale({ kind: "all-devices" });
       expect(runShell).toHaveBeenCalledWith("ps -axo pid=,comm=", { timeoutMs: 5000 });
       expect(runShell).toHaveBeenCalledWith("kill -9 42668 2>&1", { timeoutMs: 5000 });
       expect(runShell.mock.calls.some(([c]) => (c as string).startsWith("pkill"))).toBe(
@@ -421,7 +421,7 @@ describe("MacosAdapter.uninstall / killStale", () => {
       if (c.startsWith("kill -9")) return okResult;
       return okResult;
     });
-    const killed = await adapter({ processName: "example-app" }).killStale();
+    const killed = await adapter({ processName: "example-app" }).killStale({ kind: "all-devices" });
     expect(runShell).toHaveBeenCalledWith("ps -axo pid=,comm=", { timeoutMs: 5000 });
     expect(runShell).toHaveBeenCalledWith("kill -9 55123 2>&1", { timeoutMs: 5000 });
     expect(killed.previousLaunch.success).toBe(true);
@@ -433,7 +433,7 @@ describe("MacosAdapter.uninstall / killStale", () => {
       if (c.startsWith("ps -axo")) return ok("");
       return okResult;
     });
-    const killed = await adapter({ processName: "ghost-app" }).killStale();
+    const killed = await adapter({ processName: "ghost-app" }).killStale({ kind: "all-devices" });
     expect(killed.previousLaunch.success).toBe(true);
     expect(killed.previousLaunch.combined).toMatch(/No process matching "ghost-app" found/);
   });
@@ -455,7 +455,7 @@ describe("MacosAdapter.uninstall / killStale", () => {
       if (c.startsWith("kill -9")) return okResult;
       return okResult;
     });
-    const killed = await adapter({ processName: "Example" }).killStale();
+    const killed = await adapter({ processName: "Example" }).killStale({ kind: "all-devices" });
     expect(
       runShell.mock.calls.some(([c]) => (c as string).startsWith("kill -9"))
     ).toBe(false);
@@ -501,7 +501,7 @@ describe("MacosAdapter.uninstall / killStale", () => {
       expect("failed" in outcome).toBe(false);
       if (!("failed" in outcome)) expect(outcome.pid).toBe(42668);
 
-      const killed = await a.killStale();
+      const killed = await a.killStale({ kind: "all-devices" });
       expect(runShell).toHaveBeenCalledWith("kill -9 42668 2>&1", { timeoutMs: 5000 });
       expect(killed.previousLaunch.success).toBe(true);
     } finally {
@@ -540,7 +540,7 @@ describe("MacosAdapter.uninstall / killStale", () => {
       // findMatchingPids's non-match behavior, not the launch wait budget.
       const a = adapter({ appPath: "/somewhere/Example App.app" });
       await a.install("local", {});
-      const killed = await a.killStale();
+      const killed = await a.killStale({ kind: "all-devices" });
       expect(
         runShell.mock.calls.some(([c]) => (c as string).startsWith("kill -9"))
       ).toBe(false);
@@ -568,7 +568,7 @@ describe("MacosAdapter.uninstall / killStale", () => {
       if (c.startsWith("kill -9")) return okResult;
       return okResult;
     });
-    const killed = await adapter({ processName: "Electron" }).killStale();
+    const killed = await adapter({ processName: "Electron" }).killStale({ kind: "all-devices" });
     expect(
       runShell.mock.calls.some(([c]) => (c as string).startsWith("kill -9"))
     ).toBe(false);

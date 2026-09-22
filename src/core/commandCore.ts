@@ -32,16 +32,16 @@ import {
   resolvePointerTarget,
   resolveScrollDelta,
   resolveViewMetrics,
-  summarizeKillStale,
 } from "../handlerLogic.js";
 import { crossCheckView, DeviceGeometryReading } from "../deviceGeometry.js";
 import {
   clearLaunch,
   clearLaunches,
-  findLaunch,
   readRecords,
   recordLaunch,
+  resolveLaunch,
 } from "../launchRegistry.js";
+import { runKillStale, tearDownForDeploy } from "../killStaleFlow.js";
 import { VmServiceClient } from "../vmServiceClient.js";
 import { hotReload, ReloadOutcome } from "../hotReload.js";
 import { hotControl } from "../hotControl.js";
@@ -257,11 +257,15 @@ export class CommandCore {
   ): Promise<CommandOutput> {
     const adapter = this.adapterFor(args);
     return this.guard("flutter_deploy", { platform: adapter.platform, ...args }, async () => {
-      // 1. One deploy at a time: kill any stale drivers holding the lock.
-      const killed = await adapter.killStale();
-      const resolution = await adapter.discoverDevice({
-        kind: args.target,
-        udid: args.device_udid,
+      // 1. One deploy at a time, PER DEVICE: resolve the target and tear down
+      // only the drivers holding IT, leaving every other device's session
+      // running — a deploy to the emulator used to kill the `flutter run` on the
+      // phone attached beside it, so `device_udid` could pick a target but not
+      // spare the other one. The order (resolve-then-kill, or kill-first where
+      // the teardown needs no device) is tearDownForDeploy's decision.
+      const { resolution, killed } = await tearDownForDeploy({
+        adapter,
+        preference: { kind: args.target, udid: args.device_udid },
       });
       const device = resolution.target;
       const deviceWarning = resolution.warning;
@@ -502,19 +506,27 @@ export class CommandCore {
   }
 
   // =========== kill_stale ==========
-  async killStale(args: CommonArgs): Promise<CommandOutput> {
+  async killStale(
+    args: CommonArgs & { device_udid?: string; all_devices?: boolean }
+  ): Promise<CommandOutput> {
     const adapter = this.adapterFor(args);
-    return this.guard("flutter_kill_stale", { platform: adapter.platform }, async () => {
-      const killed = await adapter.killStale();
-      for (const rec of readRecords().filter((r) => r.platform === adapter.platform)) {
-        removeControlFifo(rec.controlFifoPath);
-      }
-      clearLaunches(adapter.platform);
-      return {
-        platform: adapter.platform,
-        ...summarizeKillStale(killed),
-      };
-    });
+    return this.guard("flutter_kill_stale", { platform: adapter.platform }, async () =>
+      // Every decision here — which scope, whether to refuse, which launch
+      // records the teardown invalidated — lives in killStaleFlow so it can be
+      // tested against a fake adapter. It could not be while it was inline: a
+      // refusal that killed the host anyway and reported `killed: false` passed
+      // the entire suite.
+      runKillStale({
+        adapter,
+        args,
+        store: {
+          readRecords,
+          removeControlFifo,
+          clearLaunch,
+          clearLaunches,
+        },
+      })
+    );
   }
 
   /** Shared "app id not configured" result for uninstall/lifecycle. */
@@ -595,18 +607,31 @@ export class CommandCore {
     );
   }
 
-  /** Look up the recorded launch, or a ready-made "no live daemon" result. */
+  /**
+   * Look up the recorded launch, or a ready-made result when there is nothing to
+   * act on.
+   *
+   * TWO launches with no device named is a miss, not a pick. Per-device teardown
+   * means a deploy no longer ends the other device's session, so two live
+   * daemons is normal now — and reloading "the latest" would land on whichever
+   * was deployed most recently, which reads as a reload that did nothing.
+   */
   private findLaunchRecord(adapter: PlatformAdapter, device: string | undefined) {
-    const record = findLaunch(adapter.platform, device);
-    if (record) return { record };
+    const lookup = resolveLaunch(adapter.platform, device);
+    if (lookup.kind === "found") return { record: lookup.record };
     return {
       miss: {
         platform: adapter.platform,
         success: false,
         triggered: false,
+        devices: lookup.kind === "ambiguous" ? lookup.devices : undefined,
         reason:
-          "No live launch daemon is recorded for this platform. Run flutter_deploy first " +
-          "(it launches the app and records its VM service URI + control channel for hot reload/restart).",
+          lookup.kind === "ambiguous"
+            ? `Two or more launches are live on this platform (${lookup.devices.join(", ")}), ` +
+              "so which one to reload is ambiguous. Pass `device` to name it — reloading the " +
+              "most recent one would silently drive the wrong device."
+            : "No live launch daemon is recorded for this platform. Run flutter_deploy first " +
+              "(it launches the app and records its VM service URI + control channel for hot reload/restart).",
       } as CommandOutput,
     };
   }
