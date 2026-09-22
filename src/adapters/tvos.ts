@@ -516,12 +516,12 @@ export class TvosAdapter implements PlatformAdapter {
    * Install the already-built app on the resolved target.
    *
    * Physical Apple TV: `xcrun devicectl device install app` with the
-   * `Profile-appletvos` Runner.app (matches `launchDevice`'s `--profile`
-   * build — a plain debug launch segfaults on-device and release strips the
-   * VM service). Simulator: `xcrun simctl install` with the
-   * `Debug-appletvsimulator` Runner.app. The neutral deploy handler calls install
-   * THEN launch; keeping install separate lets the ENOSPC uninstall-and-retry
-   * seam work uniformly with the other adapters.
+   * `Release-appletvos` Runner.app — where the `--profile` device build lands,
+   * see {@link artifactPathFor}. Simulator: `xcrun simctl install` with the
+   * `Debug-appletvsimulator` (or `Release-appletvsimulator`) Runner.app. The
+   * neutral deploy handler calls install THEN launch; keeping install separate
+   * lets the ENOSPC uninstall-and-retry seam work uniformly with the other
+   * adapters.
    */
   async install(device: string, _opts: InstallOptions): Promise<CommandResult> {
     const appPath = this.artifactPathFor(this.lastKind);
@@ -551,42 +551,43 @@ export class TvosAdapter implements PlatformAdapter {
   }
 
   /**
-   * The built Runner.app path for a device kind. flutter-tvos writes the
-   * simulator bundle under `build/tvos/Debug-appletvsimulator/` and the device
-   * bundle under `build/tvos/Profile-appletvos/` (matching `launchDevice`'s
-   * `--profile` run — the config the device launch path actually produces).
+   * The built Runner.app path for a device kind.
    *
-   * NOTE: verify flutter-tvos's build output directory layout on real hardware —
-   * a fork may write under `build/ios/` (reusing the iOS embedder identity)
-   * rather than `build/tvos/`. Adjust the base segment if it differs.
+   * The device path reads as a mistake and is not one: flutter-tvos derives the
+   * Xcode configuration from the Flutter build mode alone — debug maps to
+   * `Debug`, EVERY other mode maps to `Release` — and stages the product under
+   * `build/tvos/<configuration>-<sdk>/Runner.app`. So the `--profile` device
+   * build this adapter performs lands in `Release-appletvos`. The Runner project
+   * does define a Profile configuration, but flutter-tvos never selects it, so
+   * `Profile-appletvos` is never written. It used to be the first choice here
+   * and the path returned when nothing was on disk, so a missing build surfaced
+   * as devicectl's NSCocoaErrorDomain 260 ("the file couldn't be opened because
+   * it doesn't exist") on a directory no build could have produced. Read from
+   * the flutter-tvos toolchain source (`lib/build_targets/application.dart`),
+   * not from an install on hardware.
+   *
+   * The candidates are exactly the bundles {@link build} can produce, and
+   * nothing else is discovered. The device build is always `--profile`, so the
+   * device list has one entry. The simulator build is `--debug` or `--release`,
+   * and which one ran is not known here, so both are checked, debug first.
+   * There used to be a fallback to any `*-<sdk>/Runner.app` on disk; it could
+   * only ever find a bundle this adapter did not build — a stale sibling from a
+   * manual Xcode run, or a device `Debug-appletvos` that segfaults on launch —
+   * and installing that is worse than failing on the path the build should
+   * have written. When nothing exists, the first candidate is returned so the
+   * install error names that path.
    */
   private artifactPathFor(kind: TvosDeviceKind): string {
-    const sdk = kind === "simulator" ? "appletvsimulator" : "appletvos";
     const buildDir = path.join(this.config.appDir, "build", "tvos");
-    // The Xcode build-config folder name varies by mode (a --profile build lands
-    // in `Release-appletvos`, a debug/sim build in `Debug-appletvsimulator`, etc.),
-    // so DETECT the produced `Runner.app` rather than hardcode one config. Prefer
-    // the modes we build (Profile/Release for device, Debug/Release for sim), then
-    // fall back to any `*-<sdk>/Runner.app` on disk.
-    const preferred =
+    const candidates =
       kind === "simulator"
-        ? ["Debug-appletvsimulator", "Release-appletvsimulator", "Profile-appletvsimulator"]
-        : ["Profile-appletvos", "Release-appletvos", "Debug-appletvos"];
-    for (const config of preferred) {
+        ? ["Debug-appletvsimulator", "Release-appletvsimulator"]
+        : ["Release-appletvos"];
+    for (const config of candidates) {
       const p = path.join(buildDir, config, "Runner.app");
       if (fs.existsSync(p)) return p;
     }
-    try {
-      for (const entry of fs.readdirSync(buildDir, { withFileTypes: true })) {
-        if (entry.isDirectory() && entry.name.endsWith(`-${sdk}`)) {
-          const p = path.join(buildDir, entry.name, "Runner.app");
-          if (fs.existsSync(p)) return p;
-        }
-      }
-    } catch {
-      // build dir absent — fall through to the conventional default path.
-    }
-    return path.join(buildDir, preferred[0], "Runner.app");
+    return path.join(buildDir, candidates[0], "Runner.app");
   }
 
   /**
