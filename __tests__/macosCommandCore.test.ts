@@ -21,6 +21,8 @@ jest.unstable_mockModule("../src/launchRegistry.js", () => ({
   clearLaunch: jest.fn(),
   clearLaunches: jest.fn(),
   findLaunch: jest.fn(() => undefined),
+  // CommandCore's hot tools go through resolveLaunch; nothing is recorded here.
+  resolveLaunch: jest.fn(() => ({ kind: "none" })),
   readRecords: jest.fn(() => []),
 }));
 
@@ -60,6 +62,10 @@ function fakeAdapter(platform: string, opts: { vmServiceUriWs?: string } = {}) {
   const adapter = {
     platform,
     appId: "com.example.exampleapp",
+    // macOS identifies its own process by name, so its teardown is
+    // platform-wide and runs BEFORE discovery — the fake declares the same kind
+    // so it takes the same path through tearDownForDeploy.
+    killStaleScope: "platform" as const,
     inputCalls,
     async info() {
       return okResult;

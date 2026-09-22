@@ -94,7 +94,8 @@ Commands:
   deploy              Install + launch, capture the VM Service URI (THE key command; --mode to match the built artifact)
                       macOS: stages + launches a prebuilt signed .app (--app-path <path> | --app-url <url>); no VM Service URI exists there
   uninstall           Remove the app from the device
-  kill-stale          Kill stale launch/driver processes holding the device lock
+  kill-stale          Kill the stale launch/driver processes holding THIS device's lock
+                      (--device-udid to aim it; --all-devices for the host-wide hammer)
   terminate           Force-quit the app (mobile)
   background          Send the app to the background without killing it (mobile)
   foreground          Bring the app back to the foreground (mobile)
@@ -162,7 +163,15 @@ async function run(): Promise<number> {
       break;
     case "kill-stale":
     case "kill_stale":
-      result = await core.killStale(common);
+      // The teardown is device-SCOPED on iOS/Android, so the pin has to reach it
+      // here too: without it a `--device-udid` would aim discovery at one device
+      // and the kill at whatever resolved first. `--all-devices` is the explicit
+      // host-wide hammer.
+      result = await core.killStale({
+        ...common,
+        device_udid: devicePin,
+        all_devices: f.all_devices as boolean | undefined,
+      });
       break;
     case "terminate":
       result = await core.terminate({ ...common, device_udid: devicePin });

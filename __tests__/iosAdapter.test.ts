@@ -41,6 +41,19 @@ jest.unstable_mockModule("../src/launchCapture.js", () => ({
   allocateControlChannel: () => undefined,
 }));
 
+// The adapter reads the launch registry at its DEFAULT path — a real file on
+// this developer's machine. Stub it and inject the pid instead.
+const findLaunch = jest.fn<(platform: string, device?: string) => unknown>();
+
+jest.unstable_mockModule("../src/launchRegistry.js", () => ({
+  findLaunch,
+  recordLaunch: jest.fn(),
+  readRecords: jest.fn(() => []),
+  clearLaunch: jest.fn(),
+  clearLaunches: jest.fn(),
+  defaultRegistryPath: () => "/tmp/never-used-by-this-suite.json",
+}));
+
 const okResult = {
   code: 0,
   stdout: "",
@@ -191,8 +204,61 @@ function mockDiscovery(kind: "simulator" | "device") {
   }
 }
 
+/**
+ * A physical iPhone whose name is the default "iPhone", beside a booted
+ * simulator called "iPhone 16 Pro". The shape that made a name look like an
+ * identity: `-d iPhone` names the PHONE, and a teardown scoped to the simulator
+ * must not read it as its own.
+ */
+function mockPhoneAndSimulatorNamedAlike() {
+  runShell.mockImplementation(async (cmd: string) => {
+    if (cmd.includes("devicectl list devices")) {
+      return {
+        ...okResult,
+        stdout:
+          "Name  Host  Identifier  State  Model\n" +
+          `iPhone  h  ${IPHONE_DEVICECTL_ID}  connected  (iPhone11,8)\n`,
+      };
+    }
+    if (cmd.includes("simctl list devices --json")) {
+      return {
+        ...okResult,
+        stdout: JSON.stringify({
+          devices: {
+            "com.apple.CoreSimulator.SimRuntime.iOS-18-0": [
+              {
+                udid: "SIM-UDID-1",
+                name: "iPhone 16 Pro",
+                state: "Booted",
+                isAvailable: true,
+              },
+            ],
+          },
+        }),
+      };
+    }
+    if (cmd.includes("devices --machine")) {
+      return {
+        ...okResult,
+        stdout: JSON.stringify([
+          {
+            id: IPHONE_FLUTTER_ECID,
+            name: "iPhone",
+            targetPlatform: "ios",
+            emulator: false,
+            isSupported: true,
+          },
+        ]),
+      };
+    }
+    return okResult;
+  });
+}
+
 beforeEach(() => {
   runShell.mockReset();
+  findLaunch.mockReset();
+  findLaunch.mockReturnValue(undefined);
   neutralLaunchAndCaptureUri.mockReset();
   runShell.mockResolvedValue(okResult);
   neutralLaunchAndCaptureUri.mockResolvedValue({ failed: false });
@@ -490,15 +556,136 @@ describe("IosAdapter.install is now a PREFLIGHT (full flutter run pipeline insta
   });
 });
 
-describe("IosAdapter.killStale", () => {
-  it("pkills the flutter run driver and the dart frontend server", async () => {
-    await ios().killStale();
-    expect(runShell).toHaveBeenCalledWith("pkill -f 'flutter run'", {
-      timeoutMs: 10000,
+describe("IosAdapter.killStale (device-scoped teardown)", () => {
+  // One Mac drives the iPhone, the Apple TV and an Android phone, and every one
+  // of those sessions is a `flutter run`. A `pkill -f "flutter run"` here took
+  // all three down; the teardown is scoped to the device being deployed to.
+  const ANDROID_SERIAL = "988a1b413950494c49";
+
+  /** Mock the two ps reads; device enumeration is mocked by mockDiscovery. */
+  function mockProcesses(rows: string[]) {
+    const psTable = rows.join("\n") + "\n";
+    const psPairs =
+      rows.map((r) => r.trim().split(/\s+/).slice(0, 2).join(" ")).join("\n") +
+      "\n";
+    const previous = runShell.getMockImplementation();
+    runShell.mockImplementation(async (cmd: string, opts?: unknown) => {
+      if (cmd.startsWith("ps -Awwo pid=,ppid=,command=")) {
+        return { ...okResult, stdout: psTable, combined: psTable };
+      }
+      if (cmd.startsWith("ps -Awwo pid=,ppid=")) {
+        return { ...okResult, stdout: psPairs, combined: psPairs };
+      }
+      return previous ? previous(cmd, opts) : okResult;
     });
-    expect(runShell).toHaveBeenCalledWith("pkill -f 'frontend_server'", {
-      timeoutMs: 10000,
+  }
+
+  /** The pids the `kill` invocation actually named, exactly. */
+  function killedPids(): number[] {
+    const kill = runShell.mock.calls
+      .map((c) => c[0] as string)
+      .find((c) => c.startsWith("kill "));
+    if (!kill) return [];
+    return kill
+      .replace(/^kill\s+/, "")
+      .replace(/2>&1$/, "")
+      .trim()
+      .split(/\s+/)
+      .map(Number)
+      .sort((a, b) => a - b);
+  }
+
+  it("kills the iPhone's session and leaves the Android session alone", async () => {
+    mockDiscovery("device");
+    mockProcesses([
+      `50010     1 /usr/bin/python3 /pkg/scripts/pty-control-forward.py /tmp/i.fifo fvm flutter run --debug -d '${IPHONE_FLUTTER_ECID}'`,
+      `50011 50010 fvm flutter run --debug -d ${IPHONE_FLUTTER_ECID}`,
+      "50012 50011 /Users/dev/dartaotruntime /Users/dev/frontend_server_aot.dart.snapshot --sdk-root /x/",
+      `60010     1 fvm flutter run --debug -d ${ANDROID_SERIAL}`,
+      "60011 60010 /Users/dev/dartaotruntime /Users/dev/frontend_server_aot.dart.snapshot --sdk-root /x/",
+    ]);
+    const killed = await ios().killStale({
+      kind: "device",
+      device: IPHONE_FLUTTER_ECID,
     });
+    expect(killedPids()).toEqual([50010, 50011, 50012]);
+    expect(
+      runShell.mock.calls.some((c) => (c[0] as string).includes("pkill"))
+    ).toBe(false);
+    // The Android session is on a device this iOS enumeration cannot see, so it
+    // is reported rather than claimed as another iOS device's — and not killed.
+    expect(killed.flutterRun.combined).toContain("could not be attributed");
+  });
+
+  it("recognizes a session launched by DEVICE NAME as the same device", async () => {
+    // `flutter run -d 'My iPhone'` targets the same phone as its ECID does, and
+    // the name is unique in this enumeration, so it comes down too.
+    mockDiscovery("device");
+    mockProcesses(["50020     1 fvm flutter run --debug -d 'My iPhone'"]);
+    await ios().killStale({ kind: "device", device: IPHONE_FLUTTER_ECID });
+    expect(killedPids()).toEqual([50020]);
+  });
+
+  it("does NOT read a simulator's name as the physical iPhone's session", async () => {
+    // A physical iPhone's default name is "iPhone", and `-d` accepts a name: a
+    // prefix match without a uniqueness test made a deploy to a simulator named
+    // "iPhone 16 Pro" kill the phone. Here the phone's session must survive.
+    mockPhoneAndSimulatorNamedAlike();
+    mockProcesses(["50030     1 fvm flutter run --debug -d 'iPhone'"]);
+    const killed = await ios().killStale({
+      kind: "device",
+      device: "SIM-UDID-1",
+    });
+    expect(killedPids()).toEqual([]);
+    expect(killed.flutterRun.combined).toContain("Left running");
+  });
+
+  it("tears down a session with NO -d when the iPhone is the only target attached", async () => {
+    // There is no adb on iOS, so no `-s <udid>` child to read: on a one-device
+    // host this fallback is the only thing that clears the shape the old blunt
+    // pkill cleared, and without it the deploy walks into a held device.
+    // mockDiscovery("device") lists the iPhone and no simulator — the
+    // one-target host.
+    mockDiscovery("device");
+    mockProcesses([
+      "50040     1 fvm flutter run --debug",
+      "50041 50040 /Users/dev/dartvm /Users/dev/flutter_tools.snapshot run --debug",
+    ]);
+    await ios().killStale({ kind: "device", device: IPHONE_FLUTTER_ECID });
+    expect(killedPids()).toEqual([50040, 50041]);
+  });
+
+  it("tears down OUR OWN recorded session on a multi-target host", async () => {
+    // Two targets attached, so the "only device attached" fallback cannot apply:
+    // the recorded pid is the only thing that ties this session to the phone.
+    mockPhoneAndSimulatorNamedAlike();
+    findLaunch.mockReturnValue({
+      platform: "ios",
+      device: IPHONE_FLUTTER_ECID,
+      vmServiceUriWs: "ws://127.0.0.1:1/ws",
+      pid: 50050,
+      recordedAt: 1,
+    });
+    mockProcesses(["50050     1 fvm flutter run --debug"]);
+    await ios().killStale({ kind: "device", device: IPHONE_FLUTTER_ECID });
+    expect(killedPids()).toEqual([50050]);
+  });
+
+  it("reports a no-match as an outcome, not a failure", async () => {
+    mockDiscovery("device");
+    mockProcesses([
+      "11668 10348 /Users/dev/dartvm /Users/dev/flutter_tools.snapshot daemon",
+    ]);
+    const killed = await ios().killStale({
+      kind: "device",
+      device: IPHONE_FLUTTER_ECID,
+    });
+    expect(killedPids()).toEqual([]);
+    expect(killed.flutterRun.code).toBe(1);
+  });
+
+  it("declares that its teardown cannot be confined without a device", () => {
+    expect(ios().killStaleScope).toBe("device");
   });
 });
 

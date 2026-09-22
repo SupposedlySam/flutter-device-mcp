@@ -66,7 +66,8 @@ only — real-app verification is welcome too.**
   same daemon instead of a slow rebuild-and-redeploy loop.
 - **One brain, two faces.** The MCP server and the CLI are thin translation layers
   over a single shared command core. Every guardrail —
-  **one-deploy-at-a-time** (kills stale drivers before installing),
+  **one-deploy-at-a-time-PER-DEVICE** (kills the stale drivers holding the device
+  being deployed to, and leaves another device's session running),
   **disk-full recovery** (uninstall + retry the install once on `ENOSPC`),
   **stale-device-pin self-heal**, and **VM-URI capture** — lives in the core and
   runs identically whether an AI agent calls a tool or a human runs a command.
@@ -281,7 +282,7 @@ Commands:
 | `build` | Build the app package (`--profile`, `--debug`, `--target`, `--install`, `--run`) |
 | `deploy` | Install + launch, capture the VM Service URI (**the key command**) |
 | `uninstall` | Remove the app from the device |
-| `kill-stale` | Kill stale launch/driver processes holding the device lock |
+| `kill-stale` | Kill the stale launch/driver processes holding **this device's** lock (`--device-udid` to aim it, `--all-devices` for the host-wide hammer) |
 | `terminate` | Force-quit the app (mobile) |
 | `background` | Send the app to the background without killing it (mobile) |
 | `foreground` | Bring the app back to the foreground (mobile) |
@@ -338,10 +339,10 @@ var — it came from.
 | `flutter_info` | Device + environment status and resolved config with provenance |
 | `flutter_setup` | Prepare the device for development |
 | `flutter_build` | Build the app package. `mode` picks release/profile/debug — reach for `profile` when measuring, since it is AOT-timed *and* keeps the VM service open. `dart_define` passes compile-time constants. macOS: `{supported:false}` — building/signing an arbitrary desktop app is out of scope |
-| `flutter_deploy` | **Install + launch through a pty and return the captured `ws://…/ws` VM Service URI** to hand to a driver. Runs the guardrails: kills stale drivers first, recovers from `ENOSPC`, records the launch for hot reload/restart, and probes whether the build is Marionette-drivable. macOS: stages + launches a prebuilt signed `.app` (`app_path`/`app_url`); no VM Service URI exists there |
+| `flutter_deploy` | **Install + launch through a pty and return the captured `ws://…/ws` VM Service URI** to hand to a driver. Runs the guardrails: kills the stale drivers holding **the device it is deploying to** first (a session on another device survives), recovers from `ENOSPC`, records the launch for hot reload/restart, and probes whether the build is Marionette-drivable. macOS: stages + launches a prebuilt signed `.app` (`app_path`/`app_url`); no VM Service URI exists there |
 | `flutter_open_url` | **Open a URL on the device — the deep-link driver.** Drives custom schemes (`myapp://…`) and `https://…` App Links / universal links through the real OS plumbing, so intent-filters and domain associations are actually exercised. Android + Apple **simulators**; a physical iPhone/Apple TV reports `{supported:false}` because Apple provides no url-open verb — see [Deep links](#deep-links-flutter_open_url) |
 | `flutter_uninstall` | Remove the app from the device |
-| `flutter_kill_stale` | Kill stale launch/driver processes holding the device lock |
+| `flutter_kill_stale` | Kill leftover launch processes. **iOS/Android: for ONE device** — the resolved target, or the one `device_udid` names — the `flutter run` driver whose process tree holds it, plus its children; another device's session is left running, and a driver that can't be tied to a device is reported with its pid rather than killed. **Tizen/webOS/tvOS/macOS: platform-wide** (`flutter-tizen`, `ares-launch`/`flutter-webos`, `flutter-tvos` and their children, or the staged macOS process) — those names can't belong to another platform, so no device is needed and the response says `scope: platform-wide`. `all_devices: true` is the iOS/Android opt-in hammer. With nothing attached on iOS/Android it kills nothing and says why. See [Teardown scope](#teardown-scope-one-deploy-at-a-time-per-device) |
 | `flutter_hot_reload` | Real hot reload, **confirmed against the flutter tool's own acknowledgement in the launch log** before it is reported — not merely that the keystroke was written. Falls back to a weaker VM-service reload when unconfirmed or when no control channel exists |
 | `flutter_hot_restart` | Hot restart (re-run `main()`), confirmed the same way. `confirmed` in the response is `true` (seen), `false` (window passed, nothing seen — reported as `success:false`, since there's no VM-service equivalent to fall back to), or absent (no launch log to watch — `success:true` but the note says UNVERIFIED). Absent means neither of the other two, not "probably fine" |
 | `flutter_screenshot` | Capture the screen. macOS: window-targeted, never full-desktop |
@@ -390,6 +391,65 @@ at screenshot-read device pixels landed on the intended tab; iOS's key/pointer
 verbs returned `{supported:false}`; Tizen's pointer move returned
 `{supported:false}`, pointing at the key verb. The macOS and tvOS rows come
 from the recorded platform model rather than a verified session, there too.
+
+## Teardown scope: one deploy at a time, per device
+
+Every mobile session on a host is a `flutter run`, so a command-line match
+(`pkill -f "flutter run --debug"`) cannot tell a wedged session on the device you
+are deploying to from a healthy one somebody is using on another device. On a Mac
+with a phone and an emulator attached, a deploy aimed at the emulator killed the
+phone's session — and `device_udid`, which exists precisely to choose between two
+targets, did nothing to protect the one it did not choose.
+
+So a teardown attributes each driver PROCESS to a device instead, strongest
+evidence first:
+
+1. **a pid this server recorded for the device at launch** — ownership, not inference;
+2. **the driver's own `-d`/`--device-id` argument**, matched against every id that
+   names that device *and only that device*;
+3. **any process in its subtree naming the device** — a live Android session keeps
+   an `adb -s <serial> shell -x logcat` child, so a session launched with no `-d`
+   is still attributable;
+4. **the target being the only device attached** — the one-device host, where a
+   `flutter run` with no `-d` cannot be on anything else.
+
+A driver none of those attribute is **reported, not killed**: the response names
+its pid and what could not be determined. That is the deliberate trade — killing
+a process nothing has tied to the device is the defect this replaced, and a
+silent no-op would be the other way to break a deploy.
+
+**An id is only an identity when it is unique.** A physical iPhone's default name
+is `iPhone` and `flutter run -d` accepts a name, so a simulator called
+"iPhone 16 Pro" would otherwise take the phone's session down with it. Two
+emulators booted from one AVD image report identical `model`/`product`. Any id two
+attached devices answer to decides nothing and is reported as ambiguous.
+
+**Which platforms are device-scoped:** iOS and Android. Tizen, webOS, tvOS and
+macOS are **platform-wide** — their drivers are named after their own toolchain
+(`flutter-tizen`, `ares-launch`, `flutter-webos`, `flutter-tvos`) or identified by
+process name (macOS), so they cannot belong to another platform and one target is
+modelled. Those still use `pkill` on their own names (Tizen and webOS) or a
+subtree kill from them (tvOS) — the property this establishes is "no `pkill` on
+the `flutter run` platforms", not "no `pkill` anywhere".
+
+**Order.** A device-scoped teardown has to resolve the device first, so if
+resolution fails (nothing attached, the bridge wedged) the teardown does not run
+and a driver holding the device survives a failed deploy — aim
+`flutter_kill_stale` at it deliberately. A platform-wide teardown has no such
+dependency, so it runs BEFORE discovery, where a wedged `flutter-tizen` may be
+the reason `sdb devices` answers wrongly at all.
+
+**A failed scan is not an empty one.** If the process table cannot be read,
+nothing is signalled and the exit code is `2` — distinct from `1` ("nothing of
+this kind belonged to this device"), so an outage never reads as a clean host.
+
+**Launch records follow the same scope.** The deploy records each launch
+(platform + device + URI + control FIFO); `flutter_kill_stale` removes the FIFO
+and clears the record only for the device it tore down, so another device's
+daemon keeps its record and its hot reload. With TWO launches live and no
+`device` named, the hot tools report the ambiguity and the device list instead of
+picking the most recent one — a reload that silently drove the wrong device reads
+as a reload that did nothing.
 
 ## Deep links (`flutter_open_url`)
 

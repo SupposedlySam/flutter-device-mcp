@@ -86,6 +86,7 @@ import {
 import { RecordResult } from "../recording.js";
 import { logger } from "../logger.js";
 import { parseVmServiceUri } from "../vmServiceUri.js";
+import { killScopedLaunchDrivers } from "../killStaleScope.js";
 import {
   parseDevicectlAppleTvs,
   parseTvosSimulators,
@@ -106,6 +107,8 @@ import {
   AppLifecycle,
   DeviceTargetPreference,
   InstallOptions,
+  KillStaleScope,
+  KillStaleScopeKind,
   PlatformAdapter,
 } from "./platformAdapter.js";
 
@@ -155,8 +158,39 @@ export interface TvosAdapterConfig {
   preBuild?: string[];
 }
 
+/**
+ * Command lines that identify a tvOS launch driver.
+ *
+ * `flutter-tvos` names the tvOS toolchain specifically, which is what keeps a
+ * tvOS teardown off an iPhone/Android `flutter run` on the same host. It covers
+ * `flutter-tvos run` and the PATH-guarded wrapper around it; the Dart snapshot
+ * and compiler underneath are reached as their children, never by name.
+ */
+export const TVOS_RUN_DRIVER_PATTERNS: readonly RegExp[] = [/flutter-tvos/];
+
+/**
+ * A Dart `flutter_tools … run` snapshot is REPORTED, never killed, by the tvOS
+ * teardown.
+ *
+ * The snapshot under a tvOS run is torn down as a child of the pattern above.
+ * One whose parent is already gone is indistinguishable from an iPhone's or an
+ * Android phone's session — matching it by name is how a tvOS deploy used to
+ * kill those — so an orphan can only be named, which at least tells a caller
+ * what may still be holding the device.
+ */
+const TVOS_REPORT_ONLY_PATTERNS: readonly RegExp[] = [
+  /flutter_tools(?:\.snapshot)?\s+run(?:\s|$)/,
+];
+
 export class TvosAdapter implements PlatformAdapter {
   readonly platform: Platform = "tvos";
+
+  /**
+   * `flutter-tvos` names this toolchain and no other, and one Apple TV is
+   * modelled, so the teardown identifies its own processes without a device —
+   * see {@link killStale} for why device attribution is not used here.
+   */
+  readonly killStaleScope: KillStaleScopeKind = "platform";
 
   /** Cached input controller so its selected mode survives across tool calls. */
   private inputController: InputController | undefined;
@@ -794,25 +828,32 @@ export class TvosAdapter implements PlatformAdapter {
   }
 
   /**
-   * Kill leftover launch drivers that would wedge a subsequent deploy: the
-   * `flutter-tvos run` daemon (matched by the `flutter-tvos` substring, which
-   * covers `flutter-tvos run`), the Dart `flutter_tools` snapshot that daemon
-   * runs, and the Dart `frontend_server`. Mirrors the Tizen/iOS "one deploy at a
-   * time" guardrail — a live run daemon holds the CoreDevice tunnel forward and
-   * the device lock.
+   * Kill the tvOS launch driver — the `flutter-tvos run` daemon — together with
+   * its children.
+   *
+   * The children are how the Dart `flutter_tools` snapshot and `frontend_server`
+   * get torn down now. They used to be matched by name, which on a Mac that also
+   * drives an iPhone and an Android phone meant a tvOS deploy killed THEIR
+   * sessions (every `flutter run` is a `flutter_tools` snapshot) and the IDE's
+   * flutter daemon and compiler besides. `flutter-tvos` names this toolchain and
+   * nothing else, so matching that and walking down from it confines the
+   * teardown to tvOS.
+   *
+   * Not scoped to one Apple TV: a single tvOS target is modelled here, and the
+   * `-d` value a `flutter-tvos run` carries is not necessarily the id discovery
+   * resolves, so device attribution could refuse to kill the very session it
+   * exists to clear. A second Apple TV on one host is the case this would have
+   * to answer first.
    */
-  async killStale(): Promise<Record<string, CommandResult>> {
-    const flutterTvos = await runShell(`pkill -f ${quote("flutter-tvos")}`, {
-      timeoutMs: 10000,
+  async killStale(
+    _scope: KillStaleScope
+  ): Promise<Record<string, CommandResult>> {
+    return killScopedLaunchDrivers({
+      driverPatterns: TVOS_RUN_DRIVER_PATTERNS,
+      driverKey: "flutterTvos",
+      reportOnlyPatterns: TVOS_REPORT_ONLY_PATTERNS,
+      deviceLabel: "tvOS",
     });
-    const flutterTools = await runShell(`pkill -f ${quote("flutter_tools")}`, {
-      timeoutMs: 10000,
-    });
-    const frontendServer = await runShell(
-      `pkill -f ${quote("frontend_server")}`,
-      { timeoutMs: 10000 }
-    );
-    return { flutterTvos, flutterTools, frontendServer };
   }
 
   /**

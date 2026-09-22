@@ -20,6 +20,8 @@ jest.unstable_mockModule("../src/launchRegistry.js", () => ({
   clearLaunch: jest.fn(),
   clearLaunches: jest.fn(),
   findLaunch: jest.fn(() => undefined),
+  // CommandCore's hot tools go through resolveLaunch; nothing is recorded here.
+  resolveLaunch: jest.fn(() => ({ kind: "none" })),
   readRecords: jest.fn(() => []),
 }));
 
@@ -46,6 +48,8 @@ const PINNED = "emulator-5554";
 
 /** Everything the core handed down that carries a device preference. */
 interface Seen {
+  /** The teardown SCOPE each killStale call was handed (not just the pin). */
+  killStale: unknown[];
   discover: ({ udid?: string; kind?: string } | undefined)[];
   input: ({ udid?: string } | undefined)[];
   screenshot: (string | undefined)[];
@@ -60,6 +64,7 @@ interface Seen {
  */
 function fakeAdapter(inputWarning?: string) {
   const seen: Seen = {
+    killStale: [],
     discover: [],
     input: [],
     screenshot: [],
@@ -69,6 +74,9 @@ function fakeAdapter(inputWarning?: string) {
   const adapter = {
     platform: "android",
     appId: "com.example.exampleapp",
+    // Android's teardown is device-scoped, so the deploy resolves BEFORE it
+    // kills; the fake declares the same kind so it takes the same path.
+    killStaleScope: "device" as const,
     seen,
     async discoverDevice(preference?: { udid?: string; kind?: string }) {
       seen.discover.push(preference);
@@ -88,7 +96,8 @@ function fakeAdapter(inputWarning?: string) {
     async uninstall() {
       return okResult;
     },
-    async killStale() {
+    async killStale(scope: unknown) {
+      seen.killStale.push(scope);
       return {};
     },
     async screenshot(opts: { deviceUdid?: string }) {
@@ -172,6 +181,31 @@ describe("device_udid reaches discoverDevice from every device-addressing tool",
     const adapter = fakeAdapter();
     await coreFor(adapter).deploy({ platform: "android", device_udid: PINNED });
     expect(adapter.seen.discover[0]).toMatchObject({ udid: PINNED });
+  });
+
+  it("kill_stale aims the TEARDOWN at the pin, not just discovery", async () => {
+    // The pin scopes what gets KILLED here, so a handler that forwarded it to
+    // discovery and dropped it on the way to the teardown would resolve one
+    // device and tear down whatever the adapter felt like — the defect this
+    // scoping exists to remove, reintroduced one layer down from the schema.
+    const adapter = fakeAdapter();
+    await coreFor(adapter).killStale({ platform: "android", device_udid: PINNED });
+    expect(adapter.seen.discover).toEqual([{ udid: PINNED }]);
+    expect(adapter.seen.killStale).toEqual([{ kind: "device", device: PINNED }]);
+  });
+
+  it("kill_stale widens to every device ONLY when all_devices asks for it", async () => {
+    const adapter = fakeAdapter();
+    await coreFor(adapter).killStale({ platform: "android", all_devices: true });
+    // The host-wide hammer skips discovery entirely: there is no device to find.
+    expect(adapter.seen.discover).toEqual([]);
+    expect(adapter.seen.killStale).toEqual([{ kind: "all-devices" }]);
+
+    const scoped = fakeAdapter();
+    await coreFor(scoped).killStale({ platform: "android" });
+    expect(scoped.seen.killStale).toEqual([
+      { kind: "device", device: "default-device" },
+    ]);
   });
 
   it("geometry", async () => {

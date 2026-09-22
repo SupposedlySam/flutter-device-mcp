@@ -259,8 +259,12 @@ describe("TizenAdapter delegates to the shared shell (flutter-tizen)", () => {
     );
   });
 
+  // Tizen's teardown is PLATFORM-WIDE (`flutter-tizen` names this toolchain and
+  // no other), so the scope it is handed is all-devices and it still uses pkill
+  // on that name — unlike the mobile adapters, whose sessions are all the same
+  // `flutter run` and can only be told apart by device.
   it("killStale pkills the flutter-tizen driver process", async () => {
-    const killed = await tizen().killStale();
+    const killed = await tizen().killStale({ kind: "all-devices" });
     expect(runShell).toHaveBeenCalledWith("pkill -f 'flutter-tizen'", {
       timeoutMs: 10000,
     });
@@ -597,7 +601,7 @@ describe("WebOSAdapter delegates to ares/webos-build via the shared shell", () =
   });
 
   it("killStale pkills the ares-launch + flutter-webos drivers", async () => {
-    await webos().killStale();
+    await webos().killStale({ kind: "all-devices" });
     const patterns = runShell.mock.calls.map((c) => c[0]);
     expect(patterns).toContain("pkill -f 'ares-launch'");
     expect(patterns).toContain("pkill -f 'flutter-webos'");

@@ -69,6 +69,20 @@ jest.unstable_mockModule("../src/recordingRun.js", () => ({
   runSequential: jest.fn(),
 }));
 
+// The adapter reads the launch registry at its DEFAULT path — a real file on
+// this developer's machine, holding the record of any live session. A test must
+// neither read nor write it, so the module is stubbed and the pid injected.
+const findLaunch = jest.fn<(platform: string, device?: string) => unknown>();
+
+jest.unstable_mockModule("../src/launchRegistry.js", () => ({
+  findLaunch,
+  recordLaunch: jest.fn(),
+  readRecords: jest.fn(() => []),
+  clearLaunch: jest.fn(),
+  clearLaunches: jest.fn(),
+  defaultRegistryPath: () => "/tmp/never-used-by-this-suite.json",
+}));
+
 const okResult = {
   code: 0,
   stdout: "",
@@ -124,6 +138,8 @@ beforeEach(() => {
     path.join(os.tmpdir(), "android-adapter-state-")
   );
   runShell.mockReset();
+  findLaunch.mockReset();
+  findLaunch.mockReturnValue(undefined);
   neutralLaunchAndCaptureUri.mockReset();
   allocateControlChannel.mockReset();
   runShell.mockResolvedValue(okResult);
@@ -484,25 +500,190 @@ describe("AndroidAdapter out-of-storage recovery (fires at LAUNCH, not install)"
   });
 });
 
-describe("AndroidAdapter.killStale", () => {
-  it("pkills BOTH flutter run modes and the dart frontend server", async () => {
-    const killed = await android().killStale();
-    // Matches both modes this adapter can spawn so a stale DEBUG deploy is also
-    // torn down (a --profile-only match would leak a wedged debug session and
-    // break the "one deploy at a time" guardrail for debug launches).
-    expect(runShell).toHaveBeenCalledWith("pkill -f 'flutter run --profile'", {
-      timeoutMs: 10000,
+describe("AndroidAdapter.killStale (device-scoped teardown)", () => {
+  // Two Android targets attached at once — the shape that made flutter_deploy
+  // unusable: a `pkill -f "flutter run --debug"` aimed at the emulator killed the
+  // session on the physical phone, which is indistinguishable by command line.
+  const PHONE = "988a1b413950494c49";
+  const EMULATOR = "emulator-5554";
+  const OTHER_EMULATOR = "emulator-5556";
+  const PS_ROWS = [
+    `86630     1 /usr/bin/python3 /pkg/scripts/pty-control-forward.py /tmp/c.fifo fvm flutter run --debug -d '${PHONE}'`,
+    `86631 86630 fvm flutter run --debug -d ${PHONE}`,
+    `86633 86631 /Users/dev/dartvm /Users/dev/flutter_tools.snapshot run --debug -d ${PHONE}`,
+    "86699 86633 /Users/dev/dartaotruntime /Users/dev/frontend_server_aot.dart.snapshot --sdk-root /x/",
+    `86701 86633 /Users/dev/adb -s ${PHONE} shell -x logcat -v time`,
+    `90010     1 /usr/bin/python3 /pkg/scripts/pty-control-forward.py /tmp/e.fifo fvm flutter run --debug -d '${EMULATOR}'`,
+    `90011 90010 fvm flutter run --debug -d ${EMULATOR}`,
+    `90013 90011 /Users/dev/dartvm /Users/dev/flutter_tools.snapshot run --debug -d ${EMULATOR}`,
+    "90080 90013 /Users/dev/dartaotruntime /Users/dev/frontend_server_aot.dart.snapshot --sdk-root /x/",
+  ];
+
+  const TWO_DEVICE_ADB =
+    "List of devices attached\n" +
+    `${PHONE}  device product:panther model:Pixel_7 transport_id:3\n` +
+    `${EMULATOR}  device product:sdk_gphone64 model:sdk_gphone64_arm64 transport_id:4\n`;
+
+  /** Mock the two ps reads (table + reconciliation) and the device enumeration. */
+  function mockHost(opts: { rows?: string[]; adb?: string } = {}) {
+    const rows = opts.rows ?? PS_ROWS;
+    const psTable = rows.join("\n") + "\n";
+    const psPairs =
+      rows
+        .map((r) => r.trim().split(/\s+/).slice(0, 2).join(" "))
+        .join("\n") + "\n";
+    runShell.mockImplementation(async (cmd: string) => {
+      if (cmd.startsWith("ps -Awwo pid=,ppid=,command=")) {
+        return { ...okResult, stdout: psTable, combined: psTable };
+      }
+      if (cmd.startsWith("ps -Awwo pid=,ppid=")) {
+        return { ...okResult, stdout: psPairs, combined: psPairs };
+      }
+      if (cmd.includes("adb devices")) {
+        return { ...okResult, stdout: opts.adb ?? TWO_DEVICE_ADB };
+      }
+      return okResult;
     });
-    expect(runShell).toHaveBeenCalledWith("pkill -f 'flutter run --debug'", {
-      timeoutMs: 10000,
+  }
+
+  /** The pids the `kill` invocation actually named, exactly. */
+  function killedPids(): number[] {
+    const kill = runShell.mock.calls
+      .map((c) => c[0] as string)
+      .find((c) => c.startsWith("kill "));
+    if (!kill) return [];
+    return kill
+      .replace(/^kill\s+/, "")
+      .replace(/2>&1$/, "")
+      .trim()
+      .split(/\s+/)
+      .map(Number)
+      .sort((a, b) => a - b);
+  }
+
+  it("kills the EMULATOR's session and leaves the phone's running", async () => {
+    mockHost();
+    const killed = await android().killStale({
+      kind: "device",
+      device: EMULATOR,
     });
-    expect(runShell).toHaveBeenCalledWith("pkill -f 'frontend_server'", {
-      timeoutMs: 10000,
+    expect(killedPids()).toEqual([90010, 90011, 90013, 90080]);
+    expect(killed.flutterRun.combined).toContain(
+      "Left running, on another device"
+    );
+  });
+
+  it("kills the PHONE's session and leaves the emulator's running", async () => {
+    mockHost();
+    await android().killStale({ kind: "device", device: PHONE });
+    expect(killedPids()).toEqual([86630, 86631, 86633, 86699, 86701]);
+  });
+
+  it("issues NO pkill — a command-line pattern cannot tell the two sessions apart", async () => {
+    mockHost();
+    await android().killStale({ kind: "device", device: EMULATOR });
+    expect(
+      runShell.mock.calls.some((c) => (c[0] as string).includes("pkill"))
+    ).toBe(false);
+  });
+
+  it("treats a UNIQUE model name as the same device (`flutter run -d Pixel_7`)", async () => {
+    mockHost({ rows: ["70010     1 fvm flutter run --debug -d Pixel_7"] });
+    await android().killStale({ kind: "device", device: PHONE });
+    expect(killedPids()).toEqual([70010]);
+  });
+
+  it("does NOT treat a model name TWO emulators share as an identity", async () => {
+    // Two emulators booted from one AVD image report identical model/product, so
+    // a teardown scoped to -5554 would otherwise kill a healthy -5556 session.
+    mockHost({
+      rows: ["70020     1 fvm flutter run --debug -d sdk_gphone64_arm64"],
+      adb:
+        "List of devices attached\n" +
+        `${EMULATOR}  device product:sdk_gphone64 model:sdk_gphone64_arm64 transport_id:4\n` +
+        `${OTHER_EMULATOR}  device product:sdk_gphone64 model:sdk_gphone64_arm64 transport_id:5\n`,
     });
-    // Reported under generic keys the server's summarizeKillStale handles.
-    expect(killed.flutterRun).toBeDefined();
-    expect(killed.flutterRunDebug).toBeDefined();
-    expect(killed.frontendServer).toBeDefined();
+    const killed = await android().killStale({
+      kind: "device",
+      device: EMULATOR,
+    });
+    expect(killedPids()).toEqual([]);
+    expect(killed.flutterRun.combined).toContain("could not be attributed");
+  });
+
+  it("tears down OUR OWN recorded session even when its argv names no device", async () => {
+    // The registry knows the pid this MCP launched for the device; a session
+    // with no `-d` and no adb child is otherwise unattributable on a two-device
+    // host, and the deploy would proceed into a held lock.
+    findLaunch.mockReturnValue({
+      platform: "android",
+      device: EMULATOR,
+      vmServiceUriWs: "ws://127.0.0.1:1/ws",
+      pid: 70030,
+      recordedAt: 1,
+    });
+    mockHost({ rows: ["70030     1 fvm flutter run --debug"] });
+    await android().killStale({ kind: "device", device: EMULATOR });
+    expect(killedPids()).toEqual([70030]);
+    expect(findLaunch).toHaveBeenCalledWith("android", EMULATOR);
+  });
+
+  it("does not attribute a recorded pid from ANOTHER device to this one", async () => {
+    // findLaunch is keyed by platform+device; asking for the emulator must not
+    // return (or kill) the phone's recorded session.
+    findLaunch.mockReturnValue(undefined);
+    mockHost({ rows: ["70040     1 fvm flutter run --debug"] });
+    const killed = await android().killStale({
+      kind: "device",
+      device: EMULATOR,
+    });
+    expect(killedPids()).toEqual([]);
+    expect(killed.flutterRun.combined).toContain("could not be attributed");
+  });
+
+  it("reports a no-match as an outcome, not a failure, and signals nothing", async () => {
+    mockHost({
+      rows: [
+        "11668 10348 /Users/dev/dartvm /Users/dev/flutter_tools.snapshot daemon",
+      ],
+    });
+    const killed = await android().killStale({
+      kind: "device",
+      device: EMULATOR,
+    });
+    expect(killedPids()).toEqual([]);
+    expect(killed.flutterRun.code).toBe(1);
+    expect(killed.flutterRun.combined).toContain("No launch driver found");
+  });
+
+  it("kills BOTH devices' sessions only for an explicit all-devices scope", async () => {
+    mockHost();
+    await android().killStale({ kind: "all-devices" });
+    expect(killedPids()).toEqual([
+      86630, 86631, 86633, 86699, 86701, 90010, 90011, 90013, 90080,
+    ]);
+  });
+
+  it("sweeps an ORPHANED compiler only under the all-devices hammer", async () => {
+    // The old host-wide `pkill -f frontend_server` took these; a device-scoped
+    // teardown must not (a compiler holds no device lock, and it may be the
+    // IDE's), so the hammer is the one mode that keeps that behavior.
+    const rows = [
+      `90011     1 fvm flutter run --debug -d ${EMULATOR}`,
+      "11670 10348 /Users/dev/dartaotruntime /Users/dev/frontend_server_aot.dart.snapshot --sdk-root /x/",
+    ];
+    mockHost({ rows });
+    await android().killStale({ kind: "device", device: EMULATOR });
+    expect(killedPids()).toEqual([90011]);
+
+    runShell.mockReset();
+    mockHost({ rows });
+    await android().killStale({ kind: "all-devices" });
+    expect(killedPids()).toEqual([11670, 90011]);
+  });
+
+  it("declares that its teardown cannot be confined without a device", () => {
+    expect(android().killStaleScope).toBe("device");
   });
 });
 

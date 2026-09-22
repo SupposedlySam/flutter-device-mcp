@@ -44,6 +44,42 @@ export interface DeviceTargetPreference {
   udid?: string;
 }
 
+/**
+ * Which device a {@link PlatformAdapter.killStale} teardown is allowed to touch.
+ *
+ * A DISCRIMINATED UNION, not an object with an optional device, because the two
+ * cases are opposites and the difference must be impossible to express by
+ * omission: `{ device?: string }` made "kill only this device" and "kill every
+ * session on the host" one keystroke apart, and a caller who left the field out
+ * got the destructive one silently. Every adapter has to read `kind`, and a
+ * caller has to say which it means.
+ *
+ * Separate from {@link DeviceTargetPreference} because this is not a selection
+ * request — the device is already resolved by the time a teardown runs, and
+ * re-resolving it could pick a DIFFERENT device than the one being installed to,
+ * which is exactly the mismatch that let a deploy kill a bystander session.
+ */
+export type KillStaleScope =
+  | { kind: "device"; device: string }
+  | { kind: "all-devices" };
+
+/**
+ * Whether an adapter's {@link PlatformAdapter.killStale} can confine itself to
+ * one device.
+ *
+ * `device` — its drivers are shared across devices (iOS/Android: every session
+ * is a `flutter run` on this host), so ONLY the device distinguishes them and a
+ * teardown without one could not help killing a bystander's session.
+ *
+ * `platform` — its drivers are named after its own toolchain (`flutter-tizen`,
+ * `ares-launch`, `flutter-webos`, `flutter-tvos`) or identified another way
+ * entirely (macOS, by process name), so they cannot belong to another platform
+ * and one target is modelled. Such a teardown needs no device — which also
+ * means it can run BEFORE device discovery, where a wedged driver may be the
+ * reason discovery is failing.
+ */
+export type KillStaleScopeKind = "device" | "platform";
+
 /** Options accepted by {@link PlatformAdapter.install}. */
 export interface InstallOptions {
   /** Install only; do not launch. (Present for parity with future modes.) */
@@ -260,8 +296,38 @@ export interface PlatformAdapter {
   /** Uninstall the app to free device space / reset state. */
   uninstall(device: string, appId: string): Promise<CommandResult>;
 
-  /** Kill leftover driver processes that would wedge the device lock. */
-  killStale(): Promise<Record<string, CommandResult>>;
+  /**
+   * Kill leftover driver processes that would wedge the device lock.
+   *
+   * A `scope` of `{ kind: "device", device }` is the already-resolved target the
+   * caller is about to deploy to; an adapter whose {@link killStaleScope} is
+   * `"device"` MUST confine the teardown to it. A host with a phone and an
+   * emulator attached runs two indistinguishable `flutter run` command lines, so
+   * a teardown matched on the command string alone kills whichever session
+   * someone else is using — which is why `device_udid` could select a target but
+   * not protect the other one.
+   *
+   * `{ kind: "all-devices" }` is the deliberate host-wide hammer behind
+   * `flutter_kill_stale`'s `all_devices`, and the only mode that sweeps
+   * `frontend_server` processes belonging to nothing it killed.
+   *
+   * The parameter is declared by EVERY adapter, even the ones that ignore it
+   * (`_scope`), and pinned by a type-level check in killStaleContract.ts: a
+   * zero-parameter or optional-parameter implementation satisfies this signature
+   * structurally, which is how a "required argument" guardrail here was worth
+   * nothing on its own.
+   */
+  killStale(scope: KillStaleScope): Promise<Record<string, CommandResult>>;
+
+  /**
+   * Whether {@link killStale} can confine itself to one device. REQUIRED, so a
+   * new adapter cannot omit it and be treated as either kind by accident — and
+   * so the server reports the scope it actually applied rather than the one it
+   * asked for. A Tizen teardown reporting `scope: <device>` while killing both
+   * TVs is the same report-one-thing-about-another failure this change exists to
+   * fix.
+   */
+  readonly killStaleScope: KillStaleScopeKind;
 
   /**
    * OPTIONAL pre-connect environment diagnosis. Returns an actionable message

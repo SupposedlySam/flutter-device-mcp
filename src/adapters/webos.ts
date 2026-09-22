@@ -41,7 +41,12 @@ import {
   Platform,
 } from "../types.js";
 import { WebosInputController } from "../input/webosInputController.js";
-import { InstallOptions, PlatformAdapter } from "./platformAdapter.js";
+import {
+  InstallOptions,
+  KillStaleScope,
+  KillStaleScopeKind,
+  PlatformAdapter,
+} from "./platformAdapter.js";
 import { ScreenshotResult } from "../screenshot.js";
 import { RecordResult } from "../recording.js";
 import { resolveWebosDeviceTarget } from "../webos/webosDeviceTarget.js";
@@ -131,6 +136,12 @@ export interface WebosAdapterConfig {
 
 export class WebOSAdapter implements PlatformAdapter {
   readonly platform: Platform = "webos";
+
+  /**
+   * `ares-launch`/`flutter-webos` name this toolchain and no other, and one
+   * webOS target is modelled, so the teardown needs no device.
+   */
+  readonly killStaleScope: KillStaleScopeKind = "platform";
 
   /** Cached input controller so its selected mode survives across tool calls. */
   private inputController: InputController | undefined;
@@ -347,8 +358,14 @@ export class WebOSAdapter implements PlatformAdapter {
    * Kill leftover webOS driver processes that would wedge a concurrent
    * build/deploy — the ares launch (held open for the VM service) and the
    * flutter-webos runner. Mirrors the Tizen `pkill` cleanup.
+   *
+   * Both patterns name the webOS toolchain, so they cannot reach a mobile or
+   * tvOS `flutter run` on the same host; one webOS target is modelled, so no
+   * device scope is threaded here.
    */
-  async killStale(): Promise<Record<string, CommandResult>> {
+  async killStale(
+    _scope: KillStaleScope
+  ): Promise<Record<string, CommandResult>> {
     const aresLaunch = await runShell(`pkill -f ${quote("ares-launch")}`, {
       timeoutMs: 10000,
     });

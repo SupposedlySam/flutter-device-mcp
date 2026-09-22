@@ -8,6 +8,7 @@ import {
   findLaunch,
   readRecords,
   recordLaunch,
+  resolveLaunch,
 } from "../src/launchRegistry.js";
 
 function tempStore(): string {
@@ -150,5 +151,114 @@ describe("launchRegistry", () => {
     spy.mockRestore();
     expect(readRecords(store)).toEqual([base]);
     expect(fs.readdirSync(dir).filter((f) => f.endsWith(".tmp"))).toEqual([]);
+  });
+});
+
+describe("resolveLaunch — two devices live at once", () => {
+  // Per-device teardown means a deploy no longer ends the other device's
+  // session, so two live daemons is the normal state rather than a rarity.
+  const emulator = {
+    platform: "android",
+    device: "emulator-5554",
+    vmServiceUriWs: "ws://127.0.0.1:1/ws",
+    recordedAt: 1000,
+  };
+  const phone = {
+    platform: "android",
+    device: "988a1b413950494c49",
+    vmServiceUriWs: "ws://127.0.0.1:2/ws",
+    recordedAt: 2000,
+  };
+
+  it("refuses to guess which of two live launches a caller meant", () => {
+    const store = tempStore();
+    recordLaunch(emulator, store);
+    recordLaunch(phone, store);
+    const lookup = resolveLaunch("android", undefined, store);
+    expect(lookup.kind).toBe("ambiguous");
+    if (lookup.kind !== "ambiguous") throw new Error("expected ambiguous");
+    expect(lookup.devices.sort()).toEqual([
+      "988a1b413950494c49",
+      "emulator-5554",
+    ]);
+    // findLaunch's own answer is the one that made this a coin toss: it returns
+    // the most recently recorded launch, which is not the caller's choice.
+    expect(findLaunch("android", undefined, store)?.device).toBe(
+      "988a1b413950494c49"
+    );
+  });
+
+  it("resolves the named device even while another is live", () => {
+    const store = tempStore();
+    recordLaunch(emulator, store);
+    recordLaunch(phone, store);
+    const lookup = resolveLaunch("android", "emulator-5554", store);
+    expect(lookup.kind).toBe("found");
+    if (lookup.kind !== "found") throw new Error("expected found");
+    expect(lookup.record.vmServiceUriWs).toBe("ws://127.0.0.1:1/ws");
+  });
+
+  it("resolves without a device when only one launch is live", () => {
+    const store = tempStore();
+    recordLaunch(emulator, store);
+    expect(resolveLaunch("android", undefined, store).kind).toBe("found");
+  });
+
+  it("reports none when nothing is recorded", () => {
+    expect(resolveLaunch("android", undefined, tempStore()).kind).toBe("none");
+  });
+});
+
+describe("launchRegistry concurrency", () => {
+  it("keeps every device's record when several are written in sequence", async () => {
+    // What this actually pins: the read-modify-write merges rather than
+    // replaces, so a live daemon never loses its record (and its hot reload)
+    // to a later deploy on another device.
+    //
+    // It does NOT witness the lock. Each write is synchronous, so two writes
+    // from THIS process cannot interleave however they are scheduled; the lock
+    // is for two MCP processes (two agents, two sessions) writing the same store,
+    // which this suite cannot create. The test below pins the part of the lock
+    // that is observable here — that an abandoned one is broken rather than
+    // stranding every later write.
+    const store = tempStore();
+    await Promise.all(
+      Array.from({ length: 8 }, (_, i) =>
+        Promise.resolve().then(() =>
+          recordLaunch(
+            {
+              platform: "android",
+              device: `device-${i}`,
+              vmServiceUriWs: `ws://127.0.0.1:${i}/ws`,
+              recordedAt: 1000 + i,
+            },
+            store
+          )
+        )
+      )
+    );
+    expect(readRecords(store).map((r) => r.device).sort()).toEqual(
+      Array.from({ length: 8 }, (_, i) => `device-${i}`).sort()
+    );
+  });
+
+  it("breaks an abandoned lock rather than stranding every later write", () => {
+    // A crashed writer leaves the lock directory behind; a store that waited on
+    // it forever would fail every deploy afterwards.
+    const store = tempStore();
+    fs.mkdirSync(`${store}.lock`);
+    const stale = new Date(Date.now() - 60_000);
+    fs.utimesSync(`${store}.lock`, stale, stale);
+    recordLaunch(
+      {
+        platform: "android",
+        device: "emulator-5554",
+        vmServiceUriWs: "ws://127.0.0.1:1/ws",
+        recordedAt: 1,
+      },
+      store
+    );
+    expect(findLaunch("android", "emulator-5554", store)).toBeDefined();
+    expect(fs.existsSync(`${store}.lock`)).toBe(false);
   });
 });

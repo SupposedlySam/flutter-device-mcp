@@ -31,6 +31,13 @@ jest.unstable_mockModule("../src/launchRegistry.js", () => ({
   clearLaunch: jest.fn(),
   clearLaunches: jest.fn(),
   findLaunch,
+  // CommandCore looks the launch up through resolveLaunch now (it reports two
+  // live launches as ambiguous rather than picking the newest). These suites
+  // drive a single recorded launch, so it wraps the same fixture.
+  resolveLaunch: (platform: string, device: string | undefined) => {
+    const record = findLaunch(platform, device);
+    return record ? { kind: "found", record } : { kind: "none" };
+  },
   readRecords: jest.fn(() => []),
 }));
 
@@ -76,6 +83,7 @@ function fakeAdapter(platform = "ios") {
   return {
     platform,
     appId: "com.example.exampleapp",
+    killStaleScope: "device" as const,
     async info() {
       return okResult;
     },
