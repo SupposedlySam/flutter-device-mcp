@@ -73,6 +73,22 @@ describe("defaultScreenshotPath", () => {
     expect(p).toContain("flutter-device-mcp-screenshot-ios-");
     expect(p.startsWith(os.tmpdir())).toBe(true);
   });
+
+  it("never hands two captures in the same millisecond the same file", () => {
+    // The name above claimed uniqueness and nothing checked it. With a
+    // millisecond stamp as the only discriminator, 1000 back-to-back calls
+    // produced 6 distinct paths, so two captures overwrote each other and one
+    // could report the other's picture as its own.
+    const paths = Array.from({ length: 1000 }, () => defaultScreenshotPath("macos"));
+    expect(new Set(paths).size).toBe(paths.length);
+  });
+
+  it("separates captures from different processes that share a temp dir", () => {
+    // Several MCP servers on one machine share os.tmpdir(), and two of them can
+    // build a path in the same millisecond. A same-process uniqueness check
+    // cannot see that, so the process id has to be part of the name.
+    expect(defaultScreenshotPath("android")).toContain(`-${process.pid}-`);
+  });
 });
 
 describe("readPngDimensions", () => {

@@ -27,6 +27,7 @@
  * and stat the output. `os.tmpdir()` gives the default output location when the
  * caller doesn't supply one.
  */
+import { randomUUID } from "crypto";
 import os from "os";
 import path from "path";
 import { quote } from "./cli.js";
@@ -116,12 +117,21 @@ export function readPngDimensions(
   return { width, height };
 }
 
-/** A default, predictable output path under the temp dir for one capture. */
+/**
+ * A default output path under the temp dir for one capture.
+ *
+ * The timestamp is for a human reading the directory; it cannot be the key.
+ * Captures land within the same millisecond routinely — back-to-back calls, or
+ * several servers on one machine sharing `os.tmpdir()` — and a shared path lets
+ * one capture overwrite another and report the other's picture as its own. The
+ * pid separates processes and the random suffix separates calls within one.
+ */
 export function defaultScreenshotPath(platform: string): string {
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const unique = `${process.pid}-${randomUUID().slice(0, 8)}`;
   return path.join(
     os.tmpdir(),
-    `flutter-device-mcp-screenshot-${platform}-${stamp}.png`
+    `flutter-device-mcp-screenshot-${platform}-${stamp}-${unique}.png`
   );
 }
 
