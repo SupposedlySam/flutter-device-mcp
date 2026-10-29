@@ -222,7 +222,7 @@ describe("classifyDeviceToken", () => {
       target: "SIM-UDID-1",
       devices: [
         { id: "SIM-UDID-1", aliases: ["iPhone 16 Pro"], available: true },
-        { id: "00008020-001A2D021AF3002E", aliases: ["iPhone"], available: true },
+        { id: "00008020-000000000000AAAA", aliases: ["iPhone"], available: true },
       ],
     });
     expect(classifyDeviceToken("iPhone", identity)).toBe("other");
@@ -368,9 +368,9 @@ describe("planScopedKill — a session that names no device (`flutter run` with 
       "80011 80010 /Users/dev/dartvm /Users/dev/flutter_tools.snapshot run --debug",
     ];
     const identity = buildDeviceIdentity({
-      target: "00008020-001A2D021AF3002E",
+      target: "00008020-000000000000AAAA",
       devices: [
-        { id: "00008020-001A2D021AF3002E", aliases: ["My iPhone"], available: true },
+        { id: "00008020-000000000000AAAA", aliases: ["My iPhone"], available: true },
         { id: "SIM-UDID-1", aliases: ["iPhone 16 Pro"], available: true },
       ],
     });
@@ -388,8 +388,8 @@ describe("planScopedKill — a session that names no device (`flutter run` with 
     // case is a silent regression — the deploy proceeds into a held lock.
     const iosNoDeviceArg = ["80020     1 fvm flutter run --debug"];
     const sole = buildDeviceIdentity({
-      target: "00008020-001A2D021AF3002E",
-      devices: [{ id: "00008020-001A2D021AF3002E", available: true }],
+      target: "00008020-000000000000AAAA",
+      devices: [{ id: "00008020-000000000000AAAA", available: true }],
     });
     const plan = planFor(table(iosNoDeviceArg), sole);
     expect(plan.pids).toEqual([80020]);

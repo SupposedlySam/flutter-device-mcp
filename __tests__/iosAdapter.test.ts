@@ -105,8 +105,8 @@ function iosWithEnvMode(launchMode: "debug" | "profile" | "release") {
 // A physical iPhone is addressed by TWO ids: devicectl reports its own UUID,
 // flutter reports the ECID. mockDiscovery("device") mirrors that so the flutter
 // id (target) and devicectl id (lifecycle) are distinct, matched by name.
-const IPHONE_DEVICECTL_ID = "0831CB2E-D597-5C19-9699-6DFA21324AC4";
-const IPHONE_FLUTTER_ECID = "00008020-001A2D021AF3002E";
+const IPHONE_DEVICECTL_ID = "E1E2E3E4-0000-4000-8000-000000000AC4";
+const IPHONE_FLUTTER_ECID = "00008020-000000000000AAAA";
 
 // The pid the app runs under in the fixture below.
 const APP_PID = 4231;
@@ -410,7 +410,7 @@ describe("IosAdapter.discoverDevice", () => {
   it("resolves a connected physical device via devicectl", async () => {
     mockDiscovery("device");
     const r = await ios().discoverDevice();
-    expect(r.target).toBe("00008020-001A2D021AF3002E");
+    expect(r.target).toBe("00008020-000000000000AAAA");
   });
 
   it("throws when nothing is connected or booted", async () => {

@@ -35,7 +35,7 @@ describe("parseFlutterTvosDevices", () => {
     },
     {
       name: "My iPhone",
-      id: "00008020-001A2D021AF3002E",
+      id: "00008020-000000000000AAAA",
       targetPlatform: "ios",
       emulator: false,
       sdk: "iOS 18.0 (22A...)",
@@ -71,7 +71,7 @@ describe("parseFlutterTvosDevices", () => {
     const devices = parseFlutterTvosDevices(MACHINE);
     expect(devices.some((d) => /iPhone/i.test(d.name ?? ""))).toBe(false);
     expect(
-      devices.some((d) => d.id === "00008020-001A2D021AF3002E")
+      devices.some((d) => d.id === "00008020-000000000000AAAA")
     ).toBe(false);
   });
 
@@ -120,7 +120,7 @@ describe("parseDevicectlAppleTvs", () => {
           },
         },
         {
-          identifier: "0831CB2E-D597-5C19-9699-6DFA21324AC4",
+          identifier: "E1E2E3E4-0000-4000-8000-000000000AC4",
           deviceProperties: { name: "iPhone" },
           connectionProperties: {
             pairingState: "paired",
@@ -150,7 +150,7 @@ describe("parseDevicectlAppleTvs", () => {
     const devices = parseDevicectlAppleTvs(DEVICECTL);
     expect(devices.some((d) => /iPhone/i.test(d.name ?? ""))).toBe(false);
     expect(
-      devices.some((d) => d.id === "0831CB2E-D597-5C19-9699-6DFA21324AC4")
+      devices.some((d) => d.id === "E1E2E3E4-0000-4000-8000-000000000AC4")
     ).toBe(false);
   });
 
@@ -319,7 +319,7 @@ describe("regression: tvOS resolver picks Apple TV, never iPhone/iPad", () => {
   const MACHINE = JSON.stringify([
     {
       name: "My iPhone",
-      id: "00008020-001A2D021AF3002E",
+      id: "00008020-000000000000AAAA",
       targetPlatform: "ios",
       emulator: false,
       sdk: "iOS 18.0",
@@ -340,7 +340,7 @@ describe("regression: tvOS resolver picks Apple TV, never iPhone/iPad", () => {
     const r = resolveTvosTarget(undefined, physical, []);
     expect(r).not.toBeNull();
     expect(r?.target).toBe("A1B2C3D4-5E6F-7A8B-9C0D-1E2F3A4B5C6D");
-    expect(r?.target).not.toBe("00008020-001A2D021AF3002E");
+    expect(r?.target).not.toBe("00008020-000000000000AAAA");
     expect(r?.name).toMatch(/Example Apple TV/i);
   });
 
@@ -348,7 +348,7 @@ describe("regression: tvOS resolver picks Apple TV, never iPhone/iPad", () => {
     const iphoneOnly = JSON.stringify([
       {
         name: "My iPhone",
-        id: "00008020-001A2D021AF3002E",
+        id: "00008020-000000000000AAAA",
         targetPlatform: "ios",
         emulator: false,
         sdk: "iOS 18.0",

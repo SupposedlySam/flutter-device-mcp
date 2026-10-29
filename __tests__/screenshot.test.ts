@@ -38,10 +38,10 @@ describe("buildPymobiledevice3ScreenshotCommand", () => {
       buildPymobiledevice3ScreenshotCommand(
         "pymobiledevice3",
         "/tmp/out.png",
-        "00008020-001A2D021AF3002E"
+        "00008020-000000000000AAAA"
       )
     ).toBe(
-      "'pymobiledevice3' developer dvt screenshot '/tmp/out.png' --udid '00008020-001A2D021AF3002E'"
+      "'pymobiledevice3' developer dvt screenshot '/tmp/out.png' --udid '00008020-000000000000AAAA'"
     );
   });
 

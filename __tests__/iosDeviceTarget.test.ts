@@ -85,7 +85,7 @@ describe("parseDevicectlDevices", () => {
     "Name                 Hostname     Identifier                             State        Model",
     "-------------------------------------------------------------------------------------------",
     "Example Apple TV   atv.local    A1B2C3D4-5E6F-7A8B-9C0D-1E2F3A4B5C6D   connected    Apple TV 4K (3rd generation) (AppleTV14,1)",
-    "iPhone               ip.local     0831CB2E-D597-5C19-9699-6DFA21324AC4   connected    iPhone XR (iPhone11,8)",
+    "iPhone               ip.local     E1E2E3E4-0000-4000-8000-000000000AC4   connected    iPhone XR (iPhone11,8)",
     "Old iPad             ipad.local   00008030-000000000000000A              disconnected iPad (iPad7,11)",
   ].join("\n");
 
@@ -100,7 +100,7 @@ describe("parseDevicectlDevices", () => {
   it("records the devicectl id and connection state per iPhone/iPad row", () => {
     const devices = parseDevicectlDevices(TABLE);
     const iphone = devices.find(
-      (d) => d.devicectlId === "0831CB2E-D597-5C19-9699-6DFA21324AC4"
+      (d) => d.devicectlId === "E1E2E3E4-0000-4000-8000-000000000AC4"
     );
     expect(iphone?.available).toBe(true);
     expect(iphone?.kind).toBe("device");
@@ -119,7 +119,7 @@ describe("parseFlutterIosDevices", () => {
   const MACHINE = JSON.stringify([
     {
       name: "My iPhone",
-      id: "00008020-001A2D021AF3002E",
+      id: "00008020-000000000000AAAA",
       targetPlatform: "ios",
       emulator: false,
       isSupported: true,
@@ -150,7 +150,7 @@ describe("parseFlutterIosDevices", () => {
   it("keeps only real (non-emulator) iOS devices with their flutter id (ECID)", () => {
     const devices = parseFlutterIosDevices(MACHINE);
     expect(devices).toHaveLength(1);
-    expect(devices[0].id).toBe("00008020-001A2D021AF3002E");
+    expect(devices[0].id).toBe("00008020-000000000000AAAA");
     expect(devices[0].name).toBe("My iPhone");
   });
 
@@ -165,14 +165,14 @@ describe("mergeFlutterIds", () => {
     const ctl = parseDevicectlDevices(
       [
         "Name     Host  Identifier                             State      Model",
-        "iPhone   ip    0831CB2E-D597-5C19-9699-6DFA21324AC4   connected  (iPhone11,8)",
+        "iPhone   ip    E1E2E3E4-0000-4000-8000-000000000AC4   connected  (iPhone11,8)",
       ].join("\n")
     );
     const flutter = parseFlutterIosDevices(
       JSON.stringify([
         {
           name: "iPhone",
-          id: "00008020-001A2D021AF3002E",
+          id: "00008020-000000000000AAAA",
           targetPlatform: "ios",
           emulator: false,
           isSupported: true,
@@ -182,8 +182,8 @@ describe("mergeFlutterIds", () => {
     const merged = mergeFlutterIds(ctl, flutter);
     expect(merged).toHaveLength(1);
     // target/udid must be the FLUTTER id (flutter run -d), devicectlId the UUID.
-    expect(merged[0].udid).toBe("00008020-001A2D021AF3002E");
-    expect(merged[0].devicectlId).toBe("0831CB2E-D597-5C19-9699-6DFA21324AC4");
+    expect(merged[0].udid).toBe("00008020-000000000000AAAA");
+    expect(merged[0].devicectlId).toBe("E1E2E3E4-0000-4000-8000-000000000AC4");
   });
 
   it("positionally matches a single device when names differ", () => {
@@ -207,8 +207,8 @@ describe("mergeFlutterIds", () => {
     const ctl = parseDevicectlDevices(
       [
         "Name    Host   Identifier                             State      Model",
-        "iPhone  ipA    AAAA1111-D597-5C19-9699-6DFA21324AC4   connected  (iPhone11,8)",
-        "iPhone  ipB    BBBB2222-D597-5C19-9699-6DFA21324AC4   connected  (iPhone14,2)",
+        "iPhone  ipA    AAAA1111-0000-4000-8000-000000000AC4   connected  (iPhone11,8)",
+        "iPhone  ipB    BBBB2222-0000-4000-8000-000000000AC4   connected  (iPhone14,2)",
       ].join("\n")
     );
     const flutter = parseFlutterIosDevices(
@@ -233,16 +233,16 @@ describe("mergeFlutterIds", () => {
     const merged = mergeFlutterIds(ctl, flutter);
     // The two devicectl rows must NOT have been given a flutter id by order.
     const ctlA = merged.find(
-      (d) => d.devicectlId === "AAAA1111-D597-5C19-9699-6DFA21324AC4"
+      (d) => d.devicectlId === "AAAA1111-0000-4000-8000-000000000AC4"
     );
     const ctlB = merged.find(
-      (d) => d.devicectlId === "BBBB2222-D597-5C19-9699-6DFA21324AC4"
+      (d) => d.devicectlId === "BBBB2222-0000-4000-8000-000000000AC4"
     );
     expect(ctlA?.ambiguous).toBe(true);
     expect(ctlB?.ambiguous).toBe(true);
     // udid stays the devicectl placeholder (no cross-mapped ECID).
-    expect(ctlA?.udid).toBe("AAAA1111-D597-5C19-9699-6DFA21324AC4");
-    expect(ctlB?.udid).toBe("BBBB2222-D597-5C19-9699-6DFA21324AC4");
+    expect(ctlA?.udid).toBe("AAAA1111-0000-4000-8000-000000000AC4");
+    expect(ctlB?.udid).toBe("BBBB2222-0000-4000-8000-000000000AC4");
     // No devicectl row silently absorbed a flutter ECID.
     expect(
       merged.every((d) => !/^00008020-ECID/.test(d.udid) || d.ambiguous)
@@ -253,9 +253,9 @@ describe("mergeFlutterIds", () => {
     const ctl = parseDevicectlDevices(
       [
         "Name       Host   Identifier                             State      Model",
-        "iPhone     ipA    AAAA1111-D597-5C19-9699-6DFA21324AC4   connected  (iPhone11,8)",
-        "iPhone     ipB    BBBB2222-D597-5C19-9699-6DFA21324AC4   connected  (iPhone14,2)",
-        "Work iPad  ipad   CCCC3333-D597-5C19-9699-6DFA21324AC4   connected  (iPad13,1)",
+        "iPhone     ipA    AAAA1111-0000-4000-8000-000000000AC4   connected  (iPhone11,8)",
+        "iPhone     ipB    BBBB2222-0000-4000-8000-000000000AC4   connected  (iPhone14,2)",
+        "Work iPad  ipad   CCCC3333-0000-4000-8000-000000000AC4   connected  (iPad13,1)",
       ].join("\n")
     );
     const flutter = parseFlutterIosDevices(
@@ -285,7 +285,7 @@ describe("mergeFlutterIds", () => {
     );
     const merged = mergeFlutterIds(ctl, flutter);
     const ipad = merged.find(
-      (d) => d.devicectlId === "CCCC3333-D597-5C19-9699-6DFA21324AC4"
+      (d) => d.devicectlId === "CCCC3333-0000-4000-8000-000000000AC4"
     );
     // The uniquely-named iPad joins cleanly to its flutter id.
     expect(ipad?.udid).toBe("00008020-ECIDCCCC");
@@ -301,8 +301,8 @@ describe("mergeFlutterIds", () => {
 
 describe("resolveIosTarget", () => {
   const physConnected: IosDevice = {
-    udid: "00008020-001A2D021AF3002E", // flutter ECID
-    devicectlId: "0831CB2E-D597-5C19-9699-6DFA21324AC4",
+    udid: "00008020-000000000000AAAA", // flutter ECID
+    devicectlId: "E1E2E3E4-0000-4000-8000-000000000AC4",
     name: "My iPhone",
     kind: "device",
     available: true,
@@ -332,9 +332,9 @@ describe("resolveIosTarget", () => {
   it("yields the flutter ECID as target and the devicectl id for lifecycle", () => {
     const r = resolveIosTarget(undefined, [physConnected], []);
     // deploy/flutter-run path
-    expect(r?.target).toBe("00008020-001A2D021AF3002E");
+    expect(r?.target).toBe("00008020-000000000000AAAA");
     // lifecycle/uninstall path
-    expect(r?.devicectlId).toBe("0831CB2E-D597-5C19-9699-6DFA21324AC4");
+    expect(r?.devicectlId).toBe("E1E2E3E4-0000-4000-8000-000000000AC4");
   });
 
   it("honors a pin by flutter id", () => {
@@ -436,13 +436,13 @@ describe("regression: Apple-TV-vs-iPhone + flutter-id vs devicectl-id", () => {
     "Name                 Hostname     Identifier                             State       Model",
     "-------------------------------------------------------------------------------------------",
     "Example Apple TV   atv.local    A1B2C3D4-5E6F-7A8B-9C0D-1E2F3A4B5C6D   connected   Apple TV 4K (3rd generation) (AppleTV14,1)",
-    "iPhone               ip.local     0831CB2E-D597-5C19-9699-6DFA21324AC4   connected   iPhone XR (iPhone11,8)",
+    "iPhone               ip.local     E1E2E3E4-0000-4000-8000-000000000AC4   connected   iPhone XR (iPhone11,8)",
   ].join("\n");
 
   const FLUTTER_MACHINE = JSON.stringify([
     {
       name: "iPhone",
-      id: "00008020-001A2D021AF3002E",
+      id: "00008020-000000000000AAAA",
       targetPlatform: "ios",
       emulator: false,
       isSupported: true,
@@ -475,13 +475,13 @@ describe("regression: Apple-TV-vs-iPhone + flutter-id vs devicectl-id", () => {
   it("yields the flutter ECID for the deploy/flutter-run path", () => {
     const r = resolve();
     // NOT the devicectl UUID — that is what `flutter run -d` rejected.
-    expect(r?.target).toBe("00008020-001A2D021AF3002E");
-    expect(r?.target).not.toBe("0831CB2E-D597-5C19-9699-6DFA21324AC4");
+    expect(r?.target).toBe("00008020-000000000000AAAA");
+    expect(r?.target).not.toBe("E1E2E3E4-0000-4000-8000-000000000AC4");
   });
 
   it("yields the devicectl id for the lifecycle path", () => {
     const r = resolve();
-    expect(r?.devicectlId).toBe("0831CB2E-D597-5C19-9699-6DFA21324AC4");
+    expect(r?.devicectlId).toBe("E1E2E3E4-0000-4000-8000-000000000AC4");
   });
 
   it("resolves nothing when only an Apple TV is connected (no silent tvOS pick)", () => {
@@ -504,8 +504,8 @@ describe("regression: same-name devices must fail safe (require a pin)", () => {
   const DEVICECTL = [
     "Name    Host   Identifier                             State      Model",
     "-------------------------------------------------------------------------",
-    "iPhone  ipA    AAAA1111-D597-5C19-9699-6DFA21324AC4   connected  (iPhone11,8)",
-    "iPhone  ipB    BBBB2222-D597-5C19-9699-6DFA21324AC4   connected  (iPhone14,2)",
+    "iPhone  ipA    AAAA1111-0000-4000-8000-000000000AC4   connected  (iPhone11,8)",
+    "iPhone  ipB    BBBB2222-0000-4000-8000-000000000AC4   connected  (iPhone14,2)",
   ].join("\n");
   // Reversed order vs devicectl, so a positional join would cross the ids.
   const FLUTTER_MACHINE = JSON.stringify([
@@ -561,14 +561,14 @@ describe("regression: same-name devices must fail safe (require a pin)", () => {
     // deterministically (the escape hatch), which is the safe, non-guessing
     // behavior — deploy at least targets the intended devicectl device.
     const r = resolveIosTarget(
-      "AAAA1111-D597-5C19-9699-6DFA21324AC4",
+      "AAAA1111-0000-4000-8000-000000000AC4",
       physical(),
       []
     );
     expect(r?.source).toBe("pin");
-    expect(r?.devicectlId).toBe("AAAA1111-D597-5C19-9699-6DFA21324AC4");
+    expect(r?.devicectlId).toBe("AAAA1111-0000-4000-8000-000000000AC4");
     // It resolved device A, not device B.
-    expect(r?.devicectlId).not.toBe("BBBB2222-D597-5C19-9699-6DFA21324AC4");
+    expect(r?.devicectlId).not.toBe("BBBB2222-0000-4000-8000-000000000AC4");
   });
 });
 

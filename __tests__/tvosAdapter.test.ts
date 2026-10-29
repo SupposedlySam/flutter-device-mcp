@@ -76,7 +76,7 @@ function tvos(device?: string) {
 function devicectlJson(includeAppleTv: boolean) {
   const devices: unknown[] = [
     {
-      identifier: "0831CB2E-D597-5C19-9699-6DFA21324AC4",
+      identifier: "E1E2E3E4-0000-4000-8000-000000000AC4",
       deviceProperties: { name: "iPhone" },
       connectionProperties: { pairingState: "paired", tunnelState: "connected" },
       hardwareProperties: {

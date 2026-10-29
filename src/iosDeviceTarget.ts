@@ -12,11 +12,11 @@
  *
  *  - `flutter run -d <id>` (the deploy/launch path — see {@link buildIosPtyLaunchCommand})
  *    uses FLUTTER's id, which for a physical device is its ECID
- *    (e.g. `00008020-001A2D021AF3002E`). This is sourced from
+ *    (e.g. `00008020-000000000000AAAA`). This is sourced from
  *    `flutter devices --machine`.
  *  - `xcrun devicectl` (the lifecycle/uninstall path — launch/terminate by
  *    bundle id, uninstall) uses devicectl's own UUID
- *    (e.g. `0831CB2E-D597-5C19-9699-6DFA21324AC4`). This is sourced from
+ *    (e.g. `E1E2E3E4-0000-4000-8000-000000000AC4`). This is sourced from
  *    `xcrun devicectl list devices`.
  *
  * Feeding a devicectl UUID to `flutter run -d` fails ("No supported devices

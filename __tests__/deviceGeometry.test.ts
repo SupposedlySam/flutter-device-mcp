@@ -124,7 +124,7 @@ describe("crossCheckView", () => {
   });
 
   it("WARNS when the app's own devicePixelRatio disagrees with the platform's", () => {
-    // The DROP-3841 shape: an embedder reporting a bogus MediaQuery ratio.
+    // The shape that motivated this: an embedder reporting a bogus MediaQuery ratio.
     const check = crossCheckView(geometry, { width: 360, height: 725 }, 0.4);
     expect(check.warnings.join(" ")).toContain("MediaQuery.devicePixelRatio 0.4");
   });
