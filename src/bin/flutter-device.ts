@@ -128,8 +128,8 @@ Global flags:
                       by a developer). Only with the device owner's agreement.
   --target <kind>     iOS/tvOS: which CLASS of target to act on — device (real hardware) or
                       simulator. Accepted by build, deploy, open-url, screenshot and record.
-                      Omitted, resolution is physical-first, so a capture lands on the machine
-                      a deploy would have used.
+                      Omitted, the one available target is used and a choice among several
+                      is refused, exactly as a deploy resolves it.
 
 Every command prints a JSON result and exits non-zero on failure.`;
 
