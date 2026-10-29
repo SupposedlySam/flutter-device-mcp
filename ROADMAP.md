@@ -39,12 +39,11 @@ review, framed as future work.
   - Verify the Tizen build/install path on-device — including that
     `flutter-tizen run --no-build --<mode>` reuses the package of that mode
     rather than rebuilding.
-  - Verify the tvOS path on-device.
   - A real webOS build path (removing the user-provided `preBuild` requirement).
   - LG Magic-Remote pointer support for webOS.
-  - Screen geometry beyond Android. `flutter_geometry` reports the display size
-    and device pixel ratio from `adb shell wm size`/`wm density`; the equivalent
-    is unwired elsewhere, and every other platform answers `{supported: false}`
+  - Screen geometry beyond Android and macOS. `flutter_geometry` reports the
+    display size and device pixel ratio from `adb shell wm size`/`wm density`, and
+    a macOS window's bounds; every other platform answers `{supported: false}`
     rather than guessing a ratio.
   - Verify the Android `adb shell input` plane on an Android TV, where the
     D-pad keycodes matter most.

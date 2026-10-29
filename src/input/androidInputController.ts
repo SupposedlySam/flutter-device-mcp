@@ -17,7 +17,7 @@
  * gesture-arena semantics (no widget/element addressing, no synchronization
  * with the frame pipeline), so a VM-service driver is the way to address the
  * app's own widgets by key or text. This plane, in turn, covers what a
- * VM-service driver cannot reach — OS UI outside the Flutter view, non-debug
+ * VM-service driver cannot reach — OS UI outside the Flutter view, release
  * builds, and D-pad-style navigation (Android TV).
  *
  * The device serial is NOT held here directly: it is resolved LAZILY via an

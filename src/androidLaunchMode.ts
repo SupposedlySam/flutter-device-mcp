@@ -6,13 +6,12 @@
  * decision is made, so deploy-launch and build stay coherent and the precedence
  * is testable in isolation from the adapter.
  *
- * WHY the default is `debug` (not `profile`): Marionette is gated on `kDebugMode`
- * in the app (`bootstrapMarionette()` only runs in debug), so a profile/release
- * launch registers NO `ext.flutter.marionette.*` extension and the app is
- * undrivable — and hot reload/restart don't work either. A plain
- * `flutter_deploy platform=android` must therefore come up debug so it is
- * Marionette-drivable out of the box, matching the iOS deploy (which launches
- * `--debug`).
+ * WHY the default is `debug` (not `profile`): debug is the only mode with hot
+ * reload and hot restart, and the only one in which every app can be driven. An
+ * app that gates Marionette on `kDebugMode` registers NO
+ * `ext.flutter.marionette.*` extension in profile; one that registers it whenever
+ * `!kReleaseMode` is drivable there. A plain `flutter_deploy platform=android`
+ * therefore comes up debug, matching the iOS deploy.
  *
  * Precedence (highest first):
  *   1. an explicit 3-way tool arg (`flutter_deploy`/`flutter_build`'s `mode`),

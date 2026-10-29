@@ -17,10 +17,10 @@ Rows are platforms, columns are capabilities. ✅ full · ⚠️ partial / exper
 
 | Platform | Deploy + VM URI | Hot reload/restart | Lifecycle (bg/fg/kill) | Screenshot | Record | System prompt | OS input (key/pointer) | Screen geometry | Deep links |
 |----------|:---------------:|:------------------:|:----------------------:|:----------:|:------:|:-------------:|:----------------------:|:---------------:|:----------:|
-| **iOS** | ✅ | ✅ | ✅ | ✅ ¹ | ✅ ² | ✅ ³ | ❌ ⁴ | ❌ | ⚠️ ¹⁶ |
+| **iOS** | ✅ | ✅ | ✅ | ✅ ¹ | ✅ ² | ✅ ³ | ⚠️ ⁴ | ❌ | ⚠️ ¹⁶ |
 | **Android** | ✅ | ✅ | ✅ | ✅ | ✅ ⁵ | ❌ | ✅ ¹⁴ | ✅ ¹⁵ | ✅ |
 | **Tizen** (Samsung) | ✅ ⁶ | ✅ | ❌ | ❌ ⁷ | ❌ ⁷ | ❌ | ✅ ⁸ | ❌ | ❌ ⁷ |
-| **tvOS** (Apple TV) | ✅ ⁹ | ✅ | ✅ | ⚠️ ¹⁰ | ❌ | ❌ | ❌ ¹¹ | ❌ | ⚠️ ¹⁶ |
+| **tvOS** (Apple TV) | ✅ ⁹ | ✅ | ✅ | ✅ ¹⁰ | ❌ | ❌ | ⚠️ ¹¹ | ❌ | ⚠️ ¹⁶ |
 | **webOS** (LG) | ⚠️ ¹² | ⚠️ | ❌ | ❌ | ❌ | ❌ | ⚠️ ¹³ | ❌ | ❌ |
 | **macOS** | ⚠️ ¹⁷ | ❌ ¹⁸ | ✅ ¹⁹ | ✅ ²⁰ | ❌ | ❌ | ✅ ²¹ | ✅ ²² | ❌ |
 
@@ -35,17 +35,17 @@ only — real-app verification is welcome too.**
 ¹ Simulator natively; physical devices need `pymobiledevice3`.
 ² Simulator produces an mp4; physical capture is a choppy (~1–3 fps) screenshot burst.
 ³ Simulator only, via `idb` over the accessibility tree.
-⁴ No OS-level input channel — drive the app with Marionette over the VM service instead.
+⁴ Physical iPhone only: `VOLUME_UP`/`VOLUME_DOWN` and coordinate taps through an XCUITest runner this server builds (see [iOS hardware input](#ios-hardware-input)). Everything else, and the simulator, is driven with Marionette over the VM service.
 ⁵ Native mp4 via `adb`.
 ⁶ Via `flutter-tizen run` (the launch that captures the VM URI); build/install is reimplemented on `flutter-tizen` and still needs on-device verification.
 ⁷ `sdb shell` is disabled on Samsung devices — use the driver's screenshot over the VM service.
 ⁸ D-pad / pointer over the Samsung remote channel.
-⁹ Requires a **profile/release** build on-device; a debug build segfaults.
-¹⁰ Simulator screenshot; on-device capture not wired.
-¹¹ Siri-remote / focus-driven — drive via Marionette.
+⁹ On a physical Apple TV every launch is `flutter-tvos run` through a pty, in **debug by default** with lldb attached (see [Physical Apple TV](#physical-apple-tv)).
+¹⁰ Simulator via `simctl`; a physical Apple TV via `pymobiledevice3 developer dvt screenshot --native`.
+¹¹ Siri Remote keys on a physical Apple TV through pyatv's `atvremote`; there is no pointer. In-app taps go through Marionette.
 ¹² Packaging requires a user-provided `preBuild` hook; there is no standard `flutter-webos build`.
 ¹³ Input over `ssap` is wired but currently device-blocked.
-¹⁴ `adb shell input` (keyevent/tap/swipe/text), on devices and emulators. This is the OS-LEVEL plane — raw system input that bypasses Flutter's gesture arena — and the one to reach for FIRST on Android: one adb call, no VM-service round trip, and coordinates in the same device-pixel space as `flutter_screenshot`. Fall back to a VM-service driver for widget addressing, tree assertions, and gesture-arena-sensitive taps; this plane remains the only option for OS UI outside the Flutter view, non-debug builds, and D-pad navigation on Android TV. See [Which driver first](#which-driver-first).
+¹⁴ `adb shell input` (keyevent/tap/swipe/drag/text), on devices and emulators. This is the OS-LEVEL plane — raw system input that bypasses Flutter's gesture arena — and the one to reach for FIRST on Android: one adb call, no VM-service round trip, and coordinates in the same device-pixel space as `flutter_screenshot`. Fall back to a VM-service driver for widget addressing, tree assertions, and gesture-arena-sensitive taps; this plane remains the only option for OS UI outside the Flutter view, release builds, and D-pad navigation on Android TV. See [Which driver first](#which-driver-first).
 ¹⁵ `adb shell wm size` + `wm density` — the device pixel ratio `flutter_pointer` needs for logical coordinates and refuses to guess.
 ¹⁶ Simulator only (`simctl openurl`). Apple provides no url-open verb for a physical device — `devicectl` has none and idb is simulator-only — so a physical target reports `{supported:false}` rather than silently doing nothing.
 ¹⁷ Stages + launches a prebuilt **signed `.app`** (`--app-path`/`--app-url`) via `open -n`; this MCP does not build or sign macOS apps. Nothing is written to the hot-reload/restart launch registry, because there is no VM service to reconnect to.
@@ -69,7 +69,8 @@ only — real-app verification is welcome too.**
   **one-deploy-at-a-time-PER-DEVICE** (kills the stale drivers holding the device
   being deployed to, and leaves another device's session running),
   **disk-full recovery** (uninstall + retry the install once on `ENOSPC`),
-  **stale-device-pin self-heal**, and **VM-URI capture** — lives in the core and
+  **named devices are never replaced** (a pin or `device_udid` naming an offline device
+  is refused, never served by another one), and **VM-URI capture** — lives in the core and
   runs identically whether an AI agent calls a tool or a human runs a command.
 
 ## Install
@@ -185,14 +186,20 @@ All variables use the `FLUTTER_DEVICE_` prefix (`<PLATFORM>` is one of
 | `FLUTTER_DEVICE_CONFIG` | Explicit path to the config file |
 | `FLUTTER_DEVICE_DEFAULT_PLATFORM` | Platform used when a call omits `platform` |
 | `FLUTTER_DEVICE_<PLATFORM>_DEVICE` | Device pin (id / name / address) for a platform |
-| `FLUTTER_DEVICE_<PLATFORM>_APP_ID` | App / bundle id for a platform |
+| `FLUTTER_DEVICE_<PLATFORM>_APP_ID` | App / bundle id for a platform. On Android the lifecycle verbs never use it; they act on the package deploy installed (see [Android package resolution](#android-package-resolution)) |
 | `FLUTTER_DEVICE_ANDROID_LAUNCH_MODE` | `debug` \| `profile` \| `release` (default Android mode) |
 | `FLUTTER_DEVICE_IOS_LAUNCH_MODE` | `debug` \| `profile` \| `release` (default iOS build + deploy-launch mode; see [iOS launch modes](#ios-launch-modes)) |
 | `FLUTTER_DEVICE_TIZEN_PROFILE` | Tizen device profile for `flutter-tizen build` |
 | `FLUTTER_DEVICE_TIZEN_SDK_PATH` | Tizen SDK data dir (the folder containing `platforms/`) for the rootstrap precheck; else `$TIZEN_SDK` / common locations |
 | `FLUTTER_DEVICE_TIZEN_API_VERSION` | Tizen api-version to target (e.g. `8.0`); else read from `tizen/tizen-manifest.xml` |
 | `FLUTTER_DEVICE_TIZEN_SECURITY_PROFILE` | Security profile name to sign the TPK with (`-s`); else the active profile |
+| `FLUTTER_DEVICE_ANDROID_AAPT2` | Path to `aapt2`, used to read the package id from the apk deploy installs; else the newest Android SDK build-tools |
+| `FLUTTER_DEVICE_IOS_TEAM` | 10-character Apple team id that signs the iOS input runner; else the Runner project's `DEVELOPMENT_TEAM` |
+| `FLUTTER_DEVICE_CACHE_DIR` | Cache for built helpers, currently the iOS input runner (`ios-ui-runner/<xcodebuild>-<team>-<hash>`). Defaults to `~/.cache/flutter-device-mcp` |
 | `FLUTTER_DEVICE_TVOS_FLUTTER_BIN` | Directory holding the `flutter-tvos` bin (prepended to PATH) |
+| `FLUTTER_DEVICE_TVOS_LAUNCH_MODE` | `debug` \| `profile` \| `release` (default tvOS launch mode; see [Physical Apple TV](#physical-apple-tv)) |
+| `FLUTTER_DEVICE_TVOS_ATV_ID` | pyatv identifier `atvremote` addresses the Apple TV by; else the device's name |
+| `FLUTTER_DEVICE_ATVREMOTE` | Path to `atvremote`; else PATH, then `~/.local/bin` |
 | `FLUTTER_DEVICE_IDB_PATH` | Path to the `idb` binary (iOS system prompts) |
 | `FLUTTER_DEVICE_PYMOBILEDEVICE3` | Path to `pymobiledevice3` (iOS physical capture) — probed by effect, not merely trusted; a path that is missing, unreadable, or exits zero without actually being `pymobiledevice3` is rejected, and the capture continues with a `pymobiledevice3Warning` naming what was ignored |
 | `FLUTTER_DEVICE_FFMPEG` | Path to `ffmpeg` (recording / gif encode) |
@@ -202,7 +209,7 @@ All variables use the `FLUTTER_DEVICE_` prefix (`<PLATFORM>` is one of
 | `FLUTTER_DEVICE_MACOS_APP_PATH` | Default `.app`/`.tar.gz`/`.tgz`/`.dmg` to stage for `flutter_deploy` on macOS |
 | `FLUTTER_DEVICE_MACOS_APP_URL` | Default archive URL to fetch and stage, used when no `app_path` is given |
 | `FLUTTER_DEVICE_MACOS_PROCESS_NAME` | Pin an **already-running** macOS app by its `CFBundleExecutable` (the name System Events lists it under — not its display name) |
-| `FLUTTER_DEVICE_STATE_DIR` | Directory for per-developer durable state — currently the Android pointer stage (`pointer-stage.json`), which lets a staged tap position survive a server restart. Defaults to `~/.config/flutter-device-mcp` |
+| `FLUTTER_DEVICE_STATE_DIR` | Directory for per-developer durable state — the Android pointer stage (`pointer-stage.json`), which lets a staged tap position survive a server restart, and the record of which package each deploy installed on which device (`deployed-packages.json`). Defaults to `~/.config/flutter-device-mcp` |
 | `FLUTTER_DEVICE_LOG_DIR` | Redirect the file logger's base directory (default: an OS-appropriate location outside the working directory, e.g. `~/Library/Logs/flutter-device-mcp` on macOS) |
 | `FLUTTER_DEVICE_LOG_FILE` | Explicit log file path, overriding `FLUTTER_DEVICE_LOG_DIR` entirely |
 | `FLUTTER_DEVICE_LOG_DISABLE` | Disable file logging (`1`/`true`/`yes`/`on`) |
@@ -219,7 +226,8 @@ optional. Each platform under `platforms` accepts `device`, `appId`, and
 `preBuild` (an array of shell commands run in order, from `appDir`, **before** the
 build — the **fork-free extension point** for app-specific steps such as compiling
 a native engine); plus `tizenProfile` / `securityProfile` / `sdk` (Tizen),
-`androidLaunchMode` (Android), `iosLaunchMode` (iOS), and `flutterTvosBinDir` (tvOS).
+`androidLaunchMode` (Android), `iosLaunchMode` (iOS), and `flutterTvosBinDir` /
+`tvosLaunchMode` / `atvId` (tvOS).
 
 **Tizen notes.** A Tizen TV is reached over the network, so `sdb` won't list it
 until connected — set `device` to the TV's IP and the tool **auto-runs
@@ -258,7 +266,8 @@ shows the rootstrap status and doubles as a Tizen SDK doctor.
       ]
     },
     "tvos": {
-      "flutterTvosBinDir": "/opt/flutter-tvos/bin"
+      "flutterTvosBinDir": "/opt/flutter-tvos/bin",
+      "tvosLaunchMode": "debug"
     },
     "webos": {
       "device": "lg-tv",
@@ -281,19 +290,19 @@ Commands:
 | `info` | Device + environment status and resolved config (with provenance) |
 | `setup` | Prepare the device for development (`--device-ip <host>`) |
 | `build` | Build the app package (`--profile`, `--debug`, `--target`, `--install`, `--run`) |
-| `deploy` | Install + launch, capture the VM Service URI (**the key command**) |
-| `uninstall` | Remove the app from the device |
+| `deploy` | Install + launch, capture the VM Service URI (**the key command**; `--allow-store-app-removal` to replace a copy somebody else installed) |
+| `uninstall` | Remove the app from the device (`--allow-store-app-removal` to remove a copy somebody else installed) |
 | `kill-stale` | Kill the stale launch/driver processes holding **this device's** lock (`--device-udid` to aim it, `--all-devices` for the host-wide hammer) |
-| `terminate` | Force-quit the app (mobile) |
+| `terminate` | Force-quit the app (mobile; `--allow-store-app` on Android for a copy adb did not install) |
 | `background` | Send the app to the background without killing it (mobile) |
-| `foreground` | Bring the app back to the foreground (mobile) |
+| `foreground` | Bring the app back to the foreground (mobile; `--allow-store-app` as for `terminate`) |
 | `hot-reload` | Real hot reload on the running app |
 | `hot-restart` | Hot restart (re-run `main()`) on the running app |
 | `screenshot` | Capture the screen to a PNG (`--output-path`, `--include-base64`) |
 | `record` | Record a bounded screen clip (`--duration-s`, `--fps`, `--format mp4\|gif`) |
 | `set-input-mode` | Select the input plane (`--mode dpad\|pointer`) — TV |
-| `key` | Send a remote/navigation key (`--key UP\|DOWN\|ENTER\|…`) — TV |
-| `pointer` | Drive the pointer (`--action move\|click\|scroll`, `--x --y --dy`) — TV |
+| `key` | Send a remote/navigation key (`--key UP\|DOWN\|ENTER\|VOLUME_UP\|…`, `--repeat <n>`) — TV, Android, iOS volume |
+| `pointer` | Drive the pointer (`--action move\|click\|scroll\|drag`, `--x --y --dy`; drag takes `--x2 --y2 --duration-ms --steps --hold-ms`) — TV, Android, iOS tap |
 | `system-prompt` | Detect/tap OS dialogs (`--action detect\|tap\|dismiss`) — iOS |
 
 Every command prints a JSON result and exits non-zero on failure, so scripts can
@@ -321,19 +330,26 @@ The server advertises **19 tools**. Each takes an optional `platform` arg
 (`ios` | `android` | `tizen` | `tvos` | `webos` | `macos`); omit it to use the
 default platform from your config.
 
-**Per-call device targeting.** `device_udid` is a per-call argument on 11 of
-those tools — `flutter_deploy`, `flutter_uninstall`, `flutter_terminate`,
-`flutter_background`, `flutter_foreground`, `flutter_screenshot`,
-`flutter_open_url`, `flutter_record`, `flutter_key`, `flutter_pointer`, and
-`flutter_geometry` — so one call can target a specific device without
+**Per-call device targeting.** `device_udid` is a per-call argument on 12 of
+those tools — `flutter_deploy`, `flutter_uninstall`, `flutter_kill_stale`,
+`flutter_terminate`, `flutter_background`, `flutter_foreground`,
+`flutter_screenshot`, `flutter_open_url`, `flutter_record`, `flutter_key`,
+`flutter_pointer`, and `flutter_geometry` — so one call can target a specific device without
 changing what every other call resolves to. It beats the platform's env pin
 (`FLUTTER_DEVICE_<PLATFORM>_DEVICE`), which beats auto-discovery, and it lasts
 exactly one call: an unpinned call afterward goes back to whatever it would
 have resolved to anyway. On Android it accepts an adb serial
-(`emulator-5554`) or the model name `adb devices -l` reports (`Pixel_7`). A
-stale pin self-heals to the live device rather than failing, and says so in
-the result's `deviceWarning`, naming whichever of the two — argument or env
-var — it came from.
+(`emulator-5554`) or the model name `adb devices -l` reports (`Pixel_7`).
+
+**A named device is never replaced by another one.** When `device_udid`, an env
+pin or a config `device` names a device that is not online, the call is refused
+and the refusal lists what is online, naming which of them the name came from.
+It used to fall back to whatever was attached, which once meant a phone with the
+team's production app on it. An unnamed call with more than one target online
+is refused the same way, so pass `device_udid` when a phone and an emulator are
+both attached, and update a pin that has moved rather than expecting it to heal.
+`flutter_uninstall` additionally checks the copy it would remove before it
+removes it.
 
 | Tool | Summary |
 |------|---------|
@@ -341,19 +357,19 @@ var — it came from.
 | `flutter_setup` | Prepare the device for development |
 | `flutter_build` | Build the app package. `mode` picks release/profile/debug — reach for `profile` when measuring, since it is AOT-timed *and* keeps the VM service open. `dart_define` passes compile-time constants. macOS: `{supported:false}` — building/signing an arbitrary desktop app is out of scope |
 | `flutter_deploy` | **Install + launch through a pty and return the captured `ws://…/ws` VM Service URI** to hand to a driver. Runs the guardrails: kills the stale drivers holding **the device it is deploying to** first (a session on another device survives), recovers from `ENOSPC`, records the launch for hot reload/restart, and probes whether the build is Marionette-drivable. iOS honors `mode` for the launch itself (see [iOS launch modes](#ios-launch-modes)). macOS: stages + launches a prebuilt signed `.app` (`app_path`/`app_url`); no VM Service URI exists there |
-| `flutter_open_url` | **Open a URL on the device — the deep-link driver.** Drives custom schemes (`myapp://…`) and `https://…` App Links / universal links through the real OS plumbing, so intent-filters and domain associations are actually exercised. Android + Apple **simulators**; a physical iPhone/Apple TV reports `{supported:false}` because Apple provides no url-open verb — see [Deep links](#deep-links-flutter_open_url) |
-| `flutter_uninstall` | Remove the app from the device |
+| `flutter_open_url` | **Open a URL on the device — the deep-link driver.** Drives custom schemes (`myapp://…`) and `https://…` App Links / universal links through the real OS plumbing, so intent-filters and domain associations are actually exercised. Android (scoped to the package deploy installed) + Apple **simulators**; a physical iPhone/Apple TV reports `{supported:false}` because Apple provides no url-open verb — see [Deep links](#deep-links-flutter_open_url) |
+| `flutter_uninstall` | Remove the app from the device. Needs the device named when more than one is online, and leaves a copy somebody else installed (Android: not by adb; physical iOS: App Store/TestFlight) alone unless `allow_store_app_removal` is set |
 | `flutter_kill_stale` | Kill leftover launch processes. **iOS/Android: for ONE device** — the resolved target, or the one `device_udid` names — the `flutter run` driver whose process tree holds it, plus its children; another device's session is left running, and a driver that can't be tied to a device is reported with its pid rather than killed. **Tizen/webOS/tvOS/macOS: platform-wide** (`flutter-tizen`, `ares-launch`/`flutter-webos`, `flutter-tvos` and their children, or the staged macOS process) — those names can't belong to another platform, so no device is needed and the response says `scope: platform-wide`. `all_devices: true` is the iOS/Android opt-in hammer. With nothing attached on iOS/Android it kills nothing and says why. See [Teardown scope](#teardown-scope-one-deploy-at-a-time-per-device) |
-| `flutter_hot_reload` | Real hot reload, **confirmed against the flutter tool's own acknowledgement in the launch log** before it is reported — not merely that the keystroke was written. Falls back to a weaker VM-service reload when unconfirmed or when no control channel exists |
+| `flutter_hot_reload` | Real hot reload, **confirmed against the flutter tool's own acknowledgement in the launch log** before it is reported — not merely that the keystroke was written. Falls back to a weaker VM-service reload when unconfirmed or when no control channel exists. On a physical Apple TV only the control channel can reload (the device has no kernel compiler), so the fallback is refused and says so |
 | `flutter_hot_restart` | Hot restart (re-run `main()`), confirmed the same way. `confirmed` in the response is `true` (seen), `false` (window passed, nothing seen — reported as `success:false`, since there's no VM-service equivalent to fall back to), or absent (no launch log to watch — `success:true` but the note says UNVERIFIED). Absent means neither of the other two, not "probably fine" |
 | `flutter_screenshot` | Capture the screen. macOS: window-targeted, never full-desktop |
 | `flutter_record` | Record a bounded screen clip. macOS: not implemented — `{supported:false}` |
-| `flutter_terminate` | Force-quit the app (mobile, macOS) |
+| `flutter_terminate` | Force-quit the app (mobile, macOS). Android acts on the package deploy installed and refuses a copy adb did not install unless `allow_store_app` is set; a physical Apple TV ends the resident `flutter-tvos run` and its lldb first |
 | `flutter_background` | Background the app without killing it (mobile, macOS) |
-| `flutter_foreground` | Foreground the app again (mobile, macOS) |
+| `flutter_foreground` | Foreground the app again (mobile, macOS; Android takes `allow_store_app` as `flutter_terminate` does) |
 | `flutter_set_input_mode` | Select the input plane (dpad/pointer) — TV |
-| `flutter_key` | Send a remote/navigation key, or type text into the focused field — Android, Tizen, webOS, macOS. See [Which driver first](#which-driver-first) |
-| `flutter_pointer` | Drive the pointer (move/click/scroll) — Android, Tizen, webOS, macOS. `click` takes `x`/`y` directly, so a tap is one call. See [Which driver first](#which-driver-first) |
+| `flutter_key` | Send a remote/navigation key (`repeat` presses it N times), or type text into the focused field — Android, Tizen, webOS, macOS, a physical Apple TV (Siri Remote through `atvremote`) and a physical iPhone (`VOLUME_UP`/`VOLUME_DOWN` only). See [Which driver first](#which-driver-first) |
+| `flutter_pointer` | Drive the pointer (move/click/scroll, and `drag` on Android) — Android, Tizen, webOS, macOS, and a coordinate `click` on a physical iPhone. `click` takes `x`/`y` directly, so a tap is one call. See [Which driver first](#which-driver-first) |
 | `flutter_geometry` | **Report the screen's real size and device pixel ratio** so `flutter_pointer`'s logical coordinates are read rather than guessed. Optionally cross-checks a supplied Flutter view size and warns when the ratio cannot be right — Android, macOS |
 | `flutter_system_prompt` | Detect/tap OS-level dialogs — iOS |
 
@@ -369,11 +385,11 @@ fall back only for what it genuinely cannot reach:
 
 | Platform | Reach for FIRST | Fall back to | Why |
 |---|---|---|---|
-| **Android** | `flutter_key` (BACK/HOME/D-pad/`text:`) and `flutter_pointer` (tap/scroll) | A VM-service driver, for widget addressing by key/text, reading the tree, and gesture-arena-sensitive taps | One `adb` call, no VM round trip. Coordinates are **device pixels — the same space `flutter_screenshot` returns** — so a coordinate read off a screenshot sends as-is |
+| **Android** | `flutter_key` (BACK/HOME/D-pad/`text:`) and `flutter_pointer` (tap/scroll/drag) | A VM-service driver, for widget addressing by key/text, reading the tree, and gesture-arena-sensitive taps | One `adb` call, no VM round trip. Coordinates are **device pixels — the same space `flutter_screenshot` returns** — so a coordinate read off a screenshot sends as-is |
 | **Tizen** | `flutter_key` to move focus, then `flutter_pointer click` to activate it | A VM-service driver's `tap`, for a genuine coordinate tap (the only path that reaches gesture handlers) | The appliance is focus/D-pad-driven; `flutter_pointer` move/scroll is unsupported and says so |
-| **iOS** | A VM-service driver (tap/enter_text/scroll) | — | `flutter_key`/`flutter_pointer` report `{supported:false}`; there is no OS-level input plane wired here |
+| **iOS** | A VM-service driver (tap/enter_text/scroll) | `flutter_key` volume keys and a `flutter_pointer` coordinate `click`, physical iPhone only | The XCUITest runner takes seconds per call, so it is for what the VM service cannot reach (hardware keys, OS UI); the simulator reports `{supported:false}` |
 | **macOS** | `flutter_pointer` / `flutter_key` / `flutter_screenshot` | — | There is no Dart VM service, so these **are** the driver |
-| **tvOS** | A VM-service driver over the loopback service | — | Siri-Remote / focus-driven; no free cursor to drive at the OS level |
+| **tvOS** | `flutter_key` (Siri Remote through `atvremote`) to move focus on a physical Apple TV | A VM-service driver, for widget addressing and taps | Focus-driven, with no free cursor at the OS level; the simulator has no key plane |
 
 **The coordinate-space trap, stated once.** On Android and Tizen,
 `flutter_screenshot` and `flutter_pointer` both speak **device pixels**. A
@@ -421,7 +437,8 @@ today.
 device in the sibling codebase this server tracks (not re-run in this repo):
 BACK popped three routes on a physical Android handset and a move-plus-click
 at screenshot-read device pixels landed on the intended tab; iOS's key/pointer
-verbs returned `{supported:false}`; Tizen's pointer move returned
+verbs returned `{supported:false}` (before the physical-iPhone runner
+existed); Tizen's pointer move returned
 `{supported:false}`, pointing at the key verb. The macOS and tvOS rows come
 from the recorded platform model rather than a verified session, there too.
 The scroll behaviour above was measured the same way — on a physical handset in
@@ -494,9 +511,12 @@ as a reload that did nothing.
 `flutter_build` and `flutter_deploy` pick the iOS Flutter compilation mode with the
 same precedence: explicit `mode` arg > the legacy `debug` boolean > the
 `FLUTTER_DEVICE_IOS_LAUNCH_MODE` env pin (or `iosLaunchMode` in the config file) >
-the default `debug`. The default is `debug` because **Marionette is gated on
-`kDebugMode`** — an app that calls `bootstrapMarionette()` only in debug registers
-no `ext.flutter.marionette.*` extension in profile or release. Because build and
+the default `debug`. The default is `debug` because it is **the only mode with hot
+reload and hot restart**, and the only one in which every app can be driven.
+Whether profile is Marionette-drivable depends on how the app gates its Marionette
+binding: one registered whenever `!kReleaseMode` is drivable in profile, one gated
+on `kDebugMode` registers no `ext.flutter.marionette.*` extension there. Release has
+no VM service at all. Because build and
 launch share this resolution, a plain build never produces a release artifact
 beside a debug launch, and `target: "simulator"` never composes the
 `--simulator --release` that flutter rejects.
@@ -516,11 +536,11 @@ keeps the app alive, so OS suspension isn't realistic, and a code path chosen by
 `kDebugMode` is simply never executed. The deploy still returns a **real**
 `ws://…/ws` URI for a profile launch (`flutter run` enables the VM service for
 every mode but release), so DevTools, the timeline and the built-in
-`ext.flutter.*` extensions all work — what is missing is only the app's own
-Marionette extension. The response says exactly that in `launchModeCaveat`, and
+`ext.flutter.*` extensions all work, and Marionette works too if the app registers
+it outside debug. The response says so in `launchModeCaveat`, and
 reports the mode it actually launched in `launchMode` (an env pin is otherwise
-invisible). A profile launch carries no hot reload/restart control channel: it is
-a cold run.
+invisible). Hot reload and hot restart do not apply to a profile launch, which is
+the real cost of choosing it.
 
 `--release` has no Dart VM service at all. The deploy returns an **empty** URI with
 `noVmServiceReason` explaining why, and `marionetteReady: false`, rather than an
@@ -538,6 +558,100 @@ resident (`Flutter run key commands.`) and, after a short grace window with no U
 printed, ends the wait with the explanation above — it never sits on the caller's
 full `timeout_ms` waiting for something that is not coming. A debug launch is
 unchanged: its URI is the success criterion, so it still waits the full timeout.
+
+## Android package resolution
+
+The Android lifecycle verbs (`flutter_terminate`, `flutter_foreground`,
+`flutter_uninstall`, `flutter_open_url`) act on the package `flutter_deploy`
+installed, never on a configured `appId`, because a flavour or a build-type suffix
+makes the two differ and a verb aimed at the wrong id force-stops somebody's own
+install. The package is resolved in this order:
+
+1. **The deploy record.** Deploy reads the package id from the apk it installs
+   (with `aapt2`) and records it per device in `deployed-packages.json`. The record
+   is used only while that device answers with the identity it had then and the
+   package is still installed; an uninstall clears it.
+2. **The one adb-installed variant** of the build's base `applicationId` on the
+   device.
+3. **What the build would produce** (`applicationId` plus the build type's
+   `applicationIdSuffix` from `build.gradle`). That is a guess, so a package that
+   is not installed is refused rather than reported as a success. With several
+   variants installed and no record, the guess is used only when the app dir was
+   named (`app_dir`, `FLUTTER_DEVICE_APP_DIR` or the config file), and the
+   response's `appIdNote` says it picked among them.
+
+A failed `pm list packages` is refused rather than read as "not installed". A copy
+adb did not install (a store, a tester distribution, a sideloaded apk) is refused
+unless `allow_store_app` (lifecycle) or `allow_store_app_removal` (deploy and
+uninstall) is passed. `flutter_background` needs no package: it sends HOME.
+
+## Parallel iOS simulators
+
+Several agents often run their own server process against one Mac, with several
+simulators booted. With no device named, each process **claims** one booted
+simulator that no other process or `flutter run` holds and keeps it for its
+lifetime (`deviceSource: "claimed"` and `deviceClaim` in the response). When none
+is free the call is refused with the holders listed: pass `device_udid` or boot
+another simulator. Claims are directories under the OS temp dir
+(`flutter-device-mcp-sim-claims`), each holding the owner's pid; a dead owner's
+claim is taken over. The CLI releases its claim on exit.
+
+## iOS hardware input
+
+On a **physical iPhone**, `flutter_key` sends `VOLUME_UP`/`VOLUME_DOWN` and
+`flutter_pointer` `click` taps a coordinate, through an XCUITest runner this server
+builds. The simulator and every other key return `{supported:false}`.
+
+- The runner is built once per Xcode, signing team and device and cached under
+  `FLUTTER_DEVICE_CACHE_DIR`. The first call takes minutes; later ones take a few
+  seconds.
+- It needs `xcodegen` (`brew install xcodegen`) and a signing team:
+  `FLUTTER_DEVICE_IOS_TEAM`, else the Runner project's `DEVELOPMENT_TEAM`.
+- Turn on **Settings > Developer > Enable UI Automation** on the phone once. A call
+  that fails naming UI Automation is asking for this.
+- Tap coordinates are **points** from the top-left of the app window, which are
+  Flutter logical pixels as Marionette reports them, not screenshot pixels.
+- It is useful on profile and release builds, and for OS UI, where a VM-service
+  driver cannot reach.
+
+## Physical Apple TV
+
+**Every launch is `flutter-tvos run`** through a pty, from the app directory.
+**Debug is the default**: it is the only mode with hot reload and restart. The
+tvOS engine refuses to run debug code in a process nothing traces, so
+`flutter-tvos run --debug` launches the app stopped and attaches **lldb** before
+the Dart VM starts. The run stays resident behind the control channel, so hot
+reload and restart reach it.
+
+- **Hot reload goes only through that control channel.** The device has no kernel
+  compiler, so the VM-service reload fallback is refused and says so.
+- **The first debug run compiles the engine and the app**, so the URI wait defaults
+  to 40 minutes (`timeout_ms` overrides it). A runner that exits without a URI
+  fails at once with its exit code.
+- **Debug symbols.** lldb needs the device's symbols in
+  `~/Library/Developer/Xcode/tvOS DeviceSupport/`, which Xcode copies the first
+  time its Devices window sees the box on a new tvOS release. When they are
+  missing, the deploy and `flutter_info` say so in `environmentDiagnostic`.
+- **Profile and release** launch with `--profile`/`--release`. Profile has a live
+  VM service and Marionette if the app registers it outside debug, but no hot
+  reload, and Marionette's `take_screenshots` fails under AOT there (use
+  `flutter_screenshot`). Release has no VM service, so the response carries
+  `noVmServiceReason`. The **simulator** runs debug only, and `launchModeCaveat`
+  says so when another mode was asked for.
+- **Mode precedence:** `mode` > the legacy `debug` boolean >
+  `FLUTTER_DEVICE_TVOS_LAUNCH_MODE` (or `tvosLaunchMode`) > debug.
+- **A sleeping box.** Before a launch the adapter runs `atvremote turn_on` when
+  `atvremote` is installed. A launch refused because the box is asleep is woken and
+  retried once. CoreDevice loses network-paired boxes mid-transfer ("Connection
+  reset by peer"), so an install or launch that fails that way is retried once too.
+- **Terminate** ends the resident run and its lldb, then terminates the app through
+  `devicectl`.
+- **Screenshots** run `pymobiledevice3 developer dvt screenshot --native --udid
+  <hardware udid>`. The box must be awake.
+- **Remote keys** go through pyatv's `atvremote`, addressed by
+  `FLUTTER_DEVICE_TVOS_ATV_ID` or else the device's name. Install it with
+  `pipx install pyatv --python python3.12` and pair once with
+  `atvremote --protocol companion pair`.
 
 ## Deep links (`flutter_open_url`)
 
@@ -570,13 +684,14 @@ url-open verb, and idb's `open`/`ui` commands reject a physical target
 reports the gap rather than silently doing nothing — a no-op there reads as
 "the deep link is broken" and sends you debugging the app.
 
-**Apple targets are physical-first, so pass `target: "simulator"`.** Otherwise,
-on a host with a paired iPhone or Apple TV, the call resolves the physical device
-and correctly returns `{supported:false}` — the working path would be
-unreachable.
+**Name the simulator.** On iOS, an unnamed call with a phone and a simulator both
+attached is refused as ambiguous, so pass `target: "simulator"` or `device_udid`.
+On tvOS an unnamed call resolves a paired Apple TV first and returns
+`{supported:false}`, so the simulator has to be named there too.
 
-**Android scoping.** The VIEW intent defaults to the project's resolved
-application id, because an unscoped https link can raise a browser-vs-app
+**Android scoping.** The VIEW intent defaults to the package `flutter_deploy`
+installed on that device (see [Android package resolution](#android-package-resolution)),
+and a copy adb did not install is refused unless `allow_store_app` is set, because an unscoped https link can raise a browser-vs-app
 disambiguation chooser that an automated run cannot answer — the call then looks
 like a hang rather than a failure. Pass `package_or_bundle_id: ""` to go unscoped
 on purpose (what a real user tap does).
@@ -593,10 +708,13 @@ already-foregrounded app, which is what firing several links in a row looks like
 
 - **iOS** — macOS with Xcode command-line tools (`xcrun devicectl` / `simctl`) and
   `flutter`. Optional: `idb` for system-prompt handling; `pymobiledevice3` +
-  `ffmpeg` for capture on physical devices.
+  `ffmpeg` for capture on physical devices; `xcodegen`, a signing team and UI
+  Automation enabled on the phone for [hardware input](#ios-hardware-input).
 - **Android** — `adb` and `flutter` on PATH.
 - **Tizen** — `flutter-tizen`, `sdb`, and a Tizen device in **Developer Mode**.
-- **tvOS** — the `flutter-tvos` toolchain and Xcode.
+- **tvOS** — the `flutter-tvos` toolchain and Xcode. Optional on a physical Apple
+  TV: `pymobiledevice3` for screenshots, and pyatv's `atvremote` for remote keys
+  and waking the box.
 - **webOS** — the `ares` SDK.
 - **macOS** — a prebuilt, **signed** `.app` you supply (this MCP does not build
   or sign one), plus [`cliclick`](https://github.com/BlueM/cliclick)

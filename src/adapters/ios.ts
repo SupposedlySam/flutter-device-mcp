@@ -213,8 +213,8 @@ export const IOS_FAILURE_SIGNATURES: RegExp[] = [
  *
  * `mode` is the compilation mode the deploy resolved (see
  * {@link resolveIosLaunchMode}); it defaults to `debug`, which is what keeps the
- * Dart VM service open AND the app Marionette-drivable (Marionette is gated on
- * `kDebugMode`). It trails the older parameters so every existing call site keeps
+ * Dart VM service open AND the app Marionette-drivable whatever its gate. It
+ * trails the older parameters so every existing call site keeps
  * composing exactly the `--debug` launch it composed before.
  */
 export function buildIosPtyLaunchCommand(

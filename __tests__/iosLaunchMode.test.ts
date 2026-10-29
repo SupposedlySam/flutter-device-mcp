@@ -13,15 +13,14 @@ import { resolveConfig } from "../src/config/config.js";
 import { buildRuntime } from "../src/runtime.js";
 
 describe("IOS_DEFAULT_LAUNCH_MODE", () => {
-  // The default is load-bearing, not cosmetic: the app gates
-  // bootstrapMarionette() on kDebugMode, so anything but debug leaves a plain
-  // `flutter_deploy platform=ios` undrivable.
+  // The default is load-bearing, not cosmetic: an app that gates Marionette on
+  // kDebugMode is undrivable in any other mode, and only debug hot reloads.
   it("is debug, so a plain deploy comes up Marionette-drivable", () => {
     expect(IOS_DEFAULT_LAUNCH_MODE).toBe("debug");
     expect(marionetteAvailableInMode(IOS_DEFAULT_LAUNCH_MODE)).toBe(true);
   });
 
-  it("reports every non-debug mode as Marionette-unavailable", () => {
+  it("does not promise Marionette outside debug, since profile depends on the app's gate", () => {
     expect(marionetteAvailableInMode("profile")).toBe(false);
     expect(marionetteAvailableInMode("release")).toBe(false);
   });
@@ -99,8 +98,9 @@ describe("iosLaunchModeCaveat", () => {
     expect(iosLaunchModeCaveat("debug")).toBeNull();
   });
 
-  it("tells a profile caller the URI is real but Marionette is not", () => {
+  it("tells a profile caller the URI is real and Marionette depends on the app's gate", () => {
     const caveat = iosLaunchModeCaveat("profile");
+    expect(caveat).toContain("!kReleaseMode");
     expect(caveat).toContain("kDebugMode");
     // The distinction that stops a caller debugging a URI that is fine.
     expect(caveat).toMatch(/URI is real/i);

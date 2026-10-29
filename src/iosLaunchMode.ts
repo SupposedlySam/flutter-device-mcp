@@ -8,12 +8,12 @@
  * `androidLaunchMode.ts`; the shape (precedence, env pin, default, rationale) is
  * deliberately the same so a reader of one already knows the other.
  *
- * WHY the default is `debug` (not `profile`): Marionette is gated on `kDebugMode`
- * in the app (`bootstrapMarionette()` only runs in debug), so a profile/release
- * launch registers NO `ext.flutter.marionette.*` extension and the app cannot be
- * driven — and hot reload/restart don't apply to a cold (non-debug) run either. A
- * plain `flutter_deploy platform=ios` must therefore come up debug so it is
- * Marionette-drivable out of the box.
+ * WHY the default is `debug` (not `profile`): debug is the only mode with hot
+ * reload and hot restart, and the only one in which every app can be driven.
+ * Whether a profile launch is Marionette-drivable depends on how the app gates
+ * its Marionette binding: one registered whenever `!kReleaseMode` is drivable in
+ * profile, one gated on `kDebugMode` registers NO `ext.flutter.marionette.*`
+ * extension there. A plain `flutter_deploy platform=ios` therefore comes up debug.
  *
  * Precedence (highest first):
  *   1. an explicit `mode` tool arg (`debug` | `profile` | `release`),
@@ -75,7 +75,11 @@ export function resolveIosLaunchMode(opts: {
   return opts.envMode ?? IOS_DEFAULT_LAUNCH_MODE;
 }
 
-/** True when a launch in this mode can register `ext.flutter.marionette.*`. */
+/**
+ * True when a launch in this mode registers `ext.flutter.marionette.*` whatever
+ * the app's gate. Profile is false because an app gating Marionette on
+ * `kDebugMode` has none there, though one gating on `!kReleaseMode` does.
+ */
 export function marionetteAvailableInMode(mode: IosLaunchMode): boolean {
   return mode === "debug";
 }
@@ -88,21 +92,23 @@ export function marionetteAvailableInMode(mode: IosLaunchMode): boolean {
  * The profile wording is deliberately specific about WHICH half is missing: the
  * `ws://…/ws` URI is real (`flutter run` enables the VM service for every mode
  * except release — `createDebuggingOptions` branches on `mode.isRelease` alone),
- * but the app's Marionette extension is not registered, so `connect` succeeds and
- * every `ext.flutter.marionette.*` call then fails. Saying only "not drivable"
- * would send a caller hunting for a broken URI.
+ * but whether the app's Marionette extension is registered depends on the app's
+ * gate; when it is not, `connect` succeeds and every `ext.flutter.marionette.*`
+ * call then fails. Saying only "not drivable" would send a caller hunting for a
+ * broken URI.
  */
 export function iosLaunchModeCaveat(mode: IosLaunchMode): string | null {
   if (mode === "debug") return null;
   if (mode === "profile") {
     return (
       "Launched --profile: AOT-compiled with realistic timing, and the Dart VM " +
-      "service stays open, so the captured ws://…/ws URI is real. Marionette is " +
-      "NOT available on it — the app gates bootstrapMarionette() on kDebugMode, so " +
-      "no ext.flutter.marionette.* extension is registered and a Marionette tap/" +
-      "enter_text will fail even though connect succeeds. Use the URI for DevTools/" +
-      "timeline/ext.flutter.* work, or redeploy without a mode to get a drivable " +
-      "debug launch. Hot reload/restart do not apply to a profile (cold) run."
+      "service stays open, so the captured ws://…/ws URI is real. Marionette works " +
+      "only if the app registers it outside debug (e.g. whenever !kReleaseMode); an " +
+      "app that gates it on kDebugMode registers no ext.flutter.marionette.* " +
+      "extension, and a Marionette tap/enter_text then fails even though connect " +
+      "succeeds. Use the URI for DevTools/timeline/ext.flutter.* work, or redeploy " +
+      "without a mode for debug. Hot reload and hot restart do not apply to a " +
+      "profile run."
     );
   }
   return (

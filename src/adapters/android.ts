@@ -435,10 +435,9 @@ export function locateAapt2(env: NodeJS.ProcessEnv = process.env): string | unde
  * URI available while behaving like a release build).
  *
  * The launch MODE is resolved by the deploy (see {@link resolveAndroidLaunchMode})
- * and passed in here. It matters because Marionette is gated on `kDebugMode` in
- * the app — a profile/release launch registers no `ext.flutter.marionette.*`
- * extension, so a Marionette-drivable deploy MUST launch `--debug` (mirrors how
- * the iOS adapter launches `--debug`, and why the Android default is `debug`).
+ * and passed in here. It matters because debug is the only mode in which every
+ * app registers `ext.flutter.marionette.*` and the only one with hot reload, so
+ * the default deploy launches `--debug` (mirroring the iOS adapter).
  */
 export function buildAndroidPtyLaunchCommand(
   appDir: string,
@@ -528,8 +527,8 @@ export class AndroidAdapter implements PlatformAdapter {
    * takes no `--no-launch`, so the launch is the ONE place the mode can be
    * honored. Resolution follows {@link resolveAndroidLaunchMode}: an explicit
    * `debug` arg wins, else the `FLUTTER_DEVICE_ANDROID_LAUNCH_MODE` env pin, else the
-   * default `debug` (so a plain deploy comes up Marionette-drivable — Marionette
-   * is gated on `kDebugMode`). Initialized to the config/default mode so a launch
+   * default `debug` (so a plain deploy comes up Marionette-drivable whatever the
+   * app's gate). Initialized to the config/default mode so a launch
    * with no preceding install still uses the right default.
    */
   private launchMode: AndroidLaunchMode;
@@ -943,8 +942,8 @@ export class AndroidAdapter implements PlatformAdapter {
    * neutral core the Android `flutter run --<mode>` command + Android failure
    * signatures. `flutter run` installs the apk, port-forwards the VM service, and
    * prints the URI in one step. The mode is the one the deploy resolved
-   * (recorded by {@link install}): `--debug` by default so Marionette (gated on
-   * `kDebugMode`) can attach, or the explicit/env-pinned mode otherwise.
+   * (recorded by {@link install}): `--debug` by default so Marionette can attach
+   * whatever the app's gate, or the explicit/env-pinned mode otherwise.
    */
   async launchAndCaptureUri(
     device: string,
@@ -1512,7 +1511,7 @@ export class AndroidAdapter implements PlatformAdapter {
    * for the pointer verbs, and text injection. Raw system input that bypasses
    * Flutter's gesture-arena semantics; a driver over the VM service remains the
    * primary in-app path, and this covers what it cannot reach: OS UI outside the
-   * Flutter view, non-debug builds, and D-pad navigation (Android TV).
+   * Flutter view, release builds, and D-pad navigation (Android TV).
    *
    * The serial is resolved lazily per send through the normal device resolution
    * (per-call pin > env pin > the one online device), so a multi-device host
