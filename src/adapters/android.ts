@@ -62,6 +62,7 @@ import {
   killScopedLaunchDrivers,
 } from "../killStaleScope.js";
 import { findLaunch } from "../launchRegistry.js";
+import { androidKindFromSerial, TargetKind } from "../localBackend.js";
 import {
   AndroidLaunchMode,
   ANDROID_DEFAULT_LAUNCH_MODE,
@@ -211,6 +212,8 @@ export interface AndroidAdapterConfig {
 
 export class AndroidAdapter implements PlatformAdapter {
   readonly platform: Platform = "android";
+  /** Deploy launches through `flutter run`, which compiles: defines reach the app. */
+  readonly deployCompilesDefines = true;
 
   /**
    * Every session on this host is a `flutter run`, so only the device tells them
@@ -619,6 +622,56 @@ export class AndroidAdapter implements PlatformAdapter {
     return runShell(`adb -s ${quote(device)} uninstall ${quote(appId)}`, {
       timeoutMs: 120000,
     });
+  }
+
+  /**
+   * An emulator reaches this host through the 10.0.2.2 alias; hardware needs an
+   * `adb reverse` tunnel. adb names emulators `emulator-<port>`, which is what
+   * {@link androidKindFromSerial} reads.
+   */
+  targetKind(device: string): TargetKind {
+    return androidKindFromSerial(device);
+  }
+
+  /**
+   * Tunnel each port from the DEVICE back to this host with `adb reverse`, so a
+   * `localhost` host string on the device means this machine.
+   *
+   * EVERY port must succeed. A partial tunnel is reported as a failure because
+   * the app is then pointed at loopback with one of its ports dead, and that
+   * surfaces as a connection error against a backend that is plainly running —
+   * the reader blames the app or the server, never the tunnel that was never made.
+   */
+  async setupReverseTunnels(
+    device: string,
+    ports: number[]
+  ): Promise<{ ok: boolean; detail: string }> {
+    const failures: string[] = [];
+    const made: number[] = [];
+    for (const port of [...ports].sort((a, b) => a - b)) {
+      const result = await runShell(
+        `adb -s ${quote(device)} reverse tcp:${port} tcp:${port}`,
+        { timeoutMs: 20000 }
+      );
+      if (result.success) made.push(port);
+      else failures.push(`tcp:${port} (${tail(result.combined, 3).trim()})`);
+    }
+    if (failures.length > 0) {
+      return {
+        ok: false,
+        detail:
+          `adb reverse FAILED for ${failures.join("; ")}. ` +
+          (made.length > 0
+            ? `Tunnelled ${made.join(", ")} only — the app would reach some ports and not others. `
+            : "") +
+          "A common cause is an adb server that does not support reverse for this " +
+          "transport, or a device that dropped off between resolution and now.",
+      };
+    }
+    return {
+      ok: true,
+      detail: `adb reverse established for ${made.join(", ")}.`,
+    };
   }
 
   /**

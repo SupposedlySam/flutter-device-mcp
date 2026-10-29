@@ -10,6 +10,7 @@
  * run identically for both callers because they run HERE, not in the frontends.
  */
 import fs from "fs";
+import os from "os";
 import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import { logger } from "../logger.js";
 import { CommandResult, tail } from "../cli.js";
@@ -53,6 +54,13 @@ import {
   MarionetteProbeResult,
   probeMarionetteReady,
 } from "../marionetteProbe.js";
+import {
+  isLoopbackHost,
+  localBackendDefines,
+  LocalBackendPlan,
+  resolveLocalBackendHost,
+  TargetKind,
+} from "../localBackend.js";
 
 /**
  * Per-request VM-service timeout for the post-deploy Marionette probe. Kept well
@@ -243,6 +251,131 @@ export class CommandCore {
   }
 
   // =========== deploy ==========
+  /**
+   * Resolve where a local backend lives from the DEVICE's point of view, and set
+   * up any tunnel that answer depends on.
+   *
+   * Returns `fatal` rather than injecting a guessed host. The whole hazard this
+   * addresses is that a wrong host does not look like a wrong host: the app
+   * reports a connection error, and every reading of that points at the backend
+   * or the app rather than at the address. So an unresolvable target STOPS the
+   * deploy with the question, instead of shipping a build that will fail later
+   * and elsewhere.
+   */
+  private async planLocalBackend(
+    adapter: PlatformAdapter,
+    device: string,
+    args: {
+      local_backend_ports?: number[];
+      local_backend_host?: string;
+      local_backend_keys?: { env?: string; host?: string };
+    }
+  ): Promise<{
+    defines: Record<string, string>;
+    report: Record<string, unknown>;
+    fatal?: string;
+  }> {
+    const kind: TargetKind = adapter.targetKind
+      ? adapter.targetKind(device)
+      : "device";
+    const ports = args.local_backend_ports ?? [];
+    const keys = { envKey: args.local_backend_keys?.env, hostKey: args.local_backend_keys?.host };
+
+    let plan: LocalBackendPlan = resolveLocalBackendHost(
+      { platform: adapter.platform, kind },
+      os.networkInterfaces(),
+      ports
+    );
+
+    // An explicit host is the caller answering the question this cannot: which
+    // address the device can actually reach. It overrides the resolved host and
+    // keeps whatever tunnelling the target still needs.
+    if (args.local_backend_host) {
+      plan = {
+        ...plan,
+        host: args.local_backend_host,
+        rationale: `Host supplied explicitly by the caller (${args.local_backend_host}); ` +
+          `resolution for this ${adapter.platform} ${kind} target would otherwise say: ${plan.rationale}`,
+        unresolved: undefined,
+      };
+      // The tunnel exists only to make a LOOPBACK name true on the device. A
+      // caller who named a routable address does not depend on it, so it is not
+      // attempted: attempting it would let a failed `adb reverse` abort a deploy
+      // whose host never needed one.
+      if (!isLoopbackHost(args.local_backend_host)) {
+        plan.reversePorts = [];
+      }
+    }
+
+    const report: Record<string, unknown> = {
+      targetKind: kind,
+      host: plan.host,
+      rationale: plan.rationale,
+      reversePorts: plan.reversePorts,
+      defineKeys: {
+        env: keys.envKey ?? "USE_LOCAL_ENV",
+        host: keys.hostKey ?? "LOCAL_HOST",
+      },
+    };
+
+    if (!plan.host) {
+      return {
+        defines: {},
+        report,
+        fatal:
+          `Could not resolve a local-backend host for this ${adapter.platform} ` +
+          `${kind} target. ${plan.unresolved ?? ""} ` +
+          "Pass local_backend_host explicitly, or drop local_backend. Nothing was " +
+          "installed — a build carrying a wrong host fails later, somewhere that " +
+          "says nothing about the address.",
+      };
+    }
+
+    // Checked AFTER resolution so the refusal can hand over the host it worked
+    // out, and BEFORE any tunnel, so a refused deploy changes nothing on the
+    // device.
+    if (!adapter.deployCompilesDefines) {
+      const defines = localBackendDefines(plan, keys);
+      return {
+        defines: {},
+        report: { ...report, buildDartDefine: defines },
+        fatal:
+          `local_backend cannot take effect on a ${adapter.platform} deploy: it installs an ` +
+          "app compiled EARLIER, and a host is a compile-time constant, so a deploy-time " +
+          "define would change nothing while this response claimed it had. Nothing was " +
+          `installed. Resolved for this target: ${plan.host}. Rebuild with flutter_build ` +
+          `passing dart_define ${JSON.stringify(defines)}, then deploy without local_backend.`,
+      };
+    }
+
+    if (plan.reversePorts.length > 0) {
+      if (!adapter.setupReverseTunnels) {
+        return {
+          defines: {},
+          report,
+          fatal:
+            `This target needs an \`adb reverse\` tunnel for ${plan.reversePorts.join(", ")}, ` +
+            `but the ${adapter.platform} adapter cannot make one. Pass a routable ` +
+            "local_backend_host instead.",
+        };
+      }
+      const tunnel = await adapter.setupReverseTunnels(device, plan.reversePorts);
+      report.tunnel = tunnel.detail;
+      if (!tunnel.ok) {
+        return {
+          defines: {},
+          report,
+          fatal:
+            `${tunnel.detail} The host \`${plan.host}\` depends on that tunnel, so ` +
+            "nothing was installed rather than shipping a build pointed at a " +
+            "loopback address that does not reach this machine.",
+        };
+      }
+    }
+
+    return { defines: localBackendDefines(plan, keys), report };
+  }
+
   async deploy(
     args: CommonArgs & {
       no_launch?: boolean;
@@ -254,6 +387,10 @@ export class CommandCore {
       device_udid?: string;
       app_path?: string;
       app_url?: string;
+      local_backend?: boolean;
+      local_backend_ports?: number[];
+      local_backend_host?: string;
+      local_backend_keys?: { env?: string; host?: string };
     }
   ): Promise<CommandOutput> {
     const adapter = this.adapterFor(args);
@@ -275,12 +412,39 @@ export class CommandCore {
         ? (await adapter.environmentDiagnostic(resolution)) ?? undefined
         : undefined;
 
+      // 1b. Local-backend host resolution, BEFORE the install: on iOS/Android the
+      // install happens inside `flutter run`, so a define that arrives later
+      // never reaches the build that actually runs.
+      const localBackend = args.local_backend
+        ? await this.planLocalBackend(adapter, device, args)
+        : undefined;
+      if (localBackend?.fatal) {
+        return {
+          platform: adapter.platform,
+          stage: "local-backend",
+          success: false,
+          device,
+          deviceWarning,
+          environmentDiagnostic,
+          staleKilled: killed,
+          localBackend: localBackend.report,
+          reason: localBackend.fatal,
+        };
+      }
+      // Explicit dart_define WINS: a caller who named a key was specific, and
+      // silently overwriting it would make the flag change what their own
+      // define means.
+      const dartDefine =
+        localBackend && Object.keys(localBackend.defines).length > 0
+          ? { ...localBackend.defines, ...(args.dart_define ?? {}) }
+          : args.dart_define;
+
       // 2. Install the already-built package (install-only).
       let install = await adapter.install(device, {
         noLaunch: true,
         mode: args.mode,
         debug: args.debug,
-        dartDefine: args.dart_define,
+        dartDefine,
         // macOS-only (ignored by every other adapter): the .app source for this
         // deploy, overriding the configured
         // FLUTTER_DEVICE_MACOS_APP_PATH/FLUTTER_DEVICE_MACOS_APP_URL defaults.
@@ -302,7 +466,7 @@ export class CommandCore {
           noLaunch: true,
           mode: args.mode,
           debug: args.debug,
-          dartDefine: args.dart_define,
+          dartDefine,
           appPath: args.app_path,
           appUrl: args.app_url,
         });
@@ -322,6 +486,7 @@ export class CommandCore {
           installDiagnostic,
           staleKilled: killed,
           enospcRecoveryAttempted: recovered,
+          localBackend: localBackend?.report,
           install: this.summarizeCli(install, 120),
         };
       }
@@ -337,6 +502,7 @@ export class CommandCore {
           environmentDiagnostic,
           staleKilled: killed,
           enospcRecoveryAttempted: recovered,
+          localBackend: localBackend?.report,
           install: this.summarizeCli(install, 60),
         };
       }
@@ -350,7 +516,10 @@ export class CommandCore {
         device,
         timeoutMs,
         launchMode,
-        args.dart_define
+        // The MERGED defines, not args.dart_define: on iOS/Android the launch is
+        // the `flutter run` that compiles the app, so anything left out here is
+        // left out of the binary — the local-backend host included.
+        dartDefine
       );
 
       // 4a. Reactive launch-failure recovery (iOS first-time provisioning).
@@ -365,7 +534,7 @@ export class CommandCore {
             device,
             timeoutMs,
             launchMode,
-            args.dart_define
+            dartDefine
           );
         }
       }
@@ -381,6 +550,7 @@ export class CommandCore {
           environmentDiagnostic,
           staleKilled: killed,
           enospcRecoveryAttempted: recovered,
+          localBackend: localBackend?.report,
           launchRecovery,
           reason: outcome.reason,
           runtimeDiagnostic: adapter.runtimeCrashDiagnostic
@@ -492,6 +662,7 @@ export class CommandCore {
         environmentDiagnostic,
         staleKilled: killed,
         enospcRecoveryAttempted: recovered,
+        localBackend: localBackend?.report,
         launchRecovery,
         vmServiceUriWs: outcome.vmServiceUriWs,
         vmServiceUriHttp: outcome.vmServiceUriHttp,

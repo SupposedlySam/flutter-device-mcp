@@ -340,7 +340,7 @@ var — it came from.
 | `flutter_info` | Device + environment status and resolved config with provenance |
 | `flutter_setup` | Prepare the device for development |
 | `flutter_build` | Build the app package. `mode` picks release/profile/debug — reach for `profile` when measuring, since it is AOT-timed *and* keeps the VM service open. `dart_define` passes compile-time constants. macOS: `{supported:false}` — building/signing an arbitrary desktop app is out of scope |
-| `flutter_deploy` | **Install + launch through a pty and return the captured `ws://…/ws` VM Service URI** to hand to a driver. Runs the guardrails: kills the stale drivers holding **the device it is deploying to** first (a session on another device survives), recovers from `ENOSPC`, records the launch for hot reload/restart, and probes whether the build is Marionette-drivable. iOS honors `mode` for the launch itself (see [iOS launch modes](#ios-launch-modes)). macOS: stages + launches a prebuilt signed `.app` (`app_path`/`app_url`); no VM Service URI exists there |
+| `flutter_deploy` | **Install + launch through a pty and return the captured `ws://…/ws` VM Service URI** to hand to a driver. Runs the guardrails: kills the stale drivers holding **the device it is deploying to** first (a session on another device survives), recovers from `ENOSPC`, records the launch for hot reload/restart, and probes whether the build is Marionette-drivable. iOS honors `mode` for the launch itself (see [iOS launch modes](#ios-launch-modes)). macOS: stages + launches a prebuilt signed `.app` (`app_path`/`app_url`); no VM Service URI exists there. `local_backend` points the app at a server on **this** machine, doing the per-target host arithmetic (simulator → `localhost`, Android emulator → `10.0.2.2`, Android hardware → `adb reverse` + `localhost`, physical device/TV → this machine's LAN IP) — see [Local backend](#local-backend-local_backend) |
 | `flutter_open_url` | **Open a URL on the device — the deep-link driver.** Drives custom schemes (`myapp://…`) and `https://…` App Links / universal links through the real OS plumbing, so intent-filters and domain associations are actually exercised. Android + Apple **simulators**; a physical iPhone/Apple TV reports `{supported:false}` because Apple provides no url-open verb — see [Deep links](#deep-links-flutter_open_url) |
 | `flutter_diagnose` | **Name a runtime crash the deploy could not catch.** `flutter_deploy` stops polling at the VM Service URI — correctly, the launch succeeded — but a rendering crash fires after that, so the app dies with nothing watching. Run this when deploy reported success and the app is dead or blank. Today: the iOS Impeller/Metal constant-buffer overflow — see [Runtime crashes](#runtime-crashes-flutter_diagnose) |
 | `flutter_uninstall` | Remove the app from the device |
@@ -539,6 +539,57 @@ resident (`Flutter run key commands.`) and, after a short grace window with no U
 printed, ends the wait with the explanation above — it never sits on the caller's
 full `timeout_ms` waiting for something that is not coming. A debug launch is
 unchanged: its URI is the success criterion, so it still waits the full timeout.
+
+## Local backend (`local_backend`)
+
+Pointing an app on a device at a server on your own machine is not one address —
+it is a different string per target, and every wrong one fails looking like a
+broken app or a dead server rather than a wrong host.
+
+```bash
+# iOS simulator: shares this machine's network stack.
+flutter-device deploy --platform ios --target simulator --local-backend
+
+# Physical Android: reaching this host is per-PORT, over adb reverse.
+flutter-device deploy --platform android --local-backend --local-backend-ports 8080,9099
+```
+
+| Target | Host injected | Why |
+| --- | --- | --- |
+| iOS / tvOS **simulator** | `localhost` | it shares this machine's network stack |
+| Android **emulator** | `10.0.2.2` | the emulator's alias for the host; its own `localhost` is the emulated device |
+| Android **hardware** | `localhost` | made true by `adb reverse` on each port you name |
+| Physical iPhone / iPad | this machine's LAN IP | it is a separate machine on the network |
+
+**iOS and Android only.** On those two, deploy *is* the `flutter run` that
+compiles the app, so the host lands in the binary. Tizen, webOS, tvOS and macOS
+deploy an app that was compiled earlier, and a host is a compile-time constant,
+so a deploy-time define would change nothing while the response said it had.
+There, `local_backend` refuses before installing anything. The refusal still
+reports the host it resolved, as `localBackend.buildDartDefine`, ready to pass to
+`flutter_build`'s `dart_define`.
+
+It injects `USE_LOCAL_ENV=true` and `LOCAL_HOST=<host>` as dart-defines; rename
+them with `local_backend_keys` if your app reads different ones. An explicit
+`dart_define` for the same key always wins.
+
+**It refuses rather than guessing.** If this machine has two LAN addresses — Wi-Fi
+and Ethernet both up — or none, the deploy stops and names them instead of
+picking. Which address the *device* can reach is not knowable from here, and
+either choice works from the host while failing from the phone. Pass
+`--local-backend-host` to answer it. Physical Android with no ports is refused for
+the same reason: without a tunnel `localhost` means the device and `10.0.2.2`
+means nothing, so there is no host to inject.
+
+An explicit `--local-backend-host` that is a routable address (not `localhost`,
+`127.x` or `::1`) skips `adb reverse` entirely: the tunnel exists only to make a
+loopback name true on the device, and a host that never needed it should not
+fail the deploy because it could not be made.
+
+Two things it cannot do for you: your backend must listen on the LAN interface
+rather than only on loopback for a physical target to reach it, and every port
+must tunnel — a partial `adb reverse` is reported as a failure, because an app
+pointed at loopback with one dead port looks like an app bug.
 
 ## Runtime crashes (`flutter_diagnose`)
 

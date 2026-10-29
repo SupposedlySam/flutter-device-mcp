@@ -153,6 +153,7 @@ import {
   IOS_IMPELLER_SHADER_LIMIT_SIGNATURE,
   messageForIosRuntimeCrash,
 } from "../iosRuntimeDiagnostics.js";
+import { TargetKind } from "../localBackend.js";
 
 /**
  * The neutral system app used to background the app under test. Foregrounding
@@ -355,6 +356,8 @@ export interface IosAdapterConfig {
 
 export class IosAdapter implements PlatformAdapter {
   readonly platform: Platform = "ios";
+  /** Deploy launches through `flutter run`, which compiles: defines reach the app. */
+  readonly deployCompilesDefines = true;
 
   /**
    * Every session on this host is a `flutter run`, so only the device tells them
@@ -930,6 +933,16 @@ export class IosAdapter implements PlatformAdapter {
    */
   runtimeCrashDiagnostic(log: string): string | null {
     return messageForIosRuntimeCrash(log);
+  }
+
+  /**
+   * A booted simulator IS this machine, so a local backend is reachable at
+   * loopback; a physical iPhone is a separate device on the network and needs a
+   * routable address. `lastKind` is set by {@link discoverDevice}, so this
+   * answers for the target the deploy actually resolved.
+   */
+  targetKind(): TargetKind {
+    return this.lastKind === "simulator" ? "simulator" : "device";
   }
 
   /**

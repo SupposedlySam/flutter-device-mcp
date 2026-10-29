@@ -16,6 +16,7 @@
  */
 import { buildRuntime } from "../runtime.js";
 import { CommandCore, CommonArgs } from "../core/commandCore.js";
+import { parseLocalBackendPorts } from "../localBackend.js";
 import { InputMode } from "../types.js";
 
 /** Parsed argv: the subcommand, global options, and a bag of tool flags. */
@@ -93,6 +94,7 @@ Commands:
   build               Build the app package (--mode release|profile|debug, --profile, --target, --install, --run)
   deploy              Install + launch, capture the VM Service URI (THE key command; --mode to match the built artifact)
                       macOS: stages + launches a prebuilt signed .app (--app-path <path> | --app-url <url>); no VM Service URI exists there
+                      --local-backend [--local-backend-ports 8080,9099] [--local-backend-host <ip>]
   uninstall           Remove the app from the device
   kill-stale          Kill the stale launch/driver processes holding THIS device's lock
                       (--device-udid to aim it; --all-devices for the host-wide hammer)
@@ -157,7 +159,19 @@ async function run(): Promise<number> {
       result = await core.build(merge(f));
       break;
     case "deploy":
-      result = await core.deploy(merge(f));
+      result = await core.deploy(
+        merge({
+          ...f,
+          local_backend_ports: parseLocalBackendPorts(f.local_backend_ports),
+          local_backend_keys:
+            f.local_backend_env_key || f.local_backend_host_key
+              ? {
+                  env: f.local_backend_env_key as string | undefined,
+                  host: f.local_backend_host_key as string | undefined,
+                }
+              : undefined,
+        })
+      );
       break;
     case "uninstall":
       result = await core.uninstall({ ...common, device_udid: devicePin });

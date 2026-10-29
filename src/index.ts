@@ -157,6 +157,14 @@ class FlutterDeviceServer {
               device_udid: args.device_udid as string | undefined,
               app_path: args.app_path as string | undefined,
               app_url: args.app_url as string | undefined,
+              local_backend: args.local_backend as boolean | undefined,
+              local_backend_ports: args.local_backend_ports as
+                | number[]
+                | undefined,
+              local_backend_host: args.local_backend_host as string | undefined,
+              local_backend_keys: args.local_backend_keys as
+                | { env?: string; host?: string }
+                | undefined,
             })
           );
         case "flutter_uninstall":
