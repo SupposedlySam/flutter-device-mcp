@@ -996,6 +996,49 @@ describe("AndroidAdapter.resolveAppId (the package every verb acts on)", () => {
     });
   });
 
+  function configured(appDir: string, appId: string) {
+    return new AndroidAdapter({
+      appDir,
+      appId,
+      appIdConfigured: true,
+      flutterCommand: "flutter",
+      aaptCommand: "aapt2",
+    });
+  }
+
+  it("names a user-set app id over what the tree would guess", async () => {
+    pmLists("package:com.example.app.dev  installer=null");
+    await expect(configured(devSuffixTree, "com.example.flavored").resolveAppId(SERIAL)).resolves.toEqual({
+      ok: true,
+      appId: "com.example.flavored",
+      source: "configured",
+    });
+  });
+
+  it("names a user-set app id when the tree cannot say what the build produces", async () => {
+    pmLists();
+    await expect(configured(ANDROID_APP_DIR, "com.example.flavored").resolveAppId(SERIAL)).resolves.toEqual({
+      ok: true,
+      appId: "com.example.flavored",
+      source: "configured",
+    });
+  });
+
+  it("keeps the package deploy recorded over a user-set app id", async () => {
+    recordDeployedPackage({
+      platform: "android",
+      device: SERIAL,
+      identity: PHONE_IDENTITY,
+      packageId: "com.example.app.profiled",
+    });
+    pmLists("package:com.example.app.profiled  installer=null");
+    await expect(configured(devSuffixTree, "com.example.flavored").resolveAppId(SERIAL)).resolves.toEqual({
+      ok: true,
+      appId: "com.example.app.profiled",
+      source: "deployed",
+    });
+  });
+
   it("drops a record whose package is gone and names what the device holds instead", async () => {
     recordDeployedPackage({
       platform: "android",

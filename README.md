@@ -186,7 +186,7 @@ All variables use the `FLUTTER_DEVICE_` prefix (`<PLATFORM>` is one of
 | `FLUTTER_DEVICE_CONFIG` | Explicit path to the config file |
 | `FLUTTER_DEVICE_DEFAULT_PLATFORM` | Platform used when a call omits `platform` |
 | `FLUTTER_DEVICE_<PLATFORM>_DEVICE` | Device pin (id / name / address) for a platform |
-| `FLUTTER_DEVICE_<PLATFORM>_APP_ID` | App / bundle id for a platform. On Android the lifecycle verbs never use it; they act on the package deploy installed (see [Android package resolution](#android-package-resolution)) |
+| `FLUTTER_DEVICE_<PLATFORM>_APP_ID` | App / bundle id for a platform. On Android the package deploy recorded on the device comes first (see [Android package resolution](#android-package-resolution)) |
 | `FLUTTER_DEVICE_ANDROID_LAUNCH_MODE` | `debug` \| `profile` \| `release` (default Android mode) |
 | `FLUTTER_DEVICE_IOS_LAUNCH_MODE` | `debug` \| `profile` \| `release` (default iOS build + deploy-launch mode; see [iOS launch modes](#ios-launch-modes)) |
 | `FLUTTER_DEVICE_TIZEN_PROFILE` | Tizen device profile for `flutter-tizen build` |
@@ -563,17 +563,21 @@ unchanged: its URI is the success criterion, so it still waits the full timeout.
 
 The Android lifecycle verbs (`flutter_terminate`, `flutter_foreground`,
 `flutter_uninstall`, `flutter_open_url`) act on the package `flutter_deploy`
-installed, never on a configured `appId`, because a flavour or a build-type suffix
-makes the two differ and a verb aimed at the wrong id force-stops somebody's own
-install. The package is resolved in this order:
+installed, not on an id derived from the project, because a flavour or a
+build-type suffix makes the two differ and a verb aimed at the wrong id
+force-stops somebody's own install. The package is resolved in this order:
 
 1. **The deploy record.** Deploy reads the package id from the apk it installs
    (with `aapt2`) and records it per device in `deployed-packages.json`. The record
    is used only while that device answers with the identity it had then and the
    package is still installed; an uninstall clears it.
-2. **The one adb-installed variant** of the build's base `applicationId` on the
+2. **An `appId` you set** with `FLUTTER_DEVICE_ANDROID_APP_ID` or the config file.
+   Set it when the app runs from somewhere other than `flutter_deploy` and the
+   build has flavours or computes its `applicationId`, which `build.gradle` alone
+   cannot settle.
+3. **The one adb-installed variant** of the build's base `applicationId` on the
    device.
-3. **What the build would produce** (`applicationId` plus the build type's
+4. **What the build would produce** (`applicationId` plus the build type's
    `applicationIdSuffix` from `build.gradle`). That is a guess, so a package that
    is not installed is refused rather than reported as a success. With several
    variants installed and no record, the guess is used only when the app dir was

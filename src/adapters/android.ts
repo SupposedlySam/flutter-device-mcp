@@ -487,6 +487,13 @@ export interface AndroidAdapterConfig {
    * often not the tree that deployed.
    */
   checkoutNamed?: boolean;
+  /**
+   * {@link AndroidAdapterConfig.appId} was set by the user (env var or config
+   * file) rather than derived. A set id names the package outright, so it is
+   * used when no deploy record does, and when the build tree cannot say what it
+   * produces (flavors, an expression).
+   */
+  appIdConfigured?: boolean;
 }
 
 export class AndroidAdapter implements PlatformAdapter {
@@ -584,17 +591,22 @@ export class AndroidAdapter implements PlatformAdapter {
    *  1. the package read from the apk deploy installed there, as recorded, when
    *     the device is still the one it was recorded on and the package is still
    *     installed;
-   *  2. the only adb install of the app on the device (the base id or a
+   *  2. an app id the user set, which names the package outright;
+   *  3. the only adb install of the app on the device (the base id or a
    *     suffixed variant), so the answer survives a lost record;
-   *  3. what this checkout's build would produce now, marked as a guess.
-   * Never the configured id, because a verb aimed there acts on whatever else
-   * carries that id, such as the Play Store release.
+   *  4. what this checkout's build would produce now, marked as a guess.
+   * Never an id derived from the project, because a verb aimed there acts on
+   * whatever else carries that id, such as the Play Store release. A store copy
+   * is refused under any source unless the caller allows it.
    */
   async resolveAppId(device: string): Promise<AppIdResolution> {
     const recorded = await this.recordedPackage(device);
     if (recorded.kind === "unknown") return { ok: false, reason: recorded.reason };
     if (recorded.kind === "found") {
       return { ok: true, appId: recorded.packageId, source: "deployed" };
+    }
+    if (this.config.appIdConfigured) {
+      return { ok: true, appId: this.config.appId, source: "configured" };
     }
     const built = androidBuildPackageId(this.config.appDir, this.launchMode);
     const base = androidBaseApplicationId(this.config.appDir);
@@ -697,8 +709,9 @@ export class AndroidAdapter implements PlatformAdapter {
   /** The package this checkout's build produces in the current launch mode. */
   installPackageId(): AppIdResolution {
     const built = androidBuildPackageId(this.config.appDir, this.launchMode);
-    return built.ok
-      ? { ok: true, appId: built.packageId, source: "build-tree" }
+    if (built.ok) return { ok: true, appId: built.packageId, source: "build-tree" };
+    return this.config.appIdConfigured
+      ? { ok: true, appId: this.config.appId, source: "configured" }
       : built;
   }
 
