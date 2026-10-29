@@ -1006,39 +1006,22 @@ describe("findIosProcessPid", () => {
   });
 });
 
-describe("IosAdapter input is unsupported (Marionette owns in-app gestures)", () => {
-  it("returns a cached controller that reports every send unsupported", async () => {
+describe("IosAdapter input (volume keys and taps only; Marionette owns in-app gestures)", () => {
+  it("returns a cached controller that rejects keys other than the volume keys and scrolling", async () => {
     const adapter = ios();
     const input = adapter.input();
     expect(input.platform).toBe("ios");
     expect(adapter.input()).toBe(input); // cached / session-sticky
     await expect(input.key("UP")).rejects.toThrow(UnsupportedInputError);
-    await expect(input.pointerMove(0, 0)).rejects.toThrow(UnsupportedInputError);
-    await expect(input.pointerClick()).rejects.toThrow(UnsupportedInputError);
     await expect(input.pointerScroll(0)).rejects.toThrow(UnsupportedInputError);
   });
 
-  // The server wraps key()/pointerClick() in the same try/catch it uses for
-  // move/scroll, mapping the thrown UnsupportedInputError via mapUnsupportedInput
-  // to a non-fatal {supported:false}. Exercise that exact conversion so the
-  // handler's iOS key/click path is proven to return supported:false instead of
-  // faulting into an InternalError.
-  it("key/click map to a non-fatal supported:false result instead of throwing", async () => {
+  it("maps a rejected key to a non-fatal supported:false result instead of throwing", async () => {
     const { mapUnsupportedInput } = await import("../src/handlerLogic.js");
-    const input = ios().input();
-
-    const keyError = await input.key("UP").catch((e) => e);
+    const keyError = await ios().input().key("UP").catch((e) => e);
     expect(mapUnsupportedInput(keyError, "ios", "key")).toMatchObject({
       platform: "ios",
       action: "key",
-      sent: false,
-      supported: false,
-    });
-
-    const clickError = await input.pointerClick().catch((e) => e);
-    expect(mapUnsupportedInput(clickError, "ios", "click")).toMatchObject({
-      platform: "ios",
-      action: "click",
       sent: false,
       supported: false,
     });

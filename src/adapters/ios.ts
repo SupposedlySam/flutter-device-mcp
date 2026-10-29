@@ -87,6 +87,8 @@ import {
   releaseClaimsOnExit,
 } from "../simulatorClaim.js";
 import { findLaunch } from "../launchRegistry.js";
+import { IosInputController } from "../input/iosInputController.js";
+import { IosUiRunner } from "../iosUiRunner.js";
 import {
   parseSimulatorDestinations,
   resolveSimDestination,
@@ -99,11 +101,9 @@ import {
   BuildResult,
   DeviceResolution,
   InputController,
-  InputMode,
   isLaunchFailure,
   LaunchOutcome,
   Platform,
-  UnsupportedInputError,
 } from "../types.js";
 import {
   AppLifecycle,
@@ -371,6 +371,7 @@ export class IosAdapter implements PlatformAdapter {
 
   /** Cached input controller so its selected mode survives across tool calls. */
   private inputController: InputController | undefined;
+  private inputDevicePin: string | undefined;
 
   /**
    * The kind (device vs simulator) of the most recently resolved target. Cached
@@ -2090,57 +2091,26 @@ export class IosAdapter implements PlatformAdapter {
   }
 
   /**
-   * iOS input controller. In-app taps/gestures are Marionette's job over the VM
-   * service, so this MCP does not drive them; and a touch device has no free
-   * cursor. Every send therefore reports unsupported (move/scroll throw
-   * {@link UnsupportedInputError}, surfaced by the server as `{supported:false}`).
-   * `mode` is tracked to satisfy the neutral interface shape.
+   * iOS input controller: volume keys and coordinate taps on a PHYSICAL phone
+   * through the XCUITest runner; everything else reports unsupported (in-app
+   * driving is Marionette's job, and a touch device has no free cursor).
+   * The device is resolved per call from the same pin the other calls use.
    */
-  input(): InputController {
+  input(preference: DeviceTargetPreference = {}): InputController {
+    this.inputDevicePin = preference.udid;
     if (!this.inputController) {
-      this.inputController = new IosInputStub();
+      this.inputController = new IosInputController(
+        async () => {
+          const resolution = (await this.discoverDevice({
+            udid: this.inputDevicePin,
+          })) as IosDeviceResolution;
+          return { udid: resolution.target, kind: resolution.kind };
+        },
+        new IosUiRunner(),
+        { appId: this.config.appId, appDir: this.config.appDir }
+      );
     }
     return this.inputController;
-  }
-}
-
-/**
- * iOS input stub: physical-remote/cursor input is not the iOS driving model.
- * Navigation and taps are performed by Marionette over the Dart VM service, so
- * this controller intentionally reports every input path as unsupported rather
- * than duplicating Marionette. `mode` is tracked only for interface parity.
- */
-class IosInputStub implements InputController {
-  readonly platform: Platform = "ios";
-  private _mode: InputMode = "dpad";
-  get mode(): InputMode {
-    return this._mode;
-  }
-  setMode(mode: InputMode): void {
-    this._mode = mode;
-  }
-  async key(): Promise<void> {
-    throw new UnsupportedInputError(
-      "Remote/D-pad keys have no meaning on iOS. Drive the app with Marionette " +
-        "(tap/enter_text/scroll) over the Dart VM service instead."
-    );
-  }
-  async pointerMove(): Promise<void> {
-    throw new UnsupportedInputError(
-      "Free-cursor pointer move is unsupported on iOS (a touch device has no " +
-        "cursor). Use Marionette tap-by-coordinate/element over the VM service."
-    );
-  }
-  async pointerClick(): Promise<void> {
-    throw new UnsupportedInputError(
-      "Pointer click is unsupported on iOS. Use Marionette tap over the VM service."
-    );
-  }
-  async pointerScroll(): Promise<void> {
-    throw new UnsupportedInputError(
-      "Free-cursor scroll is unsupported on iOS. Use Marionette scroll/swipe " +
-        "over the VM service."
-    );
   }
 }
 

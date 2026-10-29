@@ -238,6 +238,7 @@ class FlutterDeviceServer {
               ...common,
               key: args.key as string | undefined,
               text: args.text as string | undefined,
+              repeat: args.repeat as number | undefined,
               device_udid: args.device_udid as string | undefined,
             })
           );

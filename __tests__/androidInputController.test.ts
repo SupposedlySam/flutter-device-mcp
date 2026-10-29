@@ -111,6 +111,12 @@ describe("normalizeAndroidKey", () => {
     expect(normalizeAndroidKey("HOME")).toBe("3"); // KEYCODE_HOME
   });
 
+  it("uses the same volume names as iOS: UP 24, DOWN 25, MUTE 164", () => {
+    expect(normalizeAndroidKey("VOLUME_UP")).toBe("24");
+    expect(normalizeAndroidKey("volume_down")).toBe("25");
+    expect(normalizeAndroidKey("VOLUME_MUTE")).toBe("164");
+  });
+
   it("is case-insensitive and trims whitespace", () => {
     expect(normalizeAndroidKey(" up ")).toBe("19");
     expect(normalizeAndroidKey("home")).toBe("3");

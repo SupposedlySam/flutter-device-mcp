@@ -20,8 +20,9 @@
  * resolves its device first and looks up THAT key — so "no position staged" now
  * means exactly what it says: nothing was staged for this device.
  *
- * Coordinates are DEVICE PIXELS — the same space `flutter_screenshot` returns,
- * so a coordinate read off a screenshot round-trips unchanged. Logical→device
+ * Coordinates are in the platform's native tap units: DEVICE PIXELS on Android
+ * (the same space `flutter_screenshot` returns,
+ * so a coordinate read off a screenshot round-trips unchanged) and POINTS on iOS. Logical→device
  * conversion happens above this layer (with an explicit `dpr`, never assumed).
  *
  * Nothing here is device-specific-and-committed: the file is per-developer
@@ -32,7 +33,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 
-/** A staged pointer position in DEVICE pixels, plus when it was staged. */
+/** A staged pointer position in the platform's tap units (see above), plus when it was staged. */
 export interface StagedPointerPosition {
   x: number;
   y: number;

@@ -229,7 +229,12 @@ export interface InputController {
   /** Select the active input mode. */
   setMode(mode: InputMode): void;
   /** Send a navigation/remote key (short name UP/DOWN/… or full KEY_ name). */
-  key(name: string): Promise<void>;
+  key(name: string, opts?: KeyOptions): Promise<void>;
+  /**
+   * True when {@link key} honours `opts.repeat` in one call (iOS: one runner
+   * launch for N presses). Otherwise the server repeats the call itself.
+   */
+  readonly nativeKeyRepeat?: boolean;
   /**
    * Move the virtual pointer to a DEVICE-pixel position. May throw
    * {@link UnsupportedInputError} on focus-based platforms (e.g. Tizen) that
@@ -294,6 +299,12 @@ export interface InputController {
   pointerPosition?(): Promise<
     { x: number; y: number; stagedAt?: string } | undefined
   >;
+}
+
+/** Options for {@link InputController.key}. */
+export interface KeyOptions {
+  /** Press the key this many times (whole number, default 1). */
+  repeat?: number;
 }
 
 /**

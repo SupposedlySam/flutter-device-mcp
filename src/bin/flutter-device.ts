@@ -105,7 +105,7 @@ Commands:
   screenshot          Capture the screen to a PNG (--output-path, --include-base64, --target device|simulator)
   record              Record a bounded screen clip (--duration-s, --fps, --format mp4|gif, --target device|simulator)
   set-input-mode      Select the input plane (--mode dpad|pointer) — TV
-  key                 Send a remote/navigation key (--key UP|DOWN|ENTER|…) or type text (--text "hi")
+  key                 Send a remote/navigation key (--key UP|DOWN|ENTER|…) or type text (--text "hi"); --repeat N presses it N times
   geometry            Report screen size + device pixel ratio (--view-width/--view-height to cross-check)
   pointer             Drive the pointer (--action move|click|scroll|drag, --x --y --dy;
                       drag: --x2 --y2 [--duration-ms --steps --hold-ms])
@@ -217,6 +217,7 @@ async function run(): Promise<number> {
         ...common,
         key: f.key as string | undefined,
         text: f.text as string | undefined,
+        repeat: f.repeat as number | undefined,
         device_udid: devicePin,
       });
       break;

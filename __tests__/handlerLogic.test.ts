@@ -24,6 +24,15 @@ describe("resolvePlatform", () => {
 });
 
 describe("resolvePointerTarget", () => {
+  it("ignores logical/dpr for point-native platforms instead of scaling", () => {
+    expect(
+      resolvePointerTarget(
+        { x: 195, y: 420, coordinateSpace: "logical", dpr: 3 },
+        { points: true }
+      )
+    ).toEqual({ point: { x: 195, y: 420 }, coordinateSpace: "points" });
+  });
+
   it("defaults coordinateSpace to device and passes coordinates through", () => {
     expect(resolvePointerTarget({ x: 100, y: 200 })).toEqual({
       point: { x: 100, y: 200 },

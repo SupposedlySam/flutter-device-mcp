@@ -1,0 +1,28 @@
+name: FlutterDeviceUiRunner
+options:
+  bundleIdPrefix: dev.flutterdevice.uirunner
+settings:
+  base:
+    DEVELOPMENT_TEAM: __DEVELOPMENT_TEAM__
+    CODE_SIGN_STYLE: Automatic
+    IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+    GENERATE_INFOPLIST_FILE: YES
+targets:
+  FlutterDeviceUiRunnerHost:
+    type: application
+    platform: iOS
+    sources: [Host]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.flutterdevice.uirunner.t__DEVELOPMENT_TEAM__
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+  FlutterDeviceUiRunnerTests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources: [UITests]
+    dependencies:
+      - target: FlutterDeviceUiRunnerHost
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.flutterdevice.uirunner.t__DEVELOPMENT_TEAM__.tests
+        TEST_TARGET_NAME: FlutterDeviceUiRunnerHost

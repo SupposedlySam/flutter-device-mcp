@@ -23,6 +23,7 @@
     "scripts/run.mjs",
     "scripts/run.sh",
     "scripts/pty-control-forward.py",
+    "ios-ui-runner",
     "README.md",
     "LICENSE"
   ],

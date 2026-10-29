@@ -45,6 +45,7 @@ import {
   resolveLaunch,
 } from "../launchRegistry.js";
 import { runKillStale } from "../killStaleFlow.js";
+import { MAX_VOLUME_REPEAT } from "../iosUiRunnerSteps.js";
 import { runDeployCore, runUninstallCore } from "../deployFlow.js";
 import { VmServiceClient } from "../vmServiceClient.js";
 import {
@@ -73,6 +74,9 @@ import {
  * outrun the budget (the client's 20s default would).
  */
 const MARIONETTE_PROBE_CLIENT_TIMEOUT_MS = 3000;
+
+/** Most presses one flutter_key call may repeat a key. */
+const MAX_KEY_REPEAT = MAX_VOLUME_REPEAT;
 
 /**
  * The coordinate-space contract a geometry answer carries. Stated on the result
@@ -393,11 +397,17 @@ export class CommandCore {
           : "The launch process is left running to hold the VM service open for a driver " +
             "(e.g. Marionette). Use flutter_hot_reload against this same daemon for a fast inner " +
             "loop instead of rebuilding + redeploying." +
-            (adapter.platform === "ios" || adapter.platform === "android"
-              ? " Drive the app with Marionette (tap/enter_text/scroll) over this VM service; the " +
-                "flutter_key/flutter_pointer input tools do not apply. Use flutter_background/" +
-                "flutter_foreground to exercise app lifecycle."
-              : "") +
+            (adapter.platform === "ios"
+              ? " Drive the app with Marionette (tap/enter_text/scroll) over this VM service. On a " +
+                "PHYSICAL iPhone flutter_key presses VOLUME_UP/VOLUME_DOWN and flutter_pointer click " +
+                "taps at x/y (points) through an XCUITest runner, which works on profile/release " +
+                "builds where Marionette is not attached; the simulator has neither. Use " +
+                "flutter_background/flutter_foreground to exercise app lifecycle."
+              : adapter.platform === "android"
+                ? " Drive the app with Marionette (tap/enter_text/scroll) over this VM service; the " +
+                  "flutter_key/flutter_pointer input tools do not apply. Use flutter_background/" +
+                  "flutter_foreground to exercise app lifecycle."
+                : "") +
             (adapter.platform === "tvos"
               ? " On a physical Apple TV flutter_key sends Siri Remote presses (UP/DOWN/LEFT/RIGHT/" +
                 "ENTER/MENU/HOME/PLAY_PAUSE) through pyatv's atvremote when it is installed and paired, " +
@@ -1063,7 +1073,12 @@ export class CommandCore {
 
   // =========== key ==========
   async key(
-    args: CommonArgs & { key?: string; text?: string; device_udid?: string }
+    args: CommonArgs & {
+      key?: string;
+      text?: string;
+      repeat?: number;
+      device_udid?: string;
+    }
   ): Promise<CommandOutput> {
     const adapter = this.adapterFor(args);
     return this.guard(
@@ -1116,8 +1131,21 @@ export class CommandCore {
           };
         }
 
+        const repeat = args.repeat ?? 1;
+        if (!Number.isInteger(repeat) || repeat < 1 || repeat > MAX_KEY_REPEAT) {
+          throw new McpError(
+            ErrorCode.InvalidParams,
+            `repeat must be a whole number from 1 to ${MAX_KEY_REPEAT}, received ${JSON.stringify(args.repeat)}.`
+          );
+        }
         try {
-          await input.key(args.key as string);
+          if (input.nativeKeyRepeat) {
+            await input.key(args.key as string, { repeat });
+          } else {
+            for (let sent = 0; sent < repeat; sent++) {
+              await input.key(args.key as string);
+            }
+          }
         } catch (error) {
           const notSupported = mapUnsupportedInput(error, adapter.platform, "key");
           if (notSupported) return notSupported;
@@ -1127,6 +1155,7 @@ export class CommandCore {
           platform: adapter.platform,
           mode: input.mode,
           key: args.key,
+          ...(repeat > 1 ? { repeat } : {}),
           sent: true,
           deviceWarning: adapter.inputDeviceWarning?.(),
         };
@@ -1180,7 +1209,9 @@ export class CommandCore {
         const input = adapter.input({ udid: args.device_udid });
         switch (args.action) {
           case "move": {
-            const { point, coordinateSpace } = resolvePointerTarget(args);
+            const { point, coordinateSpace } = resolvePointerTarget(args, {
+              points: adapter.platform === "ios",
+            });
             try {
               await input.pointerMove(point.x, point.y, {
                 absolute: args.absolute,
@@ -1207,7 +1238,7 @@ export class CommandCore {
             // write. Omitting them preserves the staged-position behavior.
             const staged =
               args.x !== undefined && args.y !== undefined
-                ? resolvePointerTarget(args)
+                ? resolvePointerTarget(args, { points: adapter.platform === "ios" })
                 : undefined;
             if (staged) {
               // Staging is reported as its OWN action: on a focus-driven
@@ -1247,9 +1278,12 @@ export class CommandCore {
               deviceWarning: adapter.inputDeviceWarning?.(),
               ...(staged ? { coordinateSpace: staged.coordinateSpace } : {}),
               ...(tapped ? { devicePosition: tapped } : {}),
-              note: staged
-                ? "Tapped at the coordinates given on this call."
-                : "Taps the staged pointer position where the platform has one — reported as devicePosition — or activates the currently-focused element (KEY_ENTER) on focus/D-pad-driven platforms. Passing x/y here taps a coordinate in ONE call instead.",
+              note:
+                adapter.platform === "ios"
+                  ? "Tapped through the XCUITest runner. Coordinates (devicePosition) are POINTS from the top-left of the app window, not screenshot pixels."
+                  : staged
+                    ? "Tapped at the coordinates given on this call."
+                    : "Taps the staged pointer position where the platform has one — reported as devicePosition — or activates the currently-focused element (KEY_ENTER) on focus/D-pad-driven platforms. Passing x/y here taps a coordinate in ONE call instead.",
             };
           }
           case "scroll": {

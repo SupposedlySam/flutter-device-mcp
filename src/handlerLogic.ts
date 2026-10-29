@@ -38,11 +38,14 @@ export function resolvePlatform(
 /** A resolved pointer target in DEVICE space plus the space it came from. */
 export interface ResolvedPointerTarget {
   point: Point;
-  coordinateSpace: "device" | "logical";
+  coordinateSpace: "device" | "logical" | "points";
 }
 
 /**
  * Resolve pointer `x`/`y` into a DEVICE-space point.
+ *
+ * With `options.points` (iOS taps) x/y are already in the platform's native
+ * points and `coordinateSpace`/`dpr` are ignored.
  *
  * `coordinateSpace` defaults to `device`. For `logical`, the point is scaled to
  * device pixels via {@link logicalToDevicePx}; `dpr` is required (never assumed)
@@ -54,13 +57,16 @@ export function resolvePointerTarget(args: {
   y?: unknown;
   coordinateSpace?: unknown;
   dpr?: unknown;
-}): ResolvedPointerTarget {
+}, options: { points?: boolean } = {}): ResolvedPointerTarget {
   const coordinateSpace = (args.coordinateSpace as "device" | "logical") ?? "device";
   if (typeof args.x !== "number" || typeof args.y !== "number") {
     throw new McpError(
       ErrorCode.InvalidParams,
       "pointer move requires numeric x and y."
     );
+  }
+  if (options.points) {
+    return { point: { x: args.x, y: args.y }, coordinateSpace: "points" };
   }
   if (coordinateSpace === "logical") {
     if (typeof args.dpr !== "number") {
@@ -163,7 +169,10 @@ export function resolveDragGesture(args: {
   duration_ms?: unknown;
   steps?: unknown;
   hold_ms?: unknown;
-}): { request: PointerDragRequest; coordinateSpace: "device" | "logical" } {
+}): {
+  request: PointerDragRequest;
+  coordinateSpace: "device" | "logical" | "points";
+} {
   const finite = (value: unknown) => typeof value === "number" && Number.isFinite(value);
   if (![args.x, args.y, args.x2, args.y2].every(finite)) {
     throw new McpError(

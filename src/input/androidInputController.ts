@@ -74,7 +74,8 @@ import {
  * ENTER/OK/SELECT are KEYCODE_DPAD_CENTER (23 — activates the focused element,
  * the D-pad semantics of Samsung's KEY_ENTER; pass KEYCODE_ENTER for the
  * text-field newline key, 66), RETURN/BACK are KEYCODE_BACK (4), and HOME is
- * KEYCODE_HOME (3).
+ * KEYCODE_HOME (3). VOLUME_UP/VOLUME_DOWN/VOLUME_MUTE (24/25/164) use the same
+ * names the iOS controller accepts, so one name works on both phones.
  */
 export const ANDROID_KEYCODES: Readonly<Record<string, number>> = {
   UP: 19, // KEYCODE_DPAD_UP
@@ -87,6 +88,9 @@ export const ANDROID_KEYCODES: Readonly<Record<string, number>> = {
   RETURN: 4, // KEYCODE_BACK
   BACK: 4, // KEYCODE_BACK
   HOME: 3, // KEYCODE_HOME
+  VOLUME_UP: 24, // KEYCODE_VOLUME_UP
+  VOLUME_DOWN: 25, // KEYCODE_VOLUME_DOWN
+  VOLUME_MUTE: 164, // KEYCODE_VOLUME_MUTE
 };
 
 /**
