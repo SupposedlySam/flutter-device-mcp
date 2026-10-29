@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A second push to the same PR makes the first run's answer irrelevant, not
+# merely late — cancel it rather than paying for a verdict about superseded code.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: node ${{ matrix.node }}
+    runs-on: ubuntu-latest
+    # GitHub's default is SIX HOURS. A wedged suite is a real failure mode here:
+    # a FIFO open with no reader parks a libuv thread forever and the jest worker
+    # never exits (seen on node 18, 2026-10-29). Lint+build+test take about a
+    # minute, so 15 is a hang detector, not a budget.
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # package.json declares engines.node >= 18. A matrix that tests only the
+        # newest runtime cannot fail on syntax the floor does not have, so the
+        # floor is tested precisely because it is the one nobody develops on.
+        node: ['18', '20', '22']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      # `ci`, never `install`: it installs the lockfile as written and fails when
+      # package.json and the lock disagree, which is the drift a green run would
+      # otherwise hide.
+      - run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      # `build` is the typecheck. tsc emits AND checks, so a separate --noEmit
+      # pass would only assert what this step already proves.
+      - name: Build
+        run: npm run build
+
+      - name: Test
+        run: npm test
