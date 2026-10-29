@@ -98,6 +98,8 @@ Commands:
   kill-stale          Kill the stale launch/driver processes holding THIS device's lock
                       (--device-udid to aim it; --all-devices for the host-wide hammer)
   terminate           Force-quit the app (mobile; Android acts on the package deploy installed)
+  open-url            Open a URL on the device as a tapped link would (--url <url>; Android:
+                      --package-or-bundle-id "" to go unscoped; iOS/tvOS: simulator only)
   background          Send the app to the background without killing it (mobile)
   foreground          Bring the app back to the foreground (mobile)
   hot-reload          Real hot reload on the running app (--device, --timeout-ms)
@@ -120,14 +122,14 @@ Global flags:
                       platform's env pin (Android: an adb serial or the model name adb reports;
                       iOS/tvOS: a flutter id, a devicectl id, or a device/simulator name).
                       Accepted by deploy, uninstall, terminate, background, foreground,
-                      screenshot, record, key, pointer and geometry. A named device that
+                      open-url, screenshot, record, key, pointer and geometry. A named device that
                       is not online is refused (never replaced), and an unnamed call with
                       more than one target online is refused with the list.
   --allow-store-app-removal
                       deploy/uninstall: allow removing a copy of the app somebody else
                       installed (Android: not installed by adb; physical iOS: not built
                       by a developer). Only with the device owner's agreement.
-  --allow-store-app   Android terminate/foreground: act on the app even though the installed
+  --allow-store-app   Android terminate/foreground/open-url: act on the app even though the installed
                       copy was not put there by adb. Only with the device owner's agreement.
   --target <kind>     iOS/tvOS: which CLASS of target to act on — device (real hardware) or
                       simulator. Accepted by build, deploy, open-url, screenshot and record.
@@ -190,6 +192,18 @@ async function run(): Promise<number> {
     case "terminate":
       result = await core.terminate({
         ...common,
+        device_udid: devicePin,
+        allow_store_app: f.allow_store_app as boolean | undefined,
+      });
+      break;
+    case "open-url":
+    case "open_url":
+      result = await core.openUrl({
+        ...common,
+        url: String(f.url ?? ""),
+        package_or_bundle_id:
+          f.package_or_bundle_id === undefined ? undefined : String(f.package_or_bundle_id),
+        target: f.target as "device" | "simulator" | undefined,
         device_udid: devicePin,
         allow_store_app: f.allow_store_app as boolean | undefined,
       });

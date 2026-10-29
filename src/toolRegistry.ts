@@ -284,7 +284,7 @@ function buildFlutterTools(): ToolDefinition[] {
     {
       name: "flutter_uninstall",
       description:
-        "Uninstall the app (`sdb -s <device> uninstall <app_id>` on Tizen; `adb -s <serial> uninstall` on Android) to free device space or reset to a clean state. Soft-succeeds when the app is not installed. With more than one online target the device MUST be named (`device_udid`, or the platform's pin); a named device that is not online fails the call rather than uninstalling somewhere else. A copy somebody else installed (Android: one adb did not install; physical iOS: one not built by a developer, such as an App Store or TestFlight copy) is left alone, with `refused: true` and the reason, unless `allow_store_app_removal: true` is passed. ANDROID: removes the package flutter_deploy installed on that device, resolved as flutter_terminate resolves it, never the configured id.",
+        "Uninstall the app (`sdb -s <device> uninstall <app_id>` on Tizen; `adb -s <serial> uninstall` on Android) to free device space or reset to a clean state. Soft-succeeds when the app is not installed. With more than one online target the device MUST be named (`device_udid`, or the platform's pin); a named device that is not online fails the call rather than uninstalling somewhere else. A copy somebody else installed (Android: one adb did not install; physical iOS: one not built by a developer, such as an App Store or TestFlight copy) is left alone, with `refused: true` and the reason, unless `allow_store_app_removal: true` is passed. ANDROID: removes the package flutter_deploy installed on that device, resolved as flutter_terminate resolves it, never an id derived from the project.",
       inputSchema: {
         type: "object",
         properties: {

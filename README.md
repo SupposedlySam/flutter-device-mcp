@@ -294,6 +294,7 @@ Commands:
 | `uninstall` | Remove the app from the device (`--allow-store-app-removal` to remove a copy somebody else installed) |
 | `kill-stale` | Kill the stale launch/driver processes holding **this device's** lock (`--device-udid` to aim it, `--all-devices` for the host-wide hammer) |
 | `terminate` | Force-quit the app (mobile; `--allow-store-app` on Android for a copy adb did not install) |
+| `open-url` | Open a URL on the device as a tapped link would (`--url`; Android scopes it to the deployed package, `--package-or-bundle-id ""` to go unscoped; iOS/tvOS simulator only) |
 | `background` | Send the app to the background without killing it (mobile) |
 | `foreground` | Bring the app back to the foreground (mobile; `--allow-store-app` as for `terminate`) |
 | `hot-reload` | Real hot reload on the running app |
