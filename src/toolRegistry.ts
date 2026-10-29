@@ -340,6 +340,27 @@ function buildFlutterTools(): ToolDefinition[] {
       },
     },
     {
+      name: "flutter_diagnose",
+      description:
+        "Read a launch log and NAME any known runtime-crash class in it. RUN THIS WHEN flutter_deploy REPORTED SUCCESS AND THE APP IS DEAD OR BLANK — that combination is not a contradiction and this tool is the reason it is diagnosable. The deploy's launch poll stops at the Dart VM Service URI (a found URI outranks every failure signature, because the launch did succeed), but a rendering crash fires when a shader is first rasterized, which is normally AFTER that — so the app dies in the window where nothing is watching and the log holds the only evidence. TODAY'S CLASSES (iOS only): the Impeller/Metal CONSTANT-BUFFER OVERFLOW — Flutter 3.44+ is Impeller-ONLY on iOS (Skia removed) and the iOS Simulator caps constant-buffer bindings at 14, so a runtime-effect shader binding 16 fails Metal pipeline creation and takes the app down. It reports both numbers and says plainly that BOTH obvious escapes are no-ops on iOS in this version (`--no-enable-impeller`, `FLTEnableImpeller=false` in Info.plist) and that the fix is APP-SIDE. Defaults to the most recent recorded launch's log, so the ordinary call needs no arguments. IT DISTINGUISHES THREE OUTCOMES, and you must too: a crash found; no KNOWN class matched (which is NOT 'the app is healthy' — it means nothing in the classifier's set is present); and the log could not be READ (which is not a clean bill of health either — nothing was examined). Platforms with no classifier wired say so rather than returning a silent pass.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          ...platformProp,
+          device: {
+            type: "string",
+            description:
+              "Optional device target to disambiguate when multiple devices have been deployed to. Defaults to the most recent launch for the platform.",
+          },
+          log_path: {
+            type: "string",
+            description:
+              "Optional explicit launch-log path to examine. Defaults to the log recorded by the most recent launch. Pass this to inspect an older log the launch registry no longer points at.",
+          },
+        },
+      },
+    },
+    {
       name: "flutter_screenshot",
       description:
         "Capture the current device/app screen to a PNG on disk and return the absolute saved path (optionally the base64 bytes too), ALONG WITH the device it was captured from (`device`/`deviceKind`/`via`) and the PNG's pixel dimensions — so a capture can never be mistaken for one of a different machine. WHICH TARGET: on iOS/tvOS the capture is routed by the RESOLVED target's kind, not by what else is attached — `device_udid` (or FLUTTER_DEVICE_IOS_DEVICE) wins, otherwise resolution is PHYSICAL-FIRST exactly like flutter_deploy, so a capture lands on the machine a deploy would have used; pass `target: \"simulator\"` to capture a booted simulator while a phone is attached. A `device_udid` naming a physical device is NEVER served from the simulator. PER-PLATFORM capture reality (encoded so you don't re-derive it): iOS SIMULATOR — `xcrun simctl io <udid> screenshot`; iOS PHYSICAL device — `pymobiledevice3 developer dvt screenshot` (verified live: captures a real PNG over a no-root userspace tunnel on iOS 17+, no sudo — its stderr WARNING about the native tunnel is NOT a failure; requires the Developer Disk Image to be mounted, which Xcode does automatically). Requires `pymobiledevice3` on the host (`pipx install pymobiledevice3`, or a venv; override its path with FLUTTER_DEVICE_PYMOBILEDEVICE3); when it is missing the physical path returns {supported:false} with an install hint and captures NOTHING — it never substitutes another device. Android — `adb -s <serial> exec-out screencap -p`; tvOS SIMULATOR — simctl (physical Apple TV returns {supported:false}); macOS — `screencapture -R<x,y,w,h>` WINDOW-TARGETED against the target app's LIVE front-window bounds (never a full-desktop grab — that would leak whatever else the machine's owner has open); needs Screen Recording granted (flutter_info probes this by effect); Tizen/webOS — {supported:false} (no clean path — `sdb shell` is DISABLED on Samsung devices, so no device-side screencap; use Marionette take_screenshots over the VM service for the Flutter view). When output_path is omitted the PNG is written to a predictable temp path that is returned.",

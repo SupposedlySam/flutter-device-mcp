@@ -9,6 +9,7 @@
  * pty VM-service-URI capture, stale-pin self-heal, Marionette drivability probe)
  * run identically for both callers because they run HERE, not in the frontends.
  */
+import fs from "fs";
 import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import { logger } from "../logger.js";
 import { CommandResult, tail } from "../cli.js";
@@ -382,6 +383,11 @@ export class CommandCore {
           enospcRecoveryAttempted: recovered,
           launchRecovery,
           reason: outcome.reason,
+          runtimeDiagnostic: adapter.runtimeCrashDiagnostic
+            ? (adapter.runtimeCrashDiagnostic(
+                outcome.logTail ?? outcome.reason ?? ""
+              ) ?? undefined)
+            : undefined,
           pid: outcome.pid,
           logPath: outcome.logPath,
           logTail: outcome.logTail,
@@ -909,6 +915,119 @@ export class CommandCore {
                 "A hot ") +
             "RESTART: re-runs main() and drops in-memory state, while KEEPING the process, its VM " +
             "service URI, and any driver connection alive (no redeploy, no new URI).",
+        };
+      }
+    );
+  }
+
+  // =========== diagnose ==========
+  /**
+   * Read a launch log and name any RUNTIME crash class in it.
+   *
+   * WHY THIS TOOL EXISTS, and it is the whole point: the launch poll stops the
+   * moment the VM-service URI appears, deliberately — a found URI outranks every
+   * failure signature, because the launch genuinely succeeded. But an Impeller
+   * constant-buffer overflow fires when a shader is first RASTERIZED, which is
+   * normally AFTER that. So the crash that most needs naming lands in the window
+   * where nothing is watching any more: `flutter_deploy` returns success, the app
+   * is dead, and the log holds the only evidence.
+   *
+   * Wiring the detector solely into the launch-failure branch would have shipped a
+   * check that cannot fire in its own common case. This is the surface that fires.
+   *
+   * `log_path` defaults to the log of the most recent recorded launch, so the
+   * ordinary call is argument-free right after a deploy.
+   */
+  async diagnose(
+    args: CommonArgs & { device?: string; log_path?: string }
+  ): Promise<CommandOutput> {
+    const adapter = this.adapterFor(args);
+    return this.guard(
+      "flutter_diagnose",
+      { platform: adapter.platform, device: args.device },
+      async () => {
+        let logPath = args.log_path;
+        let device: string | undefined;
+
+        if (!logPath) {
+          const found = this.findLaunchRecord(adapter, args.device);
+          if (found.miss) {
+            return {
+              platform: adapter.platform,
+              success: false,
+              reason:
+                "No launch is recorded for this platform and no log_path was given, so there is " +
+                "nothing to read. Run flutter_deploy first, or pass log_path explicitly.",
+            };
+          }
+          device = found.record.device;
+          logPath = found.record.logPath;
+          if (!logPath) {
+            return {
+              platform: adapter.platform,
+              success: false,
+              device,
+              reason:
+                "The recorded launch carries no log path (it predates log capture). Redeploy with " +
+                "flutter_deploy, or pass log_path explicitly.",
+            };
+          }
+        }
+
+        let contents: string;
+        try {
+          contents = fs.readFileSync(logPath, "utf8");
+        } catch {
+          // A log that cannot be READ is not a log with no crash in it. Saying
+          // "no known crash" here would report ignorance as a clean bill of health.
+          return {
+            platform: adapter.platform,
+            success: false,
+            device,
+            logPath,
+            reason:
+              `Could not read the launch log at ${logPath}. This is NOT a finding that the log ` +
+              "is clean — nothing was examined. The launch process may have cleaned it up, or " +
+              "the path may be from a previous boot's temp dir.",
+          };
+        }
+
+        if (!adapter.runtimeCrashDiagnostic) {
+          return {
+            platform: adapter.platform,
+            success: true,
+            device,
+            logPath,
+            crashFound: false,
+            note:
+              `No runtime-crash classifier is wired for ${adapter.platform}, so this log was NOT ` +
+              "examined. Absence of a finding here says nothing about the log's contents.",
+          };
+        }
+
+        const diagnostic = adapter.runtimeCrashDiagnostic(contents);
+        if (!diagnostic) {
+          return {
+            platform: adapter.platform,
+            success: true,
+            device,
+            logPath,
+            crashFound: false,
+            note:
+              "No KNOWN runtime crash class matched this log. That is not the same as the app " +
+              "being healthy — it means nothing in the classifier's set is present. " +
+              `Read ${logPath} directly if the app is misbehaving.`,
+          };
+        }
+
+        return {
+          platform: adapter.platform,
+          success: true,
+          device,
+          logPath,
+          crashFound: true,
+          runtimeDiagnostic: diagnostic,
+          logTail: tail(contents, 40),
         };
       }
     );

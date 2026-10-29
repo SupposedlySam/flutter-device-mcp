@@ -149,6 +149,10 @@ import {
   iosPodInstallEnv,
   isPodDrift,
 } from "../iosBuildDiagnostics.js";
+import {
+  IOS_IMPELLER_SHADER_LIMIT_SIGNATURE,
+  messageForIosRuntimeCrash,
+} from "../iosRuntimeDiagnostics.js";
 
 /**
  * The neutral system app used to background the app under test. Foregrounding
@@ -186,6 +190,17 @@ export const IOS_FAILURE_SIGNATURES: RegExp[] = [
   // fails before producing a bundle, so stop polling rather than wait the whole
   // timeout. (The deploy preflight fixes this before launch; this is the belt.)
   ...IOS_POD_DRIFT_SIGNATURES,
+  // An Impeller constant-buffer overflow is terminal — the app is down and no VM
+  // service is coming — so stop polling rather than wait out the whole timeout.
+  //
+  // WHAT THIS DOES NOT CATCH, and it is the common case: `evaluateLaunchLog`
+  // checks for the VM-service URI FIRST and a found URI wins, deliberately. This
+  // crash fires when a shader is first RASTERIZED, which is usually AFTER the URI
+  // has been printed — so the launch is reported as the success it genuinely was,
+  // and the app then dies. Only a crash that beats the URI to the log is caught
+  // here. For the post-launch case the log is the evidence, and
+  // `messageForIosRuntimeCrash` reads it at any time: see `diagnoseRuntimeCrash`.
+  IOS_IMPELLER_SHADER_LIMIT_SIGNATURE,
 ];
 
 /**
@@ -904,6 +919,17 @@ export class IosAdapter implements PlatformAdapter {
    */
   installFailureDiagnostic(combined: string): string | null {
     return diagnoseIosInstallFailure(combined);
+  }
+
+  /**
+   * Turn an iOS RUNTIME crash in a launch log into an actionable message (else
+   * null). Today that means the Impeller/Metal constant-buffer overflow, which is
+   * the iOS-Simulator failure that reads least like what it is: the app is fully
+   * built, signed, installed and running, and it dies rendering a frame. See
+   * {@link messageForIosRuntimeCrash}.
+   */
+  runtimeCrashDiagnostic(log: string): string | null {
+    return messageForIosRuntimeCrash(log);
   }
 
   /**

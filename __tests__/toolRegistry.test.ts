@@ -5,9 +5,9 @@ describe("buildToolList (ListTools advertisement)", () => {
   const { flutter } = buildToolList();
   const advertised = buildAdvertisedTools();
 
-  it("advertises exactly 19 flutter_ tools", () => {
-    expect(flutter).toHaveLength(19);
-    expect(advertised).toHaveLength(19);
+  it("advertises exactly 20 flutter_ tools", () => {
+    expect(flutter).toHaveLength(20);
+    expect(advertised).toHaveLength(20);
   });
 
   it("names every tool with the flutter_ prefix", () => {
@@ -44,6 +44,10 @@ describe("buildToolList (ListTools advertisement)", () => {
       "flutter_pointer",
       "flutter_geometry",
       "flutter_screenshot",
+      // diagnose reads a LOG, and the launch registry it resolves is keyed by
+      // platform+device rather than by checkout — which project you are standing
+      // in does not change the answer.
+      "flutter_diagnose",
       "flutter_set_input_mode",
     ];
     it.each(PROJECT_SCOPED)("%s advertises app_dir", (name) => {

@@ -342,6 +342,7 @@ var — it came from.
 | `flutter_build` | Build the app package. `mode` picks release/profile/debug — reach for `profile` when measuring, since it is AOT-timed *and* keeps the VM service open. `dart_define` passes compile-time constants. macOS: `{supported:false}` — building/signing an arbitrary desktop app is out of scope |
 | `flutter_deploy` | **Install + launch through a pty and return the captured `ws://…/ws` VM Service URI** to hand to a driver. Runs the guardrails: kills the stale drivers holding **the device it is deploying to** first (a session on another device survives), recovers from `ENOSPC`, records the launch for hot reload/restart, and probes whether the build is Marionette-drivable. iOS honors `mode` for the launch itself (see [iOS launch modes](#ios-launch-modes)). macOS: stages + launches a prebuilt signed `.app` (`app_path`/`app_url`); no VM Service URI exists there |
 | `flutter_open_url` | **Open a URL on the device — the deep-link driver.** Drives custom schemes (`myapp://…`) and `https://…` App Links / universal links through the real OS plumbing, so intent-filters and domain associations are actually exercised. Android + Apple **simulators**; a physical iPhone/Apple TV reports `{supported:false}` because Apple provides no url-open verb — see [Deep links](#deep-links-flutter_open_url) |
+| `flutter_diagnose` | **Name a runtime crash the deploy could not catch.** `flutter_deploy` stops polling at the VM Service URI — correctly, the launch succeeded — but a rendering crash fires after that, so the app dies with nothing watching. Run this when deploy reported success and the app is dead or blank. Today: the iOS Impeller/Metal constant-buffer overflow — see [Runtime crashes](#runtime-crashes-flutter_diagnose) |
 | `flutter_uninstall` | Remove the app from the device |
 | `flutter_kill_stale` | Kill leftover launch processes. **iOS/Android: for ONE device** — the resolved target, or the one `device_udid` names — the `flutter run` driver whose process tree holds it, plus its children; another device's session is left running, and a driver that can't be tied to a device is reported with its pid rather than killed. **Tizen/webOS/tvOS/macOS: platform-wide** (`flutter-tizen`, `ares-launch`/`flutter-webos`, `flutter-tvos` and their children, or the staged macOS process) — those names can't belong to another platform, so no device is needed and the response says `scope: platform-wide`. `all_devices: true` is the iOS/Android opt-in hammer. With nothing attached on iOS/Android it kills nothing and says why. See [Teardown scope](#teardown-scope-one-deploy-at-a-time-per-device) |
 | `flutter_hot_reload` | Real hot reload, **confirmed against the flutter tool's own acknowledgement in the launch log** before it is reported — not merely that the keystroke was written. Falls back to a weaker VM-service reload when unconfirmed or when no control channel exists |
@@ -538,6 +539,34 @@ resident (`Flutter run key commands.`) and, after a short grace window with no U
 printed, ends the wait with the explanation above — it never sits on the caller's
 full `timeout_ms` waiting for something that is not coming. A debug launch is
 unchanged: its URI is the success criterion, so it still waits the full timeout.
+
+## Runtime crashes (`flutter_diagnose`)
+
+`flutter_deploy` reporting success while the app is dead or blank is not a
+contradiction, and this tool is why it is diagnosable. The launch poll stops the
+moment the Dart VM Service URI appears — a found URI outranks every failure
+signature, because the launch genuinely succeeded. A *rendering* crash fires when
+a shader is first rasterized, which is normally after that point, so the app dies
+in the window where nothing is watching and the log holds the only evidence.
+
+```bash
+flutter-device diagnose --platform ios          # the last recorded launch's log
+flutter-device diagnose --platform ios --log-path /path/to/older.log
+```
+
+Today's class, iOS only: the **Impeller/Metal constant-buffer overflow**. Flutter
+3.44+ is Impeller-only on iOS (the Skia backend was removed) and the iOS Simulator
+caps constant-buffer bindings at 14, so a runtime-effect shader binding 16 fails
+Metal pipeline creation and takes the app down. `flutter_diagnose` reports both
+numbers and says plainly that the two obvious escapes — `--no-enable-impeller` and
+`FLTEnableImpeller=false` in `Info.plist` — are **no-ops** on iOS in this version.
+The fix is app-side: select a shader variant that fits the ceiling on a simulator.
+
+**Read its three outcomes as three.** A crash found; no *known* class matched,
+which is not "the app is healthy" but "nothing in the classifier's set is
+present"; and the log could not be read, which is not a clean bill of health
+either, because nothing was examined. A platform with no classifier wired says so
+rather than returning a silent pass.
 
 ## Deep links (`flutter_open_url`)
 

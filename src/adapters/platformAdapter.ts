@@ -255,6 +255,20 @@ export interface PlatformAdapter {
   installFailureDiagnostic?(combined: string): string | null;
 
   /**
+   * OPTIONAL classification of a RUNTIME crash read out of a launch log into an
+   * ACTIONABLE message. Returns `null` when nothing known matches.
+   *
+   * Distinct from {@link installFailureDiagnostic} in the event it describes, not
+   * merely in wording: this one's subject is an app that BUILT, INSTALLED and
+   * STARTED, then died — so the two must never share a precedence chain, or a
+   * stale crash in a log spanning a retry can outrank the build failure that is
+   * the real reason the current deploy produced nothing.
+   *
+   * Absent on platforms with nothing to add; the caller omits the field then.
+   */
+  runtimeCrashDiagnostic?(log: string): string | null;
+
+  /**
    * Launch the app through a pty and capture the Dart VM Service URI for
    * Marionette. The launch process is left running to hold the URI open.
    *

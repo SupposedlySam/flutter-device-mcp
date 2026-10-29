@@ -193,6 +193,14 @@ class FlutterDeviceServer {
               device: args.device as string | undefined,
             })
           );
+        case "flutter_diagnose":
+          return this.json(
+            await core.diagnose({
+              ...common,
+              device: args.device as string | undefined,
+              log_path: args.log_path as string | undefined,
+            })
+          );
         case "flutter_screenshot":
           return this.json(
             await core.screenshot({

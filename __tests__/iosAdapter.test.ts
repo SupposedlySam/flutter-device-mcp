@@ -2093,6 +2093,24 @@ describe("IosAdapter preflight (pod drift + provisioning)", () => {
     expect(diag).not.toMatch(/code-signed/i);
   });
 
+  it("runtimeCrashDiagnostic names the Impeller constant-buffer overflow", async () => {
+    const adapter = await resolvedDevice();
+    const crash =
+      "[ERROR:flutter/impeller/renderer/backend/metal/pipeline_library_mtl.mm(103)] " +
+      "Could not create render pipeline for RuntimeEffect: Fragment shader " +
+      "expected only 14 constant buffers to be available, but 16 were used.";
+    const diag = adapter.runtimeCrashDiagnostic!(crash)!;
+    expect(diag).toMatch(/Impeller/);
+    expect(diag).toContain("binds 16 constant buffers");
+    // It must not read as a build/sign problem: the app built, installed and ran.
+    expect(diag).toMatch(/not a build, signing or install failure/i);
+  });
+
+  it("runtimeCrashDiagnostic returns null for a log with no known runtime crash", async () => {
+    const adapter = await resolvedDevice();
+    expect(adapter.runtimeCrashDiagnostic!("Syncing files to device...")).toBeNull();
+  });
+
   it("does NOT run a mutating pod install when the sandbox is in sync", async () => {
     const adapter = await resolvedDevice();
     runShell.mockClear();
