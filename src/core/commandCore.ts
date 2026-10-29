@@ -47,6 +47,8 @@ import {
 import { runKillStale } from "../killStaleFlow.js";
 import { MAX_VOLUME_REPEAT } from "../iosUiRunnerSteps.js";
 import { runDeployCore, runUninstallCore } from "../deployFlow.js";
+import { runLifecycleCore } from "../lifecycleFlow.js";
+import { runOpenUrlCore } from "../openUrlFlow.js";
 import { VmServiceClient } from "../vmServiceClient.js";
 import {
   ReloadFallbackReason,
@@ -469,7 +471,9 @@ export class CommandCore {
       "flutter_uninstall",
       { platform: adapter.platform, appId: adapter.appId },
       async () => {
-        if (!adapter.appId) return this.missingAppId(adapter, "uninstall");
+        if (!adapter.appId && !adapter.resolveAppId) {
+          return this.missingAppId(adapter, "uninstall");
+        }
         const run = await runUninstallCore({ adapter, args });
         const { resolution } = run;
         const device = resolution.target;
@@ -480,7 +484,7 @@ export class CommandCore {
             refused: true,
             device,
             deviceWarning: resolution.warning,
-            appId: adapter.appId,
+            appId: run.appId,
             reason: run.reason,
           };
         }
@@ -494,7 +498,8 @@ export class CommandCore {
           softSuccess: notInstalled && !result.success,
           device,
           deviceWarning: resolution.warning,
-          appId: adapter.appId,
+          appId: run.appId,
+          appIdNote: run.appIdNote,
           output: tail(result.combined, 60),
         };
       }
@@ -542,7 +547,7 @@ export class CommandCore {
   private async lifecycleOp(
     toolName: string,
     verb: "terminate" | "background" | "foreground",
-    args: CommonArgs & { device_udid?: string },
+    args: CommonArgs & { device_udid?: string; allow_store_app?: boolean },
     note: string
   ): Promise<CommandOutput> {
     const adapter = this.adapterFor(args);
@@ -557,26 +562,45 @@ export class CommandCore {
             "It is a mobile capability (iOS/Android). Use platform 'ios' or 'android'.",
         };
       }
-      if (!adapter.appId) return this.missingAppId(adapter, verb);
-      const resolution = await adapter.discoverDevice({
-        udid: args.device_udid,
+      if (verb !== "background" && !adapter.appId && !adapter.resolveAppId) {
+        return this.missingAppId(adapter, verb);
+      }
+      const outcome = await runLifecycleCore({
+        adapter,
+        lifecycle: adapter.lifecycle,
+        verb,
+        args,
       });
-      const device = resolution.target;
-      const result = await adapter.lifecycle[verb](device, adapter.appId);
+      const { resolution } = outcome;
+      if (outcome.kind === "refused") {
+        return {
+          platform: adapter.platform,
+          verb,
+          success: false,
+          refused: true,
+          device: resolution.target,
+          deviceWarning: resolution.warning,
+          appId: outcome.appId,
+          reason: outcome.reason,
+        };
+      }
       return {
         platform: adapter.platform,
         verb,
-        success: result.success,
-        device,
+        success: outcome.result.success,
+        device: resolution.target,
         deviceWarning: resolution.warning,
-        appId: adapter.appId,
-        output: tail(result.combined, 60),
+        appId: outcome.appId,
+        appIdNote: outcome.appIdNote,
+        output: tail(outcome.result.combined, 60),
         note,
       };
     });
   }
 
-  terminate(args: CommonArgs & { device_udid?: string }): Promise<CommandOutput> {
+  terminate(
+    args: CommonArgs & { device_udid?: string; allow_store_app?: boolean }
+  ): Promise<CommandOutput> {
     return this.lifecycleOp(
       "flutter_terminate",
       "terminate",
@@ -594,7 +618,9 @@ export class CommandCore {
     );
   }
 
-  foreground(args: CommonArgs & { device_udid?: string }): Promise<CommandOutput> {
+  foreground(
+    args: CommonArgs & { device_udid?: string; allow_store_app?: boolean }
+  ): Promise<CommandOutput> {
     return this.lifecycleOp(
       "flutter_foreground",
       "foreground",
@@ -962,6 +988,7 @@ export class CommandCore {
       package_or_bundle_id?: string;
       target?: "device" | "simulator";
       device_udid?: string;
+      allow_store_app?: boolean;
     }
   ): Promise<CommandOutput> {
     const adapter = this.adapterFor(args);
@@ -988,11 +1015,11 @@ export class CommandCore {
         // supports this on a SIMULATOR and not on a physical device, while
         // discovery is physical-first — so without this a host with a paired
         // iPhone could never reach the path that works.
-        const result = await adapter.openUrl(
-          args.url,
-          args.package_or_bundle_id,
-          { kind: args.target, udid: args.device_udid }
-        );
+        const result = await runOpenUrlCore({
+          adapter,
+          openUrl: adapter.openUrl.bind(adapter),
+          args,
+        });
         return { platform: adapter.platform, ...result };
       }
     );

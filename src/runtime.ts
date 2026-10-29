@@ -77,6 +77,7 @@ export function buildRuntime(opts: ResolveConfigOptions = {}): Runtime {
     device: platforms.android.device,
     appId: resolveAppId("android", platforms.android.appId, appDir),
     launchMode: platforms.android.androidLaunchMode,
+    checkoutNamed: config.appDirSource !== "derived",
   });
 
   const tvos = new TvosAdapter({

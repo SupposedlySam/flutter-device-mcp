@@ -3,6 +3,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { mockBuildPtyCaptureCommand } from "./support/mockBuildPtyCaptureCommand.js";
+import { androidAppTree, removeAndroidTrees } from "./support/androidTree.js";
 
 // Mock the shell layer so we can assert exactly which adb/flutter commands the
 // AndroidAdapter issues, without spawning real processes. ESM mocking requires
@@ -98,8 +99,11 @@ const {
   ANDROID_FAILURE_SIGNATURES,
   ANDROID_KEYCODE_HOME,
   androidBuildPackageId,
+  DEVICE_IDENTITY_PROBE,
+  parseDeviceIdentity,
 } = await import("../src/adapters/android.js");
 const { UnsupportedInputError } = await import("../src/types.js");
+const { findDeployedPackage, recordDeployedPackage } = await import("../src/deployedPackages.js");
 const { runKillStale } = await import("../src/killStaleFlow.js");
 
 const SERIAL = "39121FDJH003AB";
@@ -479,6 +483,26 @@ describe("AndroidAdapter.install / uninstall", () => {
     expect(result.success).toBe(true);
   });
 
+  it.each([
+    ["refuses", "build-tree", false],
+    ["allows", "deployed", true],
+  ] as const)(
+    "verifyUninstallTarget %s a requested uninstall of an absent package whose id came from %s",
+    async (_, appIdSource, ok) => {
+      runShell.mockResolvedValue({ ...okResult, stdout: "__pm_exit=0\n" });
+      const verdict = await androidInTree().verifyUninstallTarget(SERIAL, {
+        purpose: "requested",
+        packageId: "com.example.app.dev",
+        allowStoreAppRemoval: false,
+        appIdSource,
+      });
+      expect(verdict.ok).toBe(ok);
+      if (!verdict.ok) {
+        expect(verdict.reason).toMatch(/com\.example\.app\.dev .*not installed/);
+      }
+    }
+  );
+
   it("uninstall shells out to `adb -s <serial> uninstall <appId>`", async () => {
     await android().uninstall(SERIAL, "com.example.app");
     const cmd = runShell.mock.calls[0][0] as string;
@@ -502,6 +526,22 @@ describe("androidBuildPackageId", () => {
     } finally {
       fs.rmSync(tree, { recursive: true, force: true });
     }
+  });
+
+  it("gives a profile build the base id when only debug declares a suffix", () => {
+    const appDir = androidAppTree("com.example.app", { debug: "dev" });
+    expect(androidBuildPackageId(appDir, "profile")).toEqual({
+      ok: true,
+      packageId: "com.example.app",
+    });
+  });
+
+  it("gives a profile build the suffix of the app's own profile block", () => {
+    const appDir = androidAppTree("com.example.app", { debug: "dev", profile: "prof" });
+    expect(androidBuildPackageId(appDir, "profile")).toEqual({
+      ok: true,
+      packageId: "com.example.app.prof",
+    });
   });
 
   it("refuses to guess when a suffix is declared outside the build type", () => {
@@ -846,30 +886,470 @@ describe("AndroidAdapter.killStale (device-scoped teardown)", () => {
   });
 });
 
-describe("AndroidAdapter.lifecycle (OS-level, mobile capability, adb)", () => {
-  it("terminate uses `adb shell am force-stop`", async () => {
-    await android().lifecycle!.terminate(SERIAL, "com.example.app");
-    const cmd = runShell.mock.calls[0][0] as string;
-    expect(cmd).toBe(
-      `adb -s '${SERIAL}' shell am force-stop 'com.example.app'`
+/** A tree whose debug build type adds `.dev`, as a checkout that keeps dev builds apart from the store app does. */
+let devSuffixTree: string;
+beforeAll(() => {
+  devSuffixTree = androidAppTree("com.example.app", { debug: "dev" });
+});
+afterAll(removeAndroidTrees);
+
+function androidWithDevSuffix(
+  launchMode?: "debug" | "profile" | "release",
+  checkoutNamed?: boolean
+) {
+  return new AndroidAdapter({
+    appDir: devSuffixTree,
+    appId: ANDROID_APP_ID,
+    flutterCommand: "flutter",
+    aaptCommand: "aapt2",
+    launchMode,
+    checkoutNamed,
+  });
+}
+
+function pmReply(packageId: string, installer: string) {
+  return { ...okResult, stdout: `package:${packageId}  installer=${installer}\n__pm_exit=0\n` };
+}
+
+describe("parseDeviceIdentity", () => {
+  it("names an emulator by its AVD, since every emulator shares one ro.serialno", () => {
+    expect(parseDeviceIdentity("avd=Pixel_7_API_34\nserialno=EMULATOR35X1X11X0\n")).toBe(
+      "avd:Pixel_7_API_34"
     );
   });
 
+  it("names real hardware by ro.serialno", () => {
+    expect(parseDeviceIdentity("avd=\nserialno=39121FDJH003AB\n")).toBe("serialno:39121FDJH003AB");
+  });
+
+  it("names nothing when the device printed neither", () => {
+    expect(parseDeviceIdentity("avd=\nserialno=\n")).toBeUndefined();
+  });
+});
+
+describe("AndroidAdapter.resolveAppId (the package every verb acts on)", () => {
+  const PM_BASE = `adb -s '${SERIAL}' shell 'pm list packages -i com.example.app; echo __pm_exit=$?'`;
+  const IDENTITY = `adb -s '${SERIAL}' shell '${DEVICE_IDENTITY_PROBE}'`;
+  const PHONE_IDENTITY = `serialno:${SERIAL}`;
+
+  /**
+   * The device: what `pm` lists (filtered by substring, as pm does), and what it
+   * says it is. `listing: "fails"` makes every pm call fail.
+   */
+  function device(
+    packages: string[],
+    opts: { identity?: string; listing?: "fails"; aapt?: string } = {}
+  ) {
+    runShell.mockImplementation(async (cmd: string) => {
+      if (cmd === IDENTITY) return { ...okResult, stdout: opts.identity ?? `avd=\nserialno=${SERIAL}\n` };
+      const pm = cmd.match(/pm list packages -i (\S+);/);
+      if (pm) {
+        if (opts.listing === "fails") {
+          return { ...okResult, success: false, code: 1, combined: "error: device offline" };
+        }
+        const lines = packages.filter((line) => line.match(/^package:(\S+)/)![1].includes(pm[1]));
+        return { ...okResult, stdout: `${[...lines, "__pm_exit=0"].join("\n")}\n` };
+      }
+      if (/aapt2'? dump packagename/.test(cmd)) {
+        return opts.aapt === undefined
+          ? { ...okResult, success: false, code: 1, combined: "ERROR: bad apk" }
+          : { ...okResult, stdout: `${opts.aapt}\n` };
+      }
+      return okResult;
+    });
+  }
+  const pmLists = (...lines: string[]) => device(lines);
+
+  it("names the package the debug build produces, suffix included, as a guess from the tree", async () => {
+    pmLists();
+    await expect(androidWithDevSuffix().resolveAppId(SERIAL)).resolves.toEqual({
+      ok: true,
+      appId: "com.example.app.dev",
+      source: "build-tree",
+    });
+  });
+
+  it("follows the launch mode, so a release build resolves without the debug suffix", async () => {
+    pmLists();
+    await expect(androidWithDevSuffix("release").resolveAppId(SERIAL)).resolves.toEqual({
+      ok: true,
+      appId: "com.example.app",
+      source: "build-tree",
+    });
+  });
+
+  it("prefers the package deploy recorded on that device while the device and the package are still there", async () => {
+    recordDeployedPackage({
+      platform: "android",
+      device: SERIAL,
+      identity: PHONE_IDENTITY,
+      packageId: "com.example.app.profiled",
+    });
+    pmLists(
+      "package:com.example.app.profiled  installer=null",
+      "package:com.example.app.dev  installer=null"
+    );
+    await expect(androidWithDevSuffix().resolveAppId(SERIAL)).resolves.toEqual({
+      ok: true,
+      appId: "com.example.app.profiled",
+      source: "deployed",
+    });
+  });
+
+  it("drops a record whose package is gone and names what the device holds instead", async () => {
+    recordDeployedPackage({
+      platform: "android",
+      device: SERIAL,
+      identity: PHONE_IDENTITY,
+      packageId: "com.example.app.dev",
+    });
+    pmLists("package:com.example.app  installer=null");
+
+    await expect(androidWithDevSuffix().resolveAppId(SERIAL)).resolves.toEqual({
+      ok: true,
+      appId: "com.example.app",
+      source: "device",
+    });
+    expect(findDeployedPackage("android", SERIAL)).toBeUndefined();
+  });
+
+  it("refuses when it cannot confirm the recorded package is still installed", async () => {
+    recordDeployedPackage({
+      platform: "android",
+      device: SERIAL,
+      identity: PHONE_IDENTITY,
+      packageId: "com.example.app.dev",
+    });
+    device([], { listing: "fails" });
+
+    await expect(androidWithDevSuffix().resolveAppId(SERIAL)).resolves.toEqual({
+      ok: false,
+      reason: expect.stringMatching(
+        /Could not confirm com\.example\.app\.dev, which flutter_deploy recorded installing on 39121FDJH003AB, is still installed/
+      ),
+    });
+  });
+
+  it("ignores a record made on another device that answered to the same serial", async () => {
+    recordDeployedPackage({
+      platform: "android",
+      device: SERIAL,
+      identity: "avd:Pixel_7_API_34",
+      packageId: "com.example.app.dev",
+    });
+    device(
+      ["package:com.example.app.dev  installer=null", "package:com.example.app  installer=null"],
+      { identity: "avd=Medium_Phone_API_35\nserialno=EMULATOR35X1X11X0\n" }
+    );
+
+    await expect(androidWithDevSuffix().resolveAppId(SERIAL)).resolves.toEqual({
+      ok: false,
+      reason: expect.stringMatching(/several adb installs of com\.example\.app .*recorded none of them/),
+    });
+  });
+
+  it("ignores a record written before records carried the device's identity", async () => {
+    recordDeployedPackage({ platform: "android", device: SERIAL, packageId: "com.example.app.dev" });
+    pmLists("package:com.example.app  installer=null");
+
+    await expect(androidWithDevSuffix().resolveAppId(SERIAL)).resolves.toEqual({
+      ok: true,
+      appId: "com.example.app",
+      source: "device",
+    });
+  });
+
+  it("ignores a record without an identity on a device that cannot say what it is either", async () => {
+    recordDeployedPackage({ platform: "android", device: SERIAL, packageId: "com.example.app.dev" });
+    device(["package:com.example.app  installer=null", "package:com.example.app.dev  installer=null"], {
+      identity: "avd=\nserialno=\n",
+    });
+
+    await expect(androidWithDevSuffix().resolveAppId(SERIAL)).resolves.toEqual({
+      ok: false,
+      reason: expect.stringContaining("flutter_deploy recorded none of them"),
+    });
+  });
+
+  it("refuses rather than guess from the tree when pm cannot list the device's installs", async () => {
+    device([], { listing: "fails" });
+
+    await expect(androidWithDevSuffix().resolveAppId(SERIAL)).resolves.toEqual({
+      ok: false,
+      reason: expect.stringMatching(
+        /Could not list the installs of com\.example\.app on 39121FDJH003AB \(error: device offline\)/
+      ),
+    });
+  });
+
+  it("with no record, names the one adb install of the app on the device over the tree's guess", async () => {
+    pmLists(
+      "package:com.example.app  installer=com.android.vending",
+      "package:com.example.app.dev  installer=null"
+    );
+    await expect(androidWithDevSuffix("release").resolveAppId(SERIAL)).resolves.toEqual({
+      ok: true,
+      appId: "com.example.app.dev",
+      source: "device",
+    });
+  });
+
+  it("with several adb installs, picks the one a named app dir builds and says it was a pick", async () => {
+    pmLists(
+      "package:com.example.app  installer=null",
+      "package:com.example.app.dev  installer=com.android.shell"
+    );
+    await expect(androidWithDevSuffix(undefined, true).resolveAppId(SERIAL)).resolves.toEqual({
+      ok: true,
+      appId: "com.example.app.dev",
+      source: "build-tree",
+      note: expect.stringMatching(
+        /several adb installs of com\.example\.app \(com\.example\.app, com\.example\.app\.dev\).*com\.example\.app\.dev was picked because it is what the build in/
+      ),
+    });
+  });
+
+  it("with several adb installs, refuses to let a derived app dir pick among them", async () => {
+    pmLists(
+      "package:com.example.app  installer=null",
+      "package:com.example.app.dev  installer=com.android.shell"
+    );
+    await expect(androidWithDevSuffix().resolveAppId(SERIAL)).resolves.toEqual({
+      ok: false,
+      reason: expect.stringMatching(
+        /builds com\.example\.app\.dev, but it was not named .*Pass app_dir naming the checkout that deployed/
+      ),
+    });
+  });
+
+  it("refuses when several adb installs exist and none is what this checkout builds", async () => {
+    pmLists(
+      "package:com.example.app.qa  installer=null",
+      "package:com.example.app.staging  installer=null"
+    );
+    const resolution = await androidWithDevSuffix().resolveAppId(SERIAL);
+    expect(resolution).toEqual({
+      ok: false,
+      reason: expect.stringMatching(
+        /several adb installs of com\.example\.app \(com\.example\.app\.qa, com\.example\.app\.staging\)/
+      ),
+    });
+  });
+
+  it("refuses rather than fall back to the configured id when the tree cannot be read", async () => {
+    pmLists();
+    const resolution = await android().resolveAppId(SERIAL);
+    expect(resolution.ok).toBe(false);
+    expect(resolution.ok === false && resolution.reason).toMatch(
+      /cannot be named, so nothing was done/
+    );
+  });
+
+  /** A launch whose log names the apk it installed, as flutter run prints it. */
+  function launchLogging(apk: string) {
+    const logPath = path.join(process.env.FLUTTER_DEVICE_STATE_DIR!, "launch.log");
+    fs.writeFileSync(logPath, `Installing ${apk}...\n`);
+    neutralLaunchAndCaptureUri.mockResolvedValue({
+      failed: false,
+      vmServiceUriWs: "ws://127.0.0.1:1/x/ws",
+      logPath,
+    });
+  }
+
+  it("records the package read from the installed apk, and who the device is, for later verbs", async () => {
+    launchLogging("build/app/outputs/flutter-apk/app-profile.apk");
+    device(["package:com.example.app.fromapk  installer=null"], { aapt: "com.example.app.fromapk" });
+
+    await androidWithDevSuffix().launchAndCaptureUri(SERIAL, 1000);
+
+    expect(runShell).toHaveBeenCalledWith(
+      `'aapt2' dump packagename '${devSuffixTree}/build/app/outputs/flutter-apk/app-profile.apk'`,
+      { timeoutMs: 30000 }
+    );
+    expect(findDeployedPackage("android", SERIAL)).toMatchObject({
+      packageId: "com.example.app.fromapk",
+      identity: PHONE_IDENTITY,
+    });
+    await expect(androidWithDevSuffix().resolveAppId(SERIAL)).resolves.toEqual({
+      ok: true,
+      appId: "com.example.app.fromapk",
+      source: "deployed",
+    });
+  });
+
+  it("records nothing when aapt2 cannot read the installed apk", async () => {
+    launchLogging("build/app/outputs/flutter-apk/app-debug.apk");
+    device([]);
+
+    await androidWithDevSuffix().launchAndCaptureUri(SERIAL, 1000);
+
+    expect(findDeployedPackage("android", SERIAL)).toBeUndefined();
+  });
+
+  it("clears the device's earlier record when aapt2 cannot read the apk this launch installed", async () => {
+    recordDeployedPackage({
+      platform: "android",
+      device: SERIAL,
+      identity: PHONE_IDENTITY,
+      packageId: "com.example.app.profiled",
+    });
+    launchLogging("build/app/outputs/flutter-apk/app-debug.apk");
+    device(["package:com.example.app.profiled  installer=null"]);
+
+    await androidWithDevSuffix().launchAndCaptureUri(SERIAL, 1000);
+
+    expect(findDeployedPackage("android", SERIAL)).toBeUndefined();
+    await expect(androidWithDevSuffix().resolveAppId(SERIAL)).resolves.toEqual({
+      ok: true,
+      appId: "com.example.app.profiled",
+      source: "device",
+    });
+  });
+
+  it("records nothing, and clears the earlier record, when the device does not say what it is", async () => {
+    recordDeployedPackage({
+      platform: "android",
+      device: SERIAL,
+      identity: PHONE_IDENTITY,
+      packageId: "com.example.app.profiled",
+    });
+    launchLogging("build/app/outputs/flutter-apk/app-debug.apk");
+    device([], { aapt: "com.example.app.dev", identity: "avd=\nserialno=\n" });
+
+    await androidWithDevSuffix().launchAndCaptureUri(SERIAL, 1000);
+
+    expect(findDeployedPackage("android", SERIAL)).toBeUndefined();
+  });
+});
+
+describe("AndroidAdapter.lifecycle (OS-level, mobile capability, adb)", () => {
+  const PM_DEV = `adb -s '${SERIAL}' shell 'pm list packages -i com.example.app.dev; echo __pm_exit=$?'`;
+
+  const check = (
+    appId: string,
+    overrides: Partial<Parameters<InstanceType<typeof AndroidAdapter>["verifyLifecycleTarget"]>[1]> = {}
+  ) => ({
+    verb: "terminate" as const,
+    appId,
+    appIdSource: "deployed" as const,
+    allowStoreApp: false,
+    ...overrides,
+  });
+
+  it("lets a verb proceed on a copy adb installed, after asking only who installed it", async () => {
+    runShell.mockResolvedValueOnce(pmReply("com.example.app.dev", "null"));
+    await expect(
+      android().verifyLifecycleTarget(SERIAL, check("com.example.app.dev"))
+    ).resolves.toEqual({ kind: "proceed" });
+    expect(runShell.mock.calls.map(([c]) => c)).toEqual([PM_DEV]);
+  });
+
+  it("refuses a Play Store copy and says how to override", async () => {
+    runShell.mockResolvedValueOnce(pmReply("com.example.app", "com.android.vending"));
+    const verdict = await android().verifyLifecycleTarget(SERIAL, check("com.example.app"));
+    expect(verdict).toEqual({
+      kind: "refuse",
+      reason: expect.stringMatching(
+        /com\.example\.app on 39121FDJH003AB was installed by com\.android\.vending, not by adb.*allow_store_app: true/
+      ),
+    });
+  });
+
+  it("lets a verb proceed on a store copy when allowStoreApp is set", async () => {
+    runShell.mockResolvedValueOnce(pmReply("com.example.app", "com.android.vending"));
+    await expect(
+      android().verifyLifecycleTarget(SERIAL, check("com.example.app", { allowStoreApp: true }))
+    ).resolves.toEqual({ kind: "proceed" });
+  });
+
+  it("refuses when it cannot tell who installed the package", async () => {
+    runShell.mockResolvedValueOnce({
+      ...okResult,
+      success: false,
+      code: 1,
+      combined: "error: closed",
+    });
+    const verdict = await android().verifyLifecycleTarget(SERIAL, check("com.example.app"));
+    expect(verdict).toEqual({
+      kind: "refuse",
+      reason: expect.stringMatching(/Could not tell who installed com\.example\.app/),
+    });
+  });
+
+  it("reports nothing to terminate for a recorded package that is no longer installed", async () => {
+    runShell.mockResolvedValueOnce({ ...okResult, stdout: "__pm_exit=0\n" });
+    await expect(
+      android().verifyLifecycleTarget(SERIAL, check("com.example.app.dev"))
+    ).resolves.toEqual({
+      kind: "nothing-to-do",
+      message: "com.example.app.dev is not installed on 39121FDJH003AB; nothing to terminate.",
+    });
+  });
+
+  it.each(["terminate", "foreground"] as const)(
+    "refuses to %s a package id only guessed from the tree when it is not installed",
+    async (verb) => {
+      runShell.mockResolvedValueOnce({ ...okResult, stdout: "__pm_exit=0\n" });
+      const verdict = await android().verifyLifecycleTarget(
+        SERIAL,
+        check("com.example.app.dev", { verb, appIdSource: "build-tree" })
+      );
+      expect(verdict).toEqual({
+        kind: "refuse",
+        reason: expect.stringMatching(
+          /com\.example\.app\.dev is not installed on 39121FDJH003AB\. That id is what this checkout's build would produce/
+        ),
+      });
+    }
+  );
+
+  it("terminate force-stops the package it is given", async () => {
+    const result = await android().lifecycle!.terminate(SERIAL, "com.example.app.dev");
+    expect(runShell.mock.calls.map(([c]) => c)).toEqual([
+      `adb -s '${SERIAL}' shell am force-stop 'com.example.app.dev'`,
+    ]);
+    expect(result.success).toBe(true);
+  });
+
   it("background sends KEYCODE_HOME (3) via input keyevent, not killing the app", async () => {
-    await android().lifecycle!.background(SERIAL, "com.example.app");
+    await android().lifecycle!.background(SERIAL);
     const cmd = runShell.mock.calls[0][0] as string;
     expect(ANDROID_KEYCODE_HOME).toBe(3);
     expect(cmd).toBe(`adb -s '${SERIAL}' shell input keyevent 3`);
     expect(cmd).not.toContain("com.example.app"); // does not target the app pkg
   });
 
-  it("foreground relaunches the package via a monkey LAUNCHER intent", async () => {
-    await android().lifecycle!.foreground(SERIAL, "com.example.app");
-    const cmd = runShell.mock.calls[0][0] as string;
-    expect(cmd).toBe(
-      `adb -s '${SERIAL}' shell monkey -p 'com.example.app' ` +
-        `-c android.intent.category.LAUNCHER 1`
+  it("foreground relaunches the package it is given via a monkey LAUNCHER intent", async () => {
+    const result = await android().lifecycle!.foreground(SERIAL, "com.example.app.dev");
+    expect(runShell.mock.calls.map(([c]) => c)).toEqual([
+      `adb -s '${SERIAL}' shell monkey -p 'com.example.app.dev' ` +
+        `-c android.intent.category.LAUNCHER 1`,
+    ]);
+    expect(result.success).toBe(true);
+  });
+
+  it("refuses to foreground a Galaxy Store copy", async () => {
+    runShell.mockResolvedValueOnce(pmReply("com.example.app", "com.sec.android.app.samsungapps"));
+    const verdict = await android().verifyLifecycleTarget(
+      SERIAL,
+      check("com.example.app", { verb: "foreground" })
     );
+    expect(verdict).toEqual({
+      kind: "refuse",
+      reason: expect.stringMatching(/installed by com\.sec\.android\.app\.samsungapps/),
+    });
+  });
+
+  it("refuses to foreground a recorded package that is not installed, pointing at deploy", async () => {
+    runShell.mockResolvedValueOnce({ ...okResult, stdout: "__pm_exit=0\n" });
+    const verdict = await android().verifyLifecycleTarget(
+      SERIAL,
+      check("com.example.app.dev", { verb: "foreground" })
+    );
+    expect(verdict).toEqual({
+      kind: "refuse",
+      reason: "com.example.app.dev is not installed on 39121FDJH003AB; run flutter_deploy first.",
+    });
   });
 });
 

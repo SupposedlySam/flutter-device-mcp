@@ -97,7 +97,7 @@ Commands:
                       unless --allow-store-app-removal)
   kill-stale          Kill the stale launch/driver processes holding THIS device's lock
                       (--device-udid to aim it; --all-devices for the host-wide hammer)
-  terminate           Force-quit the app (mobile)
+  terminate           Force-quit the app (mobile; Android acts on the package deploy installed)
   background          Send the app to the background without killing it (mobile)
   foreground          Bring the app back to the foreground (mobile)
   hot-reload          Real hot reload on the running app (--device, --timeout-ms)
@@ -127,6 +127,8 @@ Global flags:
                       deploy/uninstall: allow removing a copy of the app somebody else
                       installed (Android: not installed by adb; physical iOS: not built
                       by a developer). Only with the device owner's agreement.
+  --allow-store-app   Android terminate/foreground: act on the app even though the installed
+                      copy was not put there by adb. Only with the device owner's agreement.
   --target <kind>     iOS/tvOS: which CLASS of target to act on — device (real hardware) or
                       simulator. Accepted by build, deploy, open-url, screenshot and record.
                       Omitted, the one available target is used and a choice among several
@@ -186,13 +188,21 @@ async function run(): Promise<number> {
       });
       break;
     case "terminate":
-      result = await core.terminate({ ...common, device_udid: devicePin });
+      result = await core.terminate({
+        ...common,
+        device_udid: devicePin,
+        allow_store_app: f.allow_store_app as boolean | undefined,
+      });
       break;
     case "background":
       result = await core.background({ ...common, device_udid: devicePin });
       break;
     case "foreground":
-      result = await core.foreground({ ...common, device_udid: devicePin });
+      result = await core.foreground({
+        ...common,
+        device_udid: devicePin,
+        allow_store_app: f.allow_store_app as boolean | undefined,
+      });
       break;
     case "hot-reload":
     case "hot_reload":

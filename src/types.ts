@@ -35,6 +35,18 @@ export interface CommandResult {
   timedOut: boolean;
 }
 
+/** A result for a step that ran no command and only has something to say. */
+export function messageResult(success: boolean, message: string): CommandResult {
+  return {
+    code: success ? 0 : 1,
+    stdout: success ? message : "",
+    stderr: success ? "" : message,
+    combined: message,
+    success,
+    timedOut: false,
+  };
+}
+
 // =========== BUILD ==========
 /**
  * The three Flutter compilation modes, as a platform-neutral type.

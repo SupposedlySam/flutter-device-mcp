@@ -32,8 +32,10 @@ const platformProp = {
 
 /**
  * The per-call project override, advertised on the tools that operate on a
- * Flutter project (build/deploy/info/uninstall/kill_stale/hot_reload/hot_restart).
- * Input and device-driving tools are left off it deliberately: they act on a
+ * Flutter project (build/deploy/info/uninstall/kill_stale/hot_reload/hot_restart)
+ * and on the verbs that act on the package a project's build installed
+ * (terminate/background/foreground/open_url), which resolve that package from
+ * it. Input and device-driving tools are left off it deliberately: they act on a
  * DEVICE, not a checkout, and re-resolving a project for them would only invite
  * a caller to think it mattered.
  */
@@ -74,6 +76,18 @@ const allowStoreAppRemovalProp = {
     type: "boolean",
     description:
       "Allow removing a copy of the app somebody else installed: on Android one adb did not install (the Play Store, a tester distribution, a sideloaded build), on a physical iOS device one not built by a developer (App Store, TestFlight). Without it, an Android deploy will not launch over such a copy (flutter run would uninstall it) and no uninstall or space recovery touches it. Removing it deletes that install's data; set this only when the device's owner has agreed. Ignored on other platforms.",
+  },
+};
+
+/**
+ * The override for a lifecycle verb aimed at a copy of the app that adb did not
+ * install: force-stopping or relaunching somebody's own install mid-use.
+ */
+const allowStoreAppProp = {
+  allow_store_app: {
+    type: "boolean",
+    description:
+      "ANDROID: act on the app even though the installed copy was not put there by adb (Play Store, Galaxy Store, Firebase App Distribution, a sideloaded apk). Without it the verb refuses such a copy, because it is not the build flutter_deploy installed. Set it only when the device's owner has agreed. Ignored on other platforms.",
   },
 };
 
@@ -239,7 +253,7 @@ function buildFlutterTools(): ToolDefinition[] {
     {
       name: "flutter_open_url",
       description:
-        "Open a URL ON the device, exactly as tapping a link would — the DEEP-LINK / universal-link driver. Use it to exercise custom schemes (`myapp://…`) and `https://…` App Links / universal links end-to-end: it hands the URL to the OS, so the app's real intent-filter / URL-scheme / association plumbing runs (it does NOT navigate inside the app — that belongs to a VM-service driver such as Marionette). PER-PLATFORM reality (encoded so you don't re-derive it): ANDROID — full support via `adb shell am start -a android.intent.action.VIEW -d <url>`; the target package defaults to the project's resolved application id so an https link cannot raise a disambiguation chooser an automated run can't answer (pass package_or_bundle_id: \"\" to go unscoped on purpose). `am` refuses an intent on STDOUT while still exiting 0, so the output is classified — an unresolvable link is reported as a failure with the App Links/assetlinks.json hint, while the common 'delivered to currently running top-most instance' warning is treated as SUCCESS. iOS / tvOS SIMULATOR — full support via `xcrun simctl openurl`. iOS / tvOS PHYSICAL DEVICE — {supported:false}: Apple ships NO url-open verb on `xcrun devicectl device` and idb's open/ui commands are simulator-only, so there is no automation path; open the link by hand or use a simulator. Tizen/webOS — {supported:false} (`sdb shell` is disabled on Samsung devices, so there is no device-side launcher).",
+        "Open a URL ON the device, exactly as tapping a link would — the DEEP-LINK / universal-link driver. Use it to exercise custom schemes (`myapp://…`) and `https://…` App Links / universal links end-to-end: it hands the URL to the OS, so the app's real intent-filter / URL-scheme / association plumbing runs (it does NOT navigate inside the app — that belongs to a VM-service driver such as Marionette). PER-PLATFORM reality (encoded so you don't re-derive it): ANDROID — full support via `adb shell am start -a android.intent.action.VIEW -d <url>`; the target package defaults to the package flutter_deploy installed on that device (resolved and checked as flutter_terminate resolves and checks it: the call refuses when that cannot be named, and refuses a copy adb did not install unless `allow_store_app` is set) so an https link cannot raise a disambiguation chooser that an automated run can't answer (pass package_or_bundle_id: \"\" to go unscoped on purpose). `am` refuses an intent on STDOUT while still exiting 0, so the output is classified — an unresolvable link is reported as a failure with the App Links/assetlinks.json hint, while the common 'delivered to currently running top-most instance' warning is treated as SUCCESS. iOS / tvOS SIMULATOR — full support via `xcrun simctl openurl`. iOS / tvOS PHYSICAL DEVICE — {supported:false}: Apple ships NO url-open verb on `xcrun devicectl device` and idb's open/ui commands are simulator-only, so there is no automation path; open the link by hand or use a simulator. Tizen/webOS — {supported:false} (`sdb shell` is disabled on Samsung devices, so there is no device-side launcher).",
       inputSchema: {
         type: "object",
         properties: {
@@ -253,7 +267,7 @@ function buildFlutterTools(): ToolDefinition[] {
           package_or_bundle_id: {
             type: "string",
             description:
-              "ANDROID only: the package the VIEW intent is scoped to. Defaults to the project's resolved application id, which prevents a browser-vs-app chooser on https links. Pass an empty string to send an UNSCOPED intent (letting the OS disambiguate, which is what a real user tap does). Ignored on Apple platforms, where simctl routes by scheme/association.",
+              "ANDROID only: the package the VIEW intent is scoped to. Defaults to the package flutter_deploy installed on that device, which prevents a browser-vs-app chooser on https links. Pass an empty string to send an UNSCOPED intent (letting the OS disambiguate, which is what a real user tap does). Ignored on Apple platforms, where simctl routes by scheme/association.",
           },
           target: {
             type: "string",
@@ -262,6 +276,7 @@ function buildFlutterTools(): ToolDefinition[] {
               "iOS/tvOS: which target to open the URL on. This matters more here than on other tools — Apple supports opening a URL on a SIMULATOR and not on a physical device, and with a phone and a simulator both available and nothing named the call is refused rather than guessed. On a host with a paired iPhone/Apple TV you MUST pass 'simulator' to reach the working path; otherwise the call resolves the physical device and correctly returns {supported:false}.",
           },
           ...deviceUdidProp(),
+          ...allowStoreAppProp,
         },
         required: ["url"],
       },
@@ -269,7 +284,7 @@ function buildFlutterTools(): ToolDefinition[] {
     {
       name: "flutter_uninstall",
       description:
-        "Uninstall the app (`sdb -s <device> uninstall <app_id>` on Tizen; `adb -s <serial> uninstall <app_id>` on Android) to free device space or reset to a clean state. Soft-succeeds when the app is not installed. With more than one online target the device MUST be named (`device_udid`, or the platform's pin); a named device that is not online fails the call rather than uninstalling somewhere else. A copy somebody else installed (Android: one adb did not install; physical iOS: one not built by a developer, such as an App Store or TestFlight copy) is left alone, with `refused: true` and the reason, unless `allow_store_app_removal: true` is passed.",
+        "Uninstall the app (`sdb -s <device> uninstall <app_id>` on Tizen; `adb -s <serial> uninstall` on Android) to free device space or reset to a clean state. Soft-succeeds when the app is not installed. With more than one online target the device MUST be named (`device_udid`, or the platform's pin); a named device that is not online fails the call rather than uninstalling somewhere else. A copy somebody else installed (Android: one adb did not install; physical iOS: one not built by a developer, such as an App Store or TestFlight copy) is left alone, with `refused: true` and the reason, unless `allow_store_app_removal: true` is passed. ANDROID: removes the package flutter_deploy installed on that device, resolved as flutter_terminate resolves it, never the configured id.",
       inputSchema: {
         type: "object",
         properties: {
@@ -303,20 +318,39 @@ function buildFlutterTools(): ToolDefinition[] {
     {
       name: "flutter_terminate",
       description:
-        "OS-level lifecycle: force-quit the app on the resolved device (iOS: xcrun simctl/devicectl terminate; tvOS: simctl terminate, or on a physical Apple TV the resident `flutter-tvos run` and its lldb are ended first and then the app is terminated through devicectl; Android: adb shell am force-stop; macOS: `osascript ... tell application id \"<bundle id>\" to quit`). MOBILE/MACOS capability — on TV platforms (Tizen/webOS) this returns {supported:false}. The app's Dart VM service is gone after termination (N/A on macOS, which has none); redeploy to get a fresh URI for Marionette.",
-      inputSchema: { type: "object", properties: { ...platformProp, ...deviceUdidProp() } },
+        "OS-level lifecycle: force-quit the app on the resolved device (iOS: xcrun simctl/devicectl terminate; tvOS: simctl terminate, or on a physical Apple TV the resident `flutter-tvos run` and its lldb are ended first and then the app is terminated through devicectl; Android: adb shell am force-stop; macOS: `osascript ... tell application id \"<bundle id>\" to quit`). MOBILE/MACOS capability — on TV platforms (Tizen/webOS) this returns {supported:false}. The app's Dart VM service is gone after termination (N/A on macOS, which has none); redeploy to get a fresh URI for Marionette. ANDROID: acts on the package flutter_deploy installed on that device, never on the configured id: the package deploy recorded reading from the apk it installed (kept after the launch ends, and used only while that device answers with the identity it had then and the package is still installed; an uninstall clears it), else the one adb-installed variant of the build's base applicationId on the device, else what the app's build would produce (its build.gradle applicationId plus the build type's applicationIdSuffix). That last is a guess, so when that package is not installed the call refuses rather than reporting success. When several variants are installed and deploy recorded none, the build's package is used only if the app dir was named (`app_dir`, FLUTTER_DEVICE_APP_DIR or the config file), and the response's appIdNote says the guess picked among them; with a derived app dir the call refuses. Refuses a copy adb did not install unless `allow_store_app` is set.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          ...platformProp,
+          ...appDirProp,
+          ...deviceUdidProp(),
+          ...allowStoreAppProp,
+        },
+      },
     },
     {
       name: "flutter_background",
       description:
-        "OS-level lifecycle: send the app to the BACKGROUND without killing it (iOS: foreground the neutral com.apple.Preferences app; tvOS: foreground com.apple.TVSettings; Android: HOME keyevent via adb; macOS: activate Finder — there is no OS-level \"background\" verb, so losing focus IS backgrounding). Exercises the app's didEnterBackground/onPause path for lifecycle testing while keeping its VM service alive. MOBILE/MACOS capability — Tizen/webOS return {supported:false}.",
-      inputSchema: { type: "object", properties: { ...platformProp, ...deviceUdidProp() } },
+        "OS-level lifecycle: send the app to the BACKGROUND without killing it (iOS: foreground the neutral com.apple.Preferences app; tvOS: foreground com.apple.TVSettings; Android: HOME keyevent via adb, which acts on the device and needs no package; macOS: activate Finder — there is no OS-level \"background\" verb, so losing focus IS backgrounding). Exercises the app's didEnterBackground/onPause path for lifecycle testing while keeping its VM service alive. MOBILE/MACOS capability — Tizen/webOS return {supported:false}.",
+      inputSchema: {
+        type: "object",
+        properties: { ...platformProp, ...appDirProp, ...deviceUdidProp() },
+      },
     },
     {
       name: "flutter_foreground",
       description:
-        "OS-level lifecycle: bring the app back to the FOREGROUND by relaunching it (iOS/tvOS: xcrun simctl/devicectl launch by bundle id; Android: adb monkey LAUNCHER intent by package; macOS: `osascript ... tell application id \"<bundle id>\" to activate`). Exercises didBecomeActive/onResume. Pair with flutter_background for background→foreground lifecycle testing. MOBILE/MACOS capability — Tizen/webOS return {supported:false}.",
-      inputSchema: { type: "object", properties: { ...platformProp, ...deviceUdidProp() } },
+        "OS-level lifecycle: bring the app back to the FOREGROUND by relaunching it (iOS/tvOS: xcrun simctl/devicectl launch by bundle id; Android: adb monkey LAUNCHER intent by package; macOS: `osascript ... tell application id \"<bundle id>\" to activate`). Exercises didBecomeActive/onResume. Pair with flutter_background for background→foreground lifecycle testing. MOBILE/MACOS capability — Tizen/webOS return {supported:false}. ANDROID: relaunches the package flutter_deploy installed on that device, the same one flutter_terminate resolves, and refuses a copy adb did not install unless `allow_store_app` is set.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          ...platformProp,
+          ...appDirProp,
+          ...deviceUdidProp(),
+          ...allowStoreAppProp,
+        },
+      },
     },
     {
       name: "flutter_hot_reload",

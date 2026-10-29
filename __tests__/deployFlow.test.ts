@@ -1,5 +1,8 @@
-import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
-import { runDeployCore, type DeployAdapter } from "../src/deployFlow.js";
+import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
+import * as deployFlow from "../src/deployFlow.js";
+import { runDeployCore, runUninstallCore, type DeployAdapter } from "../src/deployFlow.js";
+import { runLifecycleCore } from "../src/lifecycleFlow.js";
+import type { AppLifecycle } from "../src/adapters/platformAdapter.js";
 import { tearDownForDeploy } from "../src/killStaleFlow.js";
 import { RequestedDeviceUnavailableError } from "../src/deviceRequest.js";
 import type { CommandResult, DeviceResolution, LaunchOutcome } from "../src/types.js";
@@ -41,6 +44,7 @@ function fake(opts: {
   isInstallFailure?: (c: string) => boolean;
   scope?: "device" | "platform";
   discover?: () => Promise<DeviceResolution>;
+  installPackageId?: () => unknown;
 }) {
   const calls: string[] = [];
   const uninstalls: [string, string][] = [];
@@ -64,6 +68,7 @@ function fake(opts: {
       return installs.shift() ?? result("ok");
     },
     ...(opts.isInstallFailure ? { isInstallFailure: opts.isInstallFailure } : {}),
+    ...(opts.installPackageId ? { installPackageId: opts.installPackageId } : {}),
     async uninstall(device: string, appId: string) {
       uninstalls.push([device, appId]);
       return opts.uninstallResult ?? result("Success");
@@ -212,6 +217,34 @@ describe("install-stage space recovery", () => {
     expect(out.enospcRecoveryRefused).toMatch(/cannot confirm the build being installed/);
   });
 
+  it("uninstalls the package the build being installed carries, not the configured id", async () => {
+    const { adapter, uninstalls } = fake({
+      install: [result("No space left on device", false), result("ok")],
+      verifier: true,
+      installPackageId: () => ({ ok: true, appId: "com.example.app.dev", source: "build-tree" }),
+    });
+
+    const out = await deploy(adapter, { no_launch: true });
+
+    expect(uninstalls).toEqual([["dev-1", "com.example.app.dev"]]);
+    expect(out.enospcRecoveryAttempted).toBe(true);
+    expect(out.stage).toBe("installed");
+  });
+
+  it("is refused, uninstalling nothing, when the build's package cannot be named", async () => {
+    const { adapter, uninstalls } = fake({
+      install: [result("No space left on device", false)],
+      verifier: true,
+      installPackageId: () => ({ ok: false, reason: "The package cannot be named." }),
+    });
+
+    const out = await deploy(adapter, { no_launch: true });
+
+    expect(uninstalls).toEqual([]);
+    expect(out.enospcRecoveryRefused).toBe("The package cannot be named.");
+    expect(out.stage).toBe("install-failed");
+  });
+
   it("does not treat a bare 'Install failed' as a full device", async () => {
     const { adapter, uninstalls } = fake({
       install: [result("Install failed: certificate mismatch", false)],
@@ -259,5 +292,48 @@ describe("tearDownForDeploy on a platform-scoped adapter", () => {
 
     expect(calls).toEqual(["discoverDevice", "killStale", "discoverDevice"]);
     expect(out.resolution.target).toBe("192.0.2.6:26101");
+  });
+});
+
+describe("a platform that resolves no package of its own", () => {
+  const configured = () => {
+    const acted: [string, string, string][] = [];
+    const adapter = {
+      platform: "ios",
+      appId: "com.example.app",
+      async discoverDevice() {
+        return { target: "dev-1", source: "pin" };
+      },
+      async uninstall(device: string, appId: string) {
+        acted.push(["uninstall", device, appId]);
+        return result("Success");
+      },
+    } as unknown as DeployAdapter;
+    const lifecycle: AppLifecycle = {
+      async terminate(device, appId) {
+        acted.push(["terminate", device, appId]);
+        return result("ok");
+      },
+      async background() {
+        return result("ok");
+      },
+      async foreground(device, appId) {
+        acted.push(["foreground", device, appId]);
+        return result("ok");
+      },
+    };
+    return { adapter, lifecycle, acted };
+  };
+
+  it("terminates and uninstalls its configured app id", async () => {
+    const { adapter, lifecycle, acted } = configured();
+
+    await runLifecycleCore({ adapter, lifecycle, verb: "terminate", args: {} });
+    await runUninstallCore({ adapter, args: {} });
+
+    expect(acted).toEqual([
+      ["terminate", "dev-1", "com.example.app"],
+      ["uninstall", "dev-1", "com.example.app"],
+    ]);
   });
 });

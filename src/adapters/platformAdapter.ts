@@ -172,9 +172,46 @@ export interface UninstallCheck {
   allowStoreAppRemoval: boolean;
   /** The failed install/launch output, used to locate the build being installed. */
   buildLog?: string;
+  /** Where {@link packageId} came from; a `build-tree` guess is checked harder. */
+  appIdSource?: AppIdSource;
 }
 
 export type UninstallVerdict = { ok: true } | { ok: false; reason: string };
+
+/**
+ * How a package id was arrived at. `deployed`: flutter_deploy recorded the apk
+ * it installed on that device. `device`: the device holds exactly one adb
+ * install of the app. `build-tree`: what the checkout's build would produce now,
+ * which is only a guess at what is installed. `configured`: the adapter's fixed id.
+ */
+export type AppIdSource = "deployed" | "device" | "build-tree" | "configured";
+
+/**
+ * The package a verb acts on for one device, or why it cannot be named. `note`
+ * tells the caller how a guess was settled, so it is reported with the result.
+ */
+export type AppIdResolution =
+  | { ok: true; appId: string; source: AppIdSource; note?: string }
+  | { ok: false; reason: string };
+
+/** A request to confirm a lifecycle verb may act on `appId`. */
+export interface LifecycleCheck {
+  /** `open_url` is the VIEW intent scoped to the app, held to the same checks. */
+  verb: "terminate" | "foreground" | "open_url";
+  appId: string;
+  appIdSource: AppIdSource;
+  /** Act on a copy that a store or tester distribution installed. */
+  allowStoreApp: boolean;
+}
+
+/**
+ * `nothing-to-do` is a success with nothing run (terminating an app that is not
+ * installed); `refuse` means the verb must not run, and nothing was done.
+ */
+export type LifecycleVerdict =
+  | { kind: "proceed" }
+  | { kind: "nothing-to-do"; message: string }
+  | { kind: "refuse"; reason: string };
 
 /**
  * OS-level app-lifecycle control for a resolved device.
@@ -192,7 +229,7 @@ export interface AppLifecycle {
    * neutral system app (e.g. the Settings/Preferences app). This drives the
    * app's `didEnterBackground` lifecycle path for testing.
    */
-  background(device: string, appId: string): Promise<CommandResult>;
+  background(device: string): Promise<CommandResult>;
   /** Bring the app back to the foreground by relaunching its bundle id. */
   foreground(device: string, appId: string): Promise<CommandResult>;
 }
@@ -381,6 +418,29 @@ export interface PlatformAdapter {
     device: string,
     check: UninstallCheck
   ): Promise<UninstallVerdict>;
+
+  /**
+   * OPTIONAL: the package the lifecycle verbs, uninstall and open-url act on for
+   * `device`, when it is not simply {@link appId}. Android implements it because
+   * the package `flutter run` installs depends on the checkout's build type, and
+   * a verb aimed at the configured id instead lands on whatever else carries it
+   * (a store install of the release app). Read it through `resolveAppIdFor`.
+   */
+  resolveAppId?(device: string): Promise<AppIdResolution>;
+
+  /**
+   * OPTIONAL: the package the build about to be installed carries, when it is
+   * not simply {@link appId}. Space recovery during an install frees space by
+   * removing that package, not whatever an earlier deploy left on the device.
+   */
+  installPackageId?(): AppIdResolution;
+
+  /**
+   * OPTIONAL check terminate, foreground and a scoped open-url run before acting on `check.appId`.
+   * Android refuses a copy adb did not install, and a guessed id that is not
+   * installed at all.
+   */
+  verifyLifecycleTarget?(device: string, check: LifecycleCheck): Promise<LifecycleVerdict>;
 
   /** Uninstall the app to free device space / reset state. */
   uninstall(device: string, appId: string): Promise<CommandResult>;
@@ -600,6 +660,10 @@ export interface PlatformAdapter {
    */
   inputDeviceWarning?(): string | undefined;
 
-  /** The default app id for this platform, used for uninstall. */
+  /**
+   * The app id this platform is configured with, for reporting. A verb that
+   * acts on the app's package resolves it with `resolveAppIdFor` instead, which
+   * consults {@link resolveAppId} where the adapter has one.
+   */
   readonly appId: string;
 }

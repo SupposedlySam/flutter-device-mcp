@@ -912,7 +912,7 @@ describe("TvosAdapter.lifecycle", () => {
     const adapter = tvos();
     mockDiscovery("device");
     await adapter.discoverDevice();
-    await adapter.lifecycle!.background(ATV_ID, "com.example.app");
+    await adapter.lifecycle!.background(ATV_ID);
     const launched = runShell.mock.calls
       .map((c) => c[0] as string)
       .find((c) => c.includes("com.apple.TVSettings"));

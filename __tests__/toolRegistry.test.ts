@@ -5,6 +5,27 @@ describe("buildToolList (ListTools advertisement)", () => {
   const { flutter } = buildToolList();
   const advertised = buildAdvertisedTools();
 
+  it.each(["flutter_terminate", "flutter_foreground"])(
+    "advertises allow_store_app as a boolean on %s",
+    (name) => {
+      const props = (advertised.find((t) => t.name === name)!.inputSchema as {
+        properties: Record<string, { type?: string }>;
+      }).properties;
+      expect(props.allow_store_app).toMatchObject({ type: "boolean" });
+    }
+  );
+
+  it.each(["flutter_terminate", "flutter_background", "flutter_foreground", "flutter_open_url"])(
+    "advertises app_dir as a string on %s, so a caller can name the checkout that deployed",
+    (name) => {
+      const props = advertised.find((t) => t.name === name)?.inputSchema.properties as Record<
+        string,
+        { type?: string }
+      >;
+      expect(props.app_dir).toMatchObject({ type: "string" });
+    }
+  );
+
   it("advertises exactly 19 flutter_ tools", () => {
     expect(flutter).toHaveLength(19);
     expect(advertised).toHaveLength(19);

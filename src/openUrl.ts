@@ -36,6 +36,8 @@ export interface OpenUrlResult {
   hint?: string;
   /** Tail of the command output, for diagnosing a failed open. */
   output?: string;
+  /** How the package the intent was scoped to was chosen, when that was a guess. */
+  appIdNote?: string;
 }
 
 /**

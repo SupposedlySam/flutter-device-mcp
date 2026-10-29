@@ -4,6 +4,8 @@
  * record which of them ran. The response envelope stays in the server.
  */
 import { unnamedChoiceRefused } from "./deviceRequest.js";
+import { installPackageIdFor, resolveAppIdFor } from "./appIdResolution.js";
+import { forgetDeployedPackage } from "./deployedPackages.js";
 import { tearDownForDeploy } from "./killStaleFlow.js";
 import type {
   InstallOptions,
@@ -24,6 +26,8 @@ export type DeployAdapter = Pick<
   PlatformAdapter,
   | "platform"
   | "appId"
+  | "resolveAppId"
+  | "installPackageId"
   | "killStaleScope"
   | "killStale"
   | "discoverDevice"
@@ -115,17 +119,20 @@ export async function runDeployCore(deps: {
   let enospcRecoveryAttempted = false;
   let enospcRecoveryRefused: string | undefined;
   if (!install.success && isStorageFailure(install.combined)) {
-    const verdict = await authorizeSpaceRecovery(adapter, device, {
-      ...recoveryContext,
-      packageId: adapter.appId,
-      buildLog: install.combined,
-    });
-    if (verdict.ok) {
-      await adapter.uninstall(device, adapter.appId);
+    const app = installPackageIdFor(adapter);
+    const verdict = app.ok
+      ? await authorizeSpaceRecovery(adapter, device, {
+          ...recoveryContext,
+          packageId: app.appId,
+          buildLog: install.combined,
+        })
+      : app;
+    if (!verdict.ok) {
+      enospcRecoveryRefused = verdict.reason;
+    } else if (app.ok) {
+      await adapter.uninstall(device, app.appId);
       enospcRecoveryAttempted = true;
       install = await adapter.install(device, installOptions);
-    } else {
-      enospcRecoveryRefused = verdict.reason;
     }
   }
 
@@ -210,12 +217,23 @@ async function carryOutRecovery(
 export async function runUninstallCore(deps: {
   adapter: Pick<
     DeployAdapter,
-    "platform" | "appId" | "discoverDevice" | "uninstall" | "verifyUninstallTarget"
+    | "platform"
+    | "appId"
+    | "resolveAppId"
+    | "discoverDevice"
+    | "uninstall"
+    | "verifyUninstallTarget"
   >;
   args: { device_udid?: string; allow_store_app_removal?: boolean };
 }): Promise<
-  | { kind: "refused"; resolution: DeviceResolution; reason: string }
-  | { kind: "ran"; resolution: DeviceResolution; result: CommandResult }
+  | { kind: "refused"; resolution: DeviceResolution; reason: string; appId?: string }
+  | {
+      kind: "ran";
+      resolution: DeviceResolution;
+      appId: string;
+      appIdNote?: string;
+      result: CommandResult;
+    }
 > {
   const { adapter, args } = deps;
   const resolution = await adapter.discoverDevice({ udid: args.device_udid });
@@ -226,14 +244,21 @@ export async function runUninstallCore(deps: {
       hint: "An uninstall always needs the device named.",
     });
   }
+  const app = await resolveAppIdFor(adapter, resolution.target);
+  if (!app.ok) return { kind: "refused", resolution, reason: app.reason };
+  const { appId } = app;
   if (adapter.verifyUninstallTarget) {
     const verdict = await adapter.verifyUninstallTarget(resolution.target, {
       purpose: "requested",
-      packageId: adapter.appId,
+      packageId: appId,
+      appIdSource: app.source,
       allowStoreAppRemoval: args.allow_store_app_removal === true,
     });
-    if (!verdict.ok) return { kind: "refused", resolution, reason: verdict.reason };
+    if (!verdict.ok) return { kind: "refused", resolution, reason: verdict.reason, appId };
   }
-  const result = await adapter.uninstall(resolution.target, adapter.appId);
-  return { kind: "ran", resolution, result };
+  const result = await adapter.uninstall(resolution.target, appId);
+  if (result.success) {
+    forgetDeployedPackage({ platform: adapter.platform, device: resolution.target, packageId: appId });
+  }
+  return { kind: "ran", resolution, appId, appIdNote: app.note, result };
 }

@@ -32,7 +32,7 @@ const dispatcherSource = (() => {
 const CONSUMED_AT_ENTRY = new Set(["app_dir", "platform"]);
 
 /**
- * Pre-built argument objects the dispatcher passes whole, e.g. `core.terminate(withDevicePin)`.
+ * Pre-built argument objects the dispatcher passes whole, e.g. `core.terminate(lifecycleArgs)`.
  *
  * The lifecycle verbs share one object rather than re-listing its fields, so the properties it
  * carries never appear as `args.<name>` inside their case blocks. A detector blind to this reported
@@ -41,6 +41,7 @@ const CONSUMED_AT_ENTRY = new Set(["app_dir", "platform"]);
  */
 const PREBUILT: Record<string, readonly string[]> = {
   withDevicePin: ["device_udid"],
+  lifecycleArgs: ["device_udid", "allow_store_app"],
 };
 
 /** The body of one `case "<tool>":` block, up to the next case label. */
@@ -81,7 +82,7 @@ describe("dispatcher forwards every advertised argument", () => {
     "%s really does carry the arguments this test credits it with",
     (obj, props) => {
       // Without this, PREBUILT is an unchecked assertion: deleting `device_udid` from
-      // withDevicePin would silently excuse four tools from the very check that should catch it.
+      // lifecycleArgs would silently excuse the lifecycle verbs from the check meant to catch it.
       const decl = dispatcherSource.slice(dispatcherSource.indexOf(`const ${obj} = {`));
       const body = decl.slice(0, decl.indexOf("};") + 2);
       for (const prop of props) expect(body).toContain(`args.${prop}`);

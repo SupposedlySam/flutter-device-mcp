@@ -662,7 +662,7 @@ describe("MacosAdapter lifecycle", () => {
   });
 
   it("background activates Finder (macOS has no OS-level 'send to background' verb)", async () => {
-    await adapter().lifecycle.background("local", "com.example.exampleapp");
+    await adapter().lifecycle.background("local");
     expect(runShell).toHaveBeenCalledWith(
       expect.stringContaining('tell application "Finder" to activate'),
       expect.anything()

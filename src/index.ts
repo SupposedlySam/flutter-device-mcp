@@ -113,6 +113,11 @@ class FlutterDeviceServer {
         ...common,
         device_udid: args.device_udid as string | undefined,
       };
+      const lifecycleArgs = {
+        ...common,
+        device_udid: args.device_udid as string | undefined,
+        allow_store_app: args.allow_store_app as boolean | undefined,
+      };
       const core = this.coreFor(args.app_dir);
 
       switch (route.canonical) {
@@ -183,11 +188,11 @@ class FlutterDeviceServer {
             })
           );
         case "flutter_terminate":
-          return this.json(await core.terminate(withDevicePin));
+          return this.json(await core.terminate(lifecycleArgs));
         case "flutter_background":
-          return this.json(await core.background(withDevicePin));
+          return this.json(await core.background(lifecycleArgs));
         case "flutter_foreground":
-          return this.json(await core.foreground(withDevicePin));
+          return this.json(await core.foreground(lifecycleArgs));
         case "flutter_hot_reload":
           return this.json(
             await core.hotReload({
@@ -286,6 +291,7 @@ class FlutterDeviceServer {
                 | undefined,
               target: args.target as "device" | "simulator" | undefined,
               device_udid: args.device_udid as string | undefined,
+              allow_store_app: args.allow_store_app as boolean | undefined,
             })
           );
         case "flutter_system_prompt":

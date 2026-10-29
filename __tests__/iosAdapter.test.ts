@@ -865,7 +865,7 @@ describe("IosAdapter.lifecycle (OS-level, mobile capability)", () => {
     await adapter.discoverDevice();
     runShell.mockClear();
     runShell.mockResolvedValue(okResult);
-    await adapter.lifecycle!.background("SIM-UDID-1", "com.example.app");
+    await adapter.lifecycle!.background("SIM-UDID-1");
     const cmd = runShell.mock.calls[0][0] as string;
     expect(cmd).toContain(IOS_BACKGROUND_APP_ID);
     expect(cmd).not.toContain("com.example.app");

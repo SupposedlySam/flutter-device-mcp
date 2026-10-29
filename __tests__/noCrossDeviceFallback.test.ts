@@ -3,6 +3,11 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { mockBuildPtyCaptureCommand } from "./support/mockBuildPtyCaptureCommand.js";
+import {
+  androidAppTree,
+  removeAndroidTrees,
+  unreadableAndroidTree,
+} from "./support/androidTree.js";
 
 // Replays the incident: an unattended deploy named an emulator, the emulators
 // had just died, and the deploy landed on the developer's personal phone, where
@@ -37,9 +42,12 @@ jest.unstable_mockModule("../src/launchRegistry.js", () => ({
   defaultRegistryPath: () => "/tmp/never-used-by-this-suite.json",
 }));
 
-const { AndroidAdapter, parseInstalledCopy } =
+const { AndroidAdapter, parseInstalledCopy, DEVICE_IDENTITY_PROBE } =
   await import("../src/adapters/android.js");
+const { findDeployedPackage, recordDeployedPackage } = await import("../src/deployedPackages.js");
 const { runDeployCore, runUninstallCore } = await import("../src/deployFlow.js");
+const { runLifecycleCore } = await import("../src/lifecycleFlow.js");
+const { runOpenUrlCore } = await import("../src/openUrlFlow.js");
 type DeployArgs = import("../src/deployFlow.js").DeployArgs;
 
 const PHONE = "RFCR902W0TT";
@@ -72,31 +80,7 @@ const LAUNCHED = {
   logPath: "/tmp/launch.log",
 };
 
-/**
- * An app dir whose Android build produces `packageId`: `appPackage` in
- * gradle.properties, plus the debug build type's `applicationIdSuffix` when given.
- */
-function appTree(packageId: string, debugSuffix?: string): string {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "android-tree-"));
-  const android = path.join(root, "android");
-  fs.mkdirSync(path.join(android, "app"), { recursive: true });
-  fs.writeFileSync(
-    path.join(android, "gradle.properties"),
-    `org.gradle.jvmargs=-Xmx4G\nappPackage = ${packageId}\n`
-  );
-  fs.writeFileSync(
-    path.join(android, "app", "build.gradle"),
-    "android {\n    defaultConfig {\n        applicationId project.appPackage\n    }\n    buildTypes {\n        debug {\n" +
-      (debugSuffix ? `            applicationIdSuffix ".${debugSuffix}"\n` : "") +
-      "        }\n        release {\n            minifyEnabled true\n        }\n    }\n}\n"
-  );
-  trees.push(root);
-  return root;
-}
-const trees: string[] = [];
-afterAll(() => {
-  for (const t of trees) fs.rmSync(t, { recursive: true, force: true });
-});
+afterAll(removeAndroidTrees);
 
 /**
  * Wire the fake host: which devices adb lists, which installer each device
@@ -132,7 +116,7 @@ function host(opts: {
 
 let defaultTree: string;
 beforeAll(() => {
-  defaultTree = appTree(APP_ID);
+  defaultTree = androidAppTree(APP_ID);
 });
 
 function adapter(device?: string, root = defaultTree) {
@@ -152,6 +136,8 @@ const uninstallsOn = (serial: string) =>
 const launches = () => neutralLaunchAndCaptureUri.mock.calls.map(([c]) => c);
 
 beforeEach(() => {
+  // The record of what deploy installed is durable, so each test gets its own.
+  process.env.FLUTTER_DEVICE_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "no-fallback-state-"));
   runShell.mockReset();
   neutralLaunchAndCaptureUri.mockReset();
   neutralLaunchAndCaptureUri.mockResolvedValue(LAUNCHED);
@@ -243,6 +229,44 @@ describe("space recovery", () => {
     expect(result.stage).toBe("launched");
   });
 
+  it("frees the suffixed package a dev-suffixed build installs, and only that one", async () => {
+    const devId = `${APP_ID}.dev`;
+    host({
+      devices: [EMULATOR_LINE],
+      installer: { [EMULATOR]: "null" },
+      pmPackage: devId,
+      apkPackage: devId,
+    });
+    neutralLaunchAndCaptureUri
+      .mockResolvedValueOnce(STORAGE_FAILURE)
+      .mockResolvedValueOnce(LAUNCHED);
+
+    const result = await deploy(adapter(undefined, androidAppTree(APP_ID, { debug: "dev" })), {
+      device_udid: EMULATOR,
+    });
+
+    expect(uninstallsAnywhere()).toEqual([`adb -s '${EMULATOR}' uninstall '${devId}'`]);
+    expect(result.stage).toBe("launched");
+  });
+
+  it("does not free space when the tree cannot say which package the build carries", async () => {
+    host({ devices: [EMULATOR_LINE], installer: { [EMULATOR]: "null" } });
+    neutralLaunchAndCaptureUri
+      .mockResolvedValueOnce(STORAGE_FAILURE)
+      .mockResolvedValueOnce(LAUNCHED);
+
+    const result = await deploy(adapter(undefined, unreadableAndroidTree()), {
+      device_udid: EMULATOR,
+      allow_store_app_removal: true,
+    });
+
+    expect(uninstallsAnywhere()).toEqual([]);
+    expect(result.stage).toBe("launch-failed");
+    expect(result.stage === "launch-failed" && result.launchRecovery?.note).toMatch(
+      /out of storage\..*Space recovery was not attempted\./s
+    );
+  });
+
   it("does not uninstall when the build being installed carries a different package id", async () => {
     host({
       devices: [EMULATOR_LINE],
@@ -325,7 +349,7 @@ describe("a copy of the app not installed by adb", () => {
       pmPackage: "com.example.app.dev",
     });
 
-    const result = await deploy(adapter(undefined, appTree("com.example.app", "dev")), {
+    const result = await deploy(adapter(undefined, androidAppTree("com.example.app", { debug: "dev" })), {
       device_udid: EMULATOR,
     });
 
@@ -354,6 +378,24 @@ describe("parseInstalledCopy", () => {
       kind: "installed",
       installer: "com.android.vending",
     });
+  });
+
+  it("reads the installer of exactly the app id when the longer id is listed after it", () => {
+    const out =
+      "package:com.example.app  installer=com.android.vending\n" +
+      "package:com.example.app.dev  installer=null\n__pm_exit=0\n";
+    expect(parseInstalledCopy(out, APP_ID)).toEqual({
+      kind: "installed",
+      installer: "com.android.vending",
+    });
+    expect(parseInstalledCopy(out, `${APP_ID}.dev`)).toEqual({ kind: "installed", installer: "null" });
+  });
+
+  it("reads the installer of exactly the app id when the longer id is listed first", () => {
+    const out =
+      "package:com.example.app.dev  installer=null\n" +
+      "package:com.example.app  installer=com.android.vending\n__pm_exit=0\n";
+    expect(parseInstalledCopy(out, `${APP_ID}.dev`)).toEqual({ kind: "installed", installer: "null" });
   });
 
   it("reports absent only when pm ran, exited 0 and listed nothing for the id", () => {
@@ -441,5 +483,285 @@ describe("screenshots resolve the device a deploy would", () => {
     const captures = commands().filter((c) => c.includes("screencap"));
     expect(captures).toHaveLength(1);
     expect(captures[0]).toContain(`adb -s '${EMULATOR}'`);
+  });
+});
+
+describe("a checkout whose debug build is com.example.app.dev, on a phone that also has the store release", () => {
+  const DEV_ID = `${APP_ID}.dev`;
+
+  /**
+   * The phone as it was: the Play Store release under the base id, and the
+   * debug build deploy put there under the suffixed one. `pm list packages`
+   * filters by substring, so a query for the base id lists both.
+   */
+  function phoneWithStoreAndDevBuilds(devInstaller: string | null = "null") {
+    const lines: Record<string, string> = {
+      [APP_ID]: `package:${APP_ID}  installer=com.android.vending`,
+    };
+    if (devInstaller !== null) lines[DEV_ID] = `package:${DEV_ID}  installer=${devInstaller}`;
+    runShell.mockImplementation(async (cmd: string) => {
+      if (cmd.startsWith("adb devices")) {
+        return ok(`List of devices attached\n${PHONE_LINE}\n`);
+      }
+      if (cmd === `adb -s '${PHONE}' shell '${DEVICE_IDENTITY_PROBE}'`) {
+        return ok(`avd=\nserialno=${PHONE}\n`);
+      }
+      const removed = cmd.match(new RegExp(`^adb -s '${PHONE}' uninstall '([^']+)'$`));
+      if (removed) {
+        delete lines[removed[1]];
+        return ok("Success");
+      }
+      const pm = cmd.match(/pm list packages -i ([^;']+)/);
+      if (pm) {
+        const listed = Object.entries(lines)
+          .filter(([id]) => id.includes(pm[1].trim()))
+          .map(([, line]) => `${line}\n`)
+          .join("");
+        return ok(`${listed}__pm_exit=0\n`);
+      }
+      return ok();
+    });
+  }
+
+  const devTree = () => androidAppTree(APP_ID, { debug: "dev" });
+  const stopsOf = (pkg: string) =>
+    commands().filter((c) => c === `adb -s '${PHONE}' shell am force-stop '${pkg}'`);
+
+  it("terminate force-stops the dev build and never the store release", async () => {
+    phoneWithStoreAndDevBuilds();
+    const a = adapter(undefined, devTree());
+
+    const outcome = await runLifecycleCore({
+      adapter: a,
+      lifecycle: a.lifecycle,
+      verb: "terminate",
+      args: { device_udid: PHONE },
+    });
+
+    expect(outcome).toMatchObject({ kind: "ran", appId: DEV_ID });
+    expect(stopsOf(DEV_ID)).toHaveLength(1);
+    expect(commands().filter((c) => c.includes("force-stop"))).toEqual(stopsOf(DEV_ID));
+  });
+
+  it("foreground relaunches the dev build and never the store release", async () => {
+    phoneWithStoreAndDevBuilds();
+    const a = adapter(undefined, devTree());
+
+    const outcome = await runLifecycleCore({
+      adapter: a,
+      lifecycle: a.lifecycle,
+      verb: "foreground",
+      args: { device_udid: PHONE },
+    });
+
+    expect(outcome).toMatchObject({ kind: "ran", appId: DEV_ID });
+    expect(commands().filter((c) => c.includes("monkey"))).toEqual([
+      `adb -s '${PHONE}' shell monkey -p '${DEV_ID}' -c android.intent.category.LAUNCHER 1`,
+    ]);
+  });
+
+  it("uninstall removes the dev build and never the store release", async () => {
+    phoneWithStoreAndDevBuilds();
+
+    const outcome = await runUninstallCore({
+      adapter: adapter(undefined, devTree()),
+      args: { device_udid: PHONE },
+    });
+
+    expect(outcome).toMatchObject({ kind: "ran", appId: DEV_ID });
+    expect(uninstallsAnywhere()).toEqual([`adb -s '${PHONE}' uninstall '${DEV_ID}'`]);
+  });
+
+  it("refuses to uninstall or terminate the dev id the tree guesses when deploy never put it there", async () => {
+    phoneWithStoreAndDevBuilds(null);
+    const a = adapter(undefined, devTree());
+
+    const removed = await runUninstallCore({ adapter: a, args: { device_udid: PHONE } });
+    const stopped = await runLifecycleCore({
+      adapter: a,
+      lifecycle: a.lifecycle,
+      verb: "terminate",
+      args: { device_udid: PHONE },
+    });
+
+    for (const outcome of [removed, stopped]) {
+      expect(outcome).toMatchObject({ kind: "refused", appId: DEV_ID });
+      expect(outcome.kind === "refused" && outcome.reason).toContain(
+        `${DEV_ID} is not installed on ${PHONE}`
+      );
+    }
+    expect(commands().filter((c) => /force-stop| uninstall /.test(c))).toEqual([]);
+  });
+
+  it("terminate leaves the dev id alone too when a store copy holds it", async () => {
+    phoneWithStoreAndDevBuilds("com.android.vending");
+    const a = adapter(undefined, devTree());
+
+    const outcome = await runLifecycleCore({
+      adapter: a,
+      lifecycle: a.lifecycle,
+      verb: "terminate",
+      args: { device_udid: PHONE },
+    });
+
+    expect(outcome).toMatchObject({ kind: "refused", appId: DEV_ID });
+    expect(outcome.kind === "refused" && outcome.reason).toContain(
+      `${DEV_ID} on ${PHONE} was installed by com.android.vending`
+    );
+    expect(commands().filter((c) => c.includes("force-stop"))).toEqual([]);
+  });
+
+  it.each([
+    ["terminate", "force-stop"],
+    ["foreground", "monkey"],
+  ] as const)(
+    "%s acts on a store-held dev id once allow_store_app is passed, and on nothing else",
+    async (verb, shellVerb) => {
+      phoneWithStoreAndDevBuilds("com.android.vending");
+      const a = adapter(undefined, devTree());
+
+      const outcome = await runLifecycleCore({
+        adapter: a,
+        lifecycle: a.lifecycle,
+        verb,
+        args: { device_udid: PHONE, allow_store_app: true },
+      });
+
+      expect(outcome).toMatchObject({ kind: "ran", appId: DEV_ID });
+      const acted = commands().filter((c) => c.includes(shellVerb));
+      expect(acted).toHaveLength(1);
+      expect(acted[0]).toContain(`'${DEV_ID}'`);
+    }
+  );
+
+  it("opens a link in the dev build when no package is named", async () => {
+    phoneWithStoreAndDevBuilds();
+    const a = adapter(undefined, devTree());
+
+    const result = await runOpenUrlCore({
+      adapter: a,
+      openUrl: a.openUrl.bind(a),
+      args: { url: "https://example.com/create", device_udid: PHONE },
+    });
+
+    expect(result.opened).toBe(true);
+    expect(commands().filter((c) => c.includes("am start"))).toEqual([
+      `adb -s '${PHONE}' shell am start -a android.intent.action.VIEW ` +
+        `-d 'https://example.com/create' '${DEV_ID}'`,
+    ]);
+  });
+
+  const recordDevDeploy = () =>
+    recordDeployedPackage({
+      platform: "android",
+      device: PHONE,
+      identity: `serialno:${PHONE}`,
+      packageId: DEV_ID,
+    });
+
+  it("refuses to terminate after the recorded dev build is gone, rather than report nothing to terminate", async () => {
+    phoneWithStoreAndDevBuilds(null);
+    recordDevDeploy();
+    const a = adapter(undefined, devTree());
+
+    const outcome = await runLifecycleCore({
+      adapter: a,
+      lifecycle: a.lifecycle,
+      verb: "terminate",
+      args: { device_udid: PHONE },
+    });
+
+    expect(outcome).toMatchObject({ kind: "refused", appId: DEV_ID });
+    expect(outcome.kind === "refused" && outcome.reason).toContain(
+      `${DEV_ID} is not installed on ${PHONE}. That id is what this checkout's build would produce`
+    );
+    expect(commands().filter((c) => c.includes("force-stop"))).toEqual([]);
+  });
+
+  it("uninstalling the recorded dev build clears the record", async () => {
+    phoneWithStoreAndDevBuilds();
+    recordDevDeploy();
+    const a = adapter(undefined, devTree());
+
+    const removed = await runUninstallCore({ adapter: a, args: { device_udid: PHONE } });
+
+    expect(removed).toMatchObject({ kind: "ran", appId: DEV_ID });
+    expect(findDeployedPackage("android", PHONE)).toBeUndefined();
+  });
+
+  it("keeps the record when the uninstall fails", async () => {
+    phoneWithStoreAndDevBuilds();
+    recordDevDeploy();
+    const fallthrough = runShell.getMockImplementation()!;
+    runShell.mockImplementation(async (cmd: string) =>
+      / uninstall /.test(cmd)
+        ? { ...ok("Failure [DELETE_FAILED_INTERNAL_ERROR]"), success: false, code: 1 }
+        : fallthrough(cmd)
+    );
+
+    await runUninstallCore({ adapter: adapter(undefined, devTree()), args: { device_udid: PHONE } });
+
+    expect(findDeployedPackage("android", PHONE)?.packageId).toBe(DEV_ID);
+  });
+
+  it("refuses to scope a link to a store-held dev id unless allow_store_app is passed", async () => {
+    phoneWithStoreAndDevBuilds("com.android.vending");
+    const a = adapter(undefined, devTree());
+    const open = (allow_store_app?: boolean) =>
+      runOpenUrlCore({
+        adapter: a,
+        openUrl: a.openUrl.bind(a),
+        args: { url: "exampleapp://create", device_udid: PHONE, allow_store_app },
+      });
+
+    const refused = await open();
+    expect(refused).toMatchObject({
+      opened: false,
+      reason: expect.stringContaining(`${DEV_ID} on ${PHONE} was installed by com.android.vending`),
+    });
+    expect(commands().filter((c) => c.includes("am start"))).toEqual([]);
+
+    const allowed = await open(true);
+    expect(allowed.opened).toBe(true);
+    expect(commands().filter((c) => c.includes("am start"))).toEqual([
+      `adb -s '${PHONE}' shell am start -a android.intent.action.VIEW -d 'exampleapp://create' '${DEV_ID}'`,
+    ]);
+  });
+
+  it("opens no link when the package it would be scoped to cannot be named", async () => {
+    phoneWithStoreAndDevBuilds();
+    const a = adapter(undefined, unreadableAndroidTree());
+
+    const result = await runOpenUrlCore({
+      adapter: a,
+      openUrl: a.openUrl.bind(a),
+      args: { url: "https://example.com/create", device_udid: PHONE },
+    });
+
+    expect(result).toMatchObject({ opened: false, reason: expect.stringMatching(/cannot be named/) });
+    expect(commands().filter((c) => c.includes("am start"))).toEqual([]);
+  });
+
+  it("refuses every verb when the tree does not say which package the build produces", async () => {
+    phoneWithStoreAndDevBuilds();
+    const a = adapter(undefined, unreadableAndroidTree());
+
+    const stopped = await runLifecycleCore({
+      adapter: a,
+      lifecycle: a.lifecycle,
+      verb: "terminate",
+      args: { device_udid: PHONE },
+    });
+    const removed = await runUninstallCore({ adapter: a, args: { device_udid: PHONE } });
+
+    expect(stopped).toMatchObject({
+      kind: "refused",
+      reason: expect.stringMatching(/cannot be named, so nothing was done/),
+    });
+    expect(removed).toMatchObject({
+      kind: "refused",
+      reason: expect.stringMatching(/cannot be named, so nothing was done/),
+    });
+    expect(commands().filter((c) => /force-stop| uninstall /.test(c))).toEqual([]);
   });
 });

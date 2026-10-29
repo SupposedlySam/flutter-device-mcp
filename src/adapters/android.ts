@@ -106,16 +106,26 @@ import {
   BuildResult,
   DeviceResolution,
   InputController,
+  isLaunchFailure,
   LaunchOutcome,
+  messageResult,
   Platform,
 } from "../types.js";
 import { dartDefineArgs } from "../dartDefine.js";
 import {
+  findDeployedPackage,
+  forgetDeployedPackage,
+  recordDeployedPackage,
+} from "../deployedPackages.js";
+import {
+  AppIdResolution,
   AppLifecycle,
   DeviceTargetPreference,
   InstallOptions,
   KillStaleScope,
   KillStaleScopeKind,
+  LifecycleCheck,
+  LifecycleVerdict,
   PlatformAdapter,
   LaunchRecovery,
   UninstallCheck,
@@ -172,17 +182,18 @@ export type InstalledCopy =
   | { kind: "installed"; installer: string }
   | { kind: "unknown"; detail: string };
 
+/** Every package `pm list packages -i` printed, or why its output cannot be trusted. */
+export type InstalledPackages =
+  | { kind: "listed"; packages: { id: string; installer: string }[] }
+  | { kind: "unknown"; detail: string };
+
 /**
- * Read the installer of exactly `appId` from `pm list packages -i <appId>`
- * followed by the exit-status sentinel. The filter is a substring match, so
- * `com.example.app.debug` is listed for `com.example.app` and is skipped here.
- *
- * `absent` needs positive evidence: pm exited 0 and every line it printed was a
- * well-formed package line. Anything else — no sentinel, a non-zero exit, a line
- * that is not a package line — is `unknown`, which callers treat as a copy they
- * must not replace.
+ * Parse `pm list packages -i <filter>` followed by the exit-status sentinel.
+ * The list is trusted only with positive evidence: pm exited 0 and every line it
+ * printed was a well-formed package line. Anything else (no sentinel, a non-zero
+ * exit, a line that is not a package line) is `unknown`.
  */
-export function parseInstalledCopy(output: string, appId: string): InstalledCopy {
+export function parseInstalledPackages(output: string): InstalledPackages {
   const lines = output
     .split("\n")
     .map((l) => l.trim())
@@ -192,14 +203,70 @@ export function parseInstalledCopy(output: string, appId: string): InstalledCopy
   if (exit !== `${PM_EXIT_SENTINEL}0`) {
     return { kind: "unknown", detail: `pm exited ${exit.slice(PM_EXIT_SENTINEL.length)}` };
   }
-  let found: InstalledCopy = { kind: "absent" };
+  const packages: { id: string; installer: string }[] = [];
   for (const line of lines) {
     if (line === exit) continue;
     const m = line.match(/^package:(\S+)\s+installer=(\S+)$/);
     if (!m) return { kind: "unknown", detail: `unexpected pm output: ${line}` };
-    if (m[1] === appId) found = { kind: "installed", installer: m[2] };
+    packages.push({ id: m[1], installer: m[2] });
   }
-  return found;
+  return { kind: "listed", packages };
+}
+
+/**
+ * Read the installer of exactly `appId`. pm's filter is a substring match, so
+ * `com.example.app.debug` is listed for `com.example.app` and is skipped here.
+ * `unknown` is a copy callers must not replace.
+ */
+export function parseInstalledCopy(output: string, appId: string): InstalledCopy {
+  const listed = parseInstalledPackages(output);
+  if (listed.kind === "unknown") return listed;
+  const match = listed.packages.find((p) => p.id === appId);
+  return match ? { kind: "installed", installer: match.installer } : { kind: "absent" };
+}
+
+/**
+ * The builds of `baseId` that adb installed: the base itself and every
+ * suffixed variant (`<base>.<suffix>`), which is how a build type's
+ * applicationIdSuffix names them.
+ */
+export function adbInstalledVariants(
+  packages: { id: string; installer: string }[],
+  baseId: string
+): string[] {
+  return packages
+    .filter((p) => p.id === baseId || p.id.startsWith(`${baseId}.`))
+    .filter((p) => ADB_INSTALLERS.has(p.installer))
+    .map((p) => p.id);
+}
+
+/**
+ * Asks the device what it is. An emulator's AVD name is used because every
+ * emulator's ro.serialno is the same generic value; real hardware answers with
+ * its own serial, which a wireless ip:port does not carry.
+ */
+export const DEVICE_IDENTITY_PROBE =
+  "echo avd=$(getprop ro.boot.qemu.avd_name)$(getprop ro.kernel.qemu.avd_name); " +
+  "echo serialno=$(getprop ro.serialno)";
+
+/** The identity {@link DEVICE_IDENTITY_PROBE} printed, or undefined when it named nothing. */
+export function parseDeviceIdentity(output: string): string | undefined {
+  const field = (name: string) =>
+    output.match(new RegExp(`^${name}=(.*)$`, "m"))?.[1]?.trim() || undefined;
+  const avd = field("avd");
+  if (avd) return `avd:${avd}`;
+  const serial = field("serialno");
+  return serial ? `serialno:${serial}` : undefined;
+}
+
+/** The `applicationId` the app's build.gradle declares: the id before any suffix. */
+export function androidBaseApplicationId(
+  appDir: string
+): { ok: true; packageId: string } | { ok: false; reason: string } {
+  const androidDir = path.join(appDir, "android");
+  const gradle = readAppGradle(androidDir);
+  if (!gradle.ok) return gradle;
+  return gradleApplicationId(androidDir, gradle.file, gradle.text);
 }
 
 /**
@@ -210,19 +277,20 @@ export function parseInstalledCopy(output: string, appId: string): InstalledCopy
  * installs — and replaces. Anything that cannot be attributed from here (several
  * `applicationId`s from flavors, a suffix outside the build type, an expression)
  * makes the id unknown rather than guessed.
+ *
+ * Profile takes no suffix from debug. The Flutter Gradle plugin creates the
+ * profile build type with `initWith(debug)` in its own apply(), before the
+ * app's `android {}` block sets debug's suffix, so only a `profile {}` block of
+ * the app's own gives profile one.
  */
 export function androidBuildPackageId(
   appDir: string,
   mode: string
 ): { ok: true; packageId: string } | { ok: false; reason: string } {
   const androidDir = path.join(appDir, "android");
-  const gradleFile = ["build.gradle", "build.gradle.kts"]
-    .map((f) => path.join(androidDir, "app", f))
-    .find((f) => fs.existsSync(f));
-  if (!gradleFile) {
-    return { ok: false, reason: `No build.gradle under ${androidDir}/app.` };
-  }
-  const gradle = fs.readFileSync(gradleFile, "utf8");
+  const read = readAppGradle(androidDir);
+  if (!read.ok) return read;
+  const { file: gradleFile, text: gradle } = read;
   const base = gradleApplicationId(androidDir, gradleFile, gradle);
   if (!base.ok) return base;
   const suffixPattern = /applicationIdSuffix\s*=?\s*["']([^"']*)["']/g;
@@ -241,6 +309,17 @@ export function androidBuildPackageId(
   }
   const suffix = block ? [...block.matchAll(suffixPattern)][0]?.[1] : undefined;
   return { ok: true, packageId: base.packageId + (suffix ?? "") };
+}
+
+/** android/app/build.gradle[.kts] and its text. */
+function readAppGradle(
+  androidDir: string
+): { ok: true; file: string; text: string } | { ok: false; reason: string } {
+  const file = ["build.gradle", "build.gradle.kts"]
+    .map((f) => path.join(androidDir, "app", f))
+    .find((f) => fs.existsSync(f));
+  if (!file) return { ok: false, reason: `No build.gradle under ${androidDir}/app.` };
+  return { ok: true, file, text: fs.readFileSync(file, "utf8") };
 }
 
 /**
@@ -402,6 +481,13 @@ export interface AndroidAdapterConfig {
   flutterCommand?: string;
   /** The `aapt2` to read a built apk's package id with. Defaults to {@link locateAapt2}. */
   aaptCommand?: string;
+  /**
+   * The app dir was named (a per-call `app_dir`, `--app-dir`, FLUTTER_DEVICE_APP_DIR
+   * or the config file) rather than derived from the working directory. Only a
+   * named app dir may choose among several adb installs, because a derived one is
+   * often not the tree that deployed.
+   */
+  checkoutNamed?: boolean;
 }
 
 export class AndroidAdapter implements PlatformAdapter {
@@ -485,8 +571,136 @@ export class AndroidAdapter implements PlatformAdapter {
     return false;
   }
 
+  /**
+   * The configured id, for reporting. `flutter run` ignores it, so nothing acts
+   * on it: verbs go through {@link resolveAppId}, installs through
+   * {@link installPackageId}.
+   */
   get appId(): string {
     return this.config.appId;
+  }
+
+  /**
+   * The package deploy installed on `device`, best evidence first:
+   *  1. the package read from the apk deploy installed there, as recorded, when
+   *     the device is still the one it was recorded on and the package is still
+   *     installed;
+   *  2. the only adb install of the app on the device (the base id or a
+   *     suffixed variant), so the answer survives a lost record;
+   *  3. what this checkout's build would produce now, marked as a guess.
+   * Never the configured id, because a verb aimed there acts on whatever else
+   * carries that id, such as the Play Store release.
+   */
+  async resolveAppId(device: string): Promise<AppIdResolution> {
+    const recorded = await this.recordedPackage(device);
+    if (recorded.kind === "unknown") return { ok: false, reason: recorded.reason };
+    if (recorded.kind === "found") {
+      return { ok: true, appId: recorded.packageId, source: "deployed" };
+    }
+    const built = androidBuildPackageId(this.config.appDir, this.launchMode);
+    const base = androidBaseApplicationId(this.config.appDir);
+    if (base.ok) {
+      const listed = await this.installedPackages(device, base.packageId);
+      if (listed.kind === "unknown") {
+        return {
+          ok: false,
+          reason:
+            `Could not list the installs of ${base.packageId} on ${device} ` +
+            `(${listed.detail}), so which one flutter_deploy installed cannot be ` +
+            `told, and nothing was done.`,
+        };
+      }
+      const variants = adbInstalledVariants(listed.packages, base.packageId);
+      if (variants.length === 1) return { ok: true, appId: variants[0], source: "device" };
+      if (variants.length > 1) {
+        const several =
+          `${device} holds several adb installs of ${base.packageId} ` +
+          `(${variants.join(", ")}) and flutter_deploy recorded none of them`;
+        if (!built.ok || !variants.includes(built.packageId)) {
+          return {
+            ok: false,
+            reason:
+              `${several}, and none is what the build in ${this.config.appDir} ` +
+              `produces, so nothing was done. Run flutter_deploy to record the one it installs.`,
+          };
+        }
+        if (!this.config.checkoutNamed) {
+          return {
+            ok: false,
+            reason:
+              `${several}, so only the checkout that deployed can say which is meant. ` +
+              `The derived app dir (${this.config.appDir}) builds ` +
+              `${built.packageId}, but it was not named and may not be that tree, so ` +
+              `nothing was done. Pass app_dir naming the checkout that deployed, or ` +
+              `run flutter_deploy to record the one it installs.`,
+          };
+        }
+        return {
+          ok: true,
+          appId: built.packageId,
+          source: "build-tree",
+          note:
+            `${several}; ${built.packageId} was picked because it is what the build ` +
+            `in ${this.config.appDir} produces.`,
+        };
+      }
+    }
+    if (built.ok) return { ok: true, appId: built.packageId, source: "build-tree" };
+    return {
+      ok: false,
+      reason:
+        `${built.reason} Without the package id this build produces, the app ` +
+        `flutter_deploy installs on ${device} cannot be named, so nothing was done.`,
+    };
+  }
+
+  /**
+   * The recorded package for `device`, if it still holds. A record from another
+   * device that reused the serial, or one with no identity to compare, is
+   * ignored; a record whose package has since gone is dropped.
+   */
+  private async recordedPackage(
+    device: string
+  ): Promise<
+    | { kind: "found"; packageId: string }
+    | { kind: "none" }
+    | { kind: "unknown"; reason: string }
+  > {
+    const entry = findDeployedPackage(this.platform, device);
+    if (!entry?.identity) return { kind: "none" };
+    const identity = await this.deviceIdentity(device);
+    if (identity !== entry.identity) return { kind: "none" };
+    const copy = await this.installedCopy(device, entry.packageId);
+    if (copy.kind === "unknown") {
+      return {
+        kind: "unknown",
+        reason:
+          `Could not confirm ${entry.packageId}, which flutter_deploy recorded ` +
+          `installing on ${device}, is still installed (${copy.detail}), so nothing was done.`,
+      };
+    }
+    if (copy.kind === "absent") {
+      forgetDeployedPackage({ platform: this.platform, device, packageId: entry.packageId });
+      return { kind: "none" };
+    }
+    return { kind: "found", packageId: entry.packageId };
+  }
+
+  /** What `device` says it is ({@link parseDeviceIdentity}), or undefined when adb could not ask. */
+  private async deviceIdentity(device: string): Promise<string | undefined> {
+    const result = await runShell(
+      `adb -s ${quote(device)} shell ${quote(DEVICE_IDENTITY_PROBE)}`,
+      { timeoutMs: 15000 }
+    );
+    return result.success ? parseDeviceIdentity(result.stdout) : undefined;
+  }
+
+  /** The package this checkout's build produces in the current launch mode. */
+  installPackageId(): AppIdResolution {
+    const built = androidBuildPackageId(this.config.appDir, this.launchMode);
+    return built.ok
+      ? { ok: true, appId: built.packageId, source: "build-tree" }
+      : built;
   }
 
   /**
@@ -664,9 +878,9 @@ export class AndroidAdapter implements PlatformAdapter {
       envMode: this.config.launchMode,
     });
     const allow = opts.allowStoreAppRemoval === true;
-    const built = androidBuildPackageId(this.config.appDir, this.launchMode);
+    const built = this.installPackageId();
     const check: UninstallVerdict = built.ok
-      ? await this.checkReplaceable(device, built.packageId, allow)
+      ? await this.checkReplaceable(device, built.appId, allow)
       : allow
         ? { ok: true }
         : {
@@ -676,28 +890,13 @@ export class AndroidAdapter implements PlatformAdapter {
               `flutter run might replace cannot be checked, so nothing was done. Pass ` +
               `allow_store_app_removal: true to proceed anyway.`,
           };
-    if (!check.ok) {
-      return {
-        code: 1,
-        stdout: "",
-        stderr: check.reason,
-        combined: check.reason,
-        success: false,
-        timedOut: false,
-      };
-    }
-    const message =
+    if (!check.ok) return messageResult(false, check.reason);
+    return messageResult(
+      true,
       `Android install is performed by 'flutter run' at launch time (it installs ` +
-      `the apk on ${device} and sets up the VM-service port-forward), so the ` +
-      `separate install step is a no-op.`;
-    return {
-      code: 0,
-      stdout: message,
-      stderr: "",
-      combined: message,
-      success: true,
-      timedOut: false,
-    };
+        `the apk on ${device} and sets up the VM-service port-forward), so the ` +
+        `separate install step is a no-op.`
+    );
   }
 
   /**
@@ -725,7 +924,7 @@ export class AndroidAdapter implements PlatformAdapter {
     if (!ANDROID_STORAGE_FAILURE_SIGNATURE.test(logTail)) {
       return { action: "none" };
     }
-    const built = androidBuildPackageId(this.config.appDir, this.launchMode);
+    const built = this.installPackageId();
     if (!built.ok) {
       return {
         action: "none",
@@ -734,7 +933,7 @@ export class AndroidAdapter implements PlatformAdapter {
     }
     return {
       action: "uninstall-and-retry",
-      packageId: built.packageId,
+      packageId: built.appId,
       note: `${device} is out of storage.`,
     };
   }
@@ -772,24 +971,44 @@ export class AndroidAdapter implements PlatformAdapter {
       controlChannel,
       dartDefineArgs(dartDefine).map(quote)
     );
-    return neutralLaunchAndCaptureUri(
+    const outcome = await neutralLaunchAndCaptureUri(
       command,
       this.config.appDir,
       timeoutMs,
       ANDROID_FAILURE_SIGNATURES,
       controlChannel?.fifoPath
     );
+    if (isLaunchFailure(outcome)) return outcome;
+    // Read from the apk flutter run installed, not from the tree: the tree says
+    // what a build would produce, the apk says what is on the device.
+    const installed = await this.builtApkPackageId(readLaunchLog(outcome.logPath));
+    const identity = installed.ok ? await this.deviceIdentity(device) : undefined;
+    if (installed.ok && identity) {
+      recordDeployedPackage({
+        platform: this.platform,
+        device,
+        identity,
+        packageId: installed.packageId,
+      });
+    } else {
+      // The earlier record describes an install this launch may have replaced.
+      forgetDeployedPackage({ platform: this.platform, device });
+      logger.warn(
+        `Not recording which package was deployed to ${device}: ` +
+          (installed.ok ? `${device} did not say what device it is.` : installed.reason)
+      );
+    }
+    return outcome;
   }
 
   /**
    * Open a URL on the device via `am start -a android.intent.action.VIEW`.
    *
-   * Defaults the target package to this project's resolved application id: an
-   * unscoped VIEW intent for an https link can raise a disambiguation chooser
-   * (browser vs app) that an automated run cannot answer, and the call then
-   * looks like a hang rather than a failure. Pass an explicit id to target
-   * another app, or an empty string to deliberately go unscoped and let the OS
-   * disambiguate the way a real user tap does.
+   * The server passes the deployed package in when the caller names none (see
+   * runOpenUrlCore): an unscoped VIEW intent for an https link can raise a
+   * disambiguation chooser (browser vs app) that an automated run cannot
+   * answer, and the call then looks like a hang rather than a failure. An empty
+   * string, or no package at all, goes unscoped and exercises the chooser.
    *
    * `am` reports a refused intent on STDOUT while still exiting 0, so the
    * output is classified rather than trusting the exit code.
@@ -804,11 +1023,10 @@ export class AndroidAdapter implements PlatformAdapter {
       return { opened: false, url, reason: invalid };
     }
     const resolution = await this.discoverDevice(preference);
-    const pkg = packageOrBundleId ?? this.appId;
     const command = buildAdbOpenUrlCommand(
       resolution.target,
       url,
-      pkg && pkg.length > 0 ? pkg : undefined
+      packageOrBundleId || undefined
     );
     const result = await runShell(command, { timeoutMs: 30000 });
     const refusal = androidOpenUrlFailure(result.combined);
@@ -853,8 +1071,16 @@ export class AndroidAdapter implements PlatformAdapter {
             `different app. Not attempted.`,
         };
       }
+      return this.checkReplaceable(device, check.packageId, check.allowStoreAppRemoval);
     }
-    return this.checkReplaceable(device, check.packageId, check.allowStoreAppRemoval);
+    const copy = await this.classifyCopy(device, check.packageId, REMOVAL_OVERRIDE);
+    if (copy.kind === "absent" && check.appIdSource === "build-tree") {
+      return { ok: false, reason: guessNotInstalled(check.packageId, device) };
+    }
+    if (copy.kind === "foreign" && !check.allowStoreAppRemoval) {
+      return { ok: false, reason: copy.reason };
+    }
+    return { ok: true };
   }
 
   /** Read the package id of the apk a launch is installing. */
@@ -891,51 +1117,93 @@ export class AndroidAdapter implements PlatformAdapter {
     return { ok: true, packageId };
   }
 
-  /** Who installed `packageId` on `device`. */
-  async installedCopy(device: string, packageId: string): Promise<InstalledCopy> {
+  /** Every package `pm` lists for the substring `filter` on `device`. */
+  private async installedPackages(device: string, filter: string): Promise<InstalledPackages> {
     const result = await runShell(
       `adb -s ${quote(device)} shell ${quote(
-        `pm list packages -i ${packageId}; echo ${PM_EXIT_SENTINEL}$?`
+        `pm list packages -i ${filter}; echo ${PM_EXIT_SENTINEL}$?`
       )}`,
       { timeoutMs: 30000 }
     );
     if (!result.success) {
       return { kind: "unknown", detail: tail(result.combined, 5) };
     }
-    return parseInstalledCopy(result.stdout, packageId);
+    return parseInstalledPackages(result.stdout);
+  }
+
+  /** Who installed `packageId` on `device`. */
+  async installedCopy(device: string, packageId: string): Promise<InstalledCopy> {
+    const listed = await this.installedPackages(device, packageId);
+    if (listed.kind === "unknown") return listed;
+    const match = listed.packages.find((p) => p.id === packageId);
+    return match ? { kind: "installed", installer: match.installer } : { kind: "absent" };
   }
 
   /**
-   * Refuse to replace or remove a copy of `packageId` that adb did not install,
-   * unless allowed. Not knowing who installed it counts as such a copy.
+   * Whether the copy of `packageId` on `device` is one adb installed. A copy
+   * nobody can attribute counts as somebody else's, and `foreign` carries the
+   * refusal that names its installer and the override.
    */
+  private async classifyCopy(
+    device: string,
+    packageId: string,
+    override: CopyOverride
+  ): Promise<{ kind: "adb" } | { kind: "absent" } | { kind: "foreign"; reason: string }> {
+    const copy = await this.installedCopy(device, packageId);
+    if (copy.kind === "absent") return copy;
+    if (copy.kind === "unknown") {
+      return {
+        kind: "foreign",
+        reason:
+          `Could not tell who installed ${packageId} on ${device} (${copy.detail}), ` +
+          `so it is treated as somebody's install and left alone. Pass ` +
+          `${override.arg}: true to proceed anyway.`,
+      };
+    }
+    if (ADB_INSTALLERS.has(copy.installer)) return { kind: "adb" };
+    return {
+      kind: "foreign",
+      reason:
+        `${packageId} on ${device} was installed by ${copy.installer}, not by adb ` +
+        `(a store, a tester distribution, or a sideloaded build). ${override.consequence} ` +
+        `Pass ${override.arg}: true only if that device's owner has agreed.`,
+    };
+  }
+
+  /** Refuse to replace or remove a copy of `packageId` that adb did not install, unless allowed. */
   private async checkReplaceable(
     device: string,
     packageId: string,
     allowStoreAppRemoval: boolean
   ): Promise<UninstallVerdict> {
     if (allowStoreAppRemoval) return { ok: true };
-    const copy = await this.installedCopy(device, packageId);
-    if (copy.kind === "installed" && !ADB_INSTALLERS.has(copy.installer)) {
-      return {
-        ok: false,
-        reason:
-          `${packageId} on ${device} was installed by ${copy.installer}, not by adb ` +
-          `(a store, a tester distribution, or a sideloaded build). Replacing it with ` +
-          `a development build uninstalls it and deletes its data, so nothing was ` +
-          `done. Pass allow_store_app_removal: true only if that device's owner has agreed.`,
-      };
+    const copy = await this.classifyCopy(device, packageId, REMOVAL_OVERRIDE);
+    return copy.kind === "foreign" ? { ok: false, reason: copy.reason } : { ok: true };
+  }
+
+  /**
+   * Terminate, foreground and a scoped open-url act only on a copy adb installed, because a
+   * force-stop of a store install stops somebody's own app mid-use (how a
+   * terminate aimed at the wrong id hit a personal phone's Play Store copy). A
+   * guessed id that is not installed is refused rather than reported done.
+   */
+  async verifyLifecycleTarget(device: string, check: LifecycleCheck): Promise<LifecycleVerdict> {
+    const copy = await this.classifyCopy(device, check.appId, {
+      arg: "allow_store_app",
+      consequence: "It is not the build flutter_deploy put there, so it was left alone.",
+    });
+    if (copy.kind === "absent") {
+      if (check.appIdSource === "build-tree") {
+        return { kind: "refuse", reason: guessNotInstalled(check.appId, device) };
+      }
+      return check.verb === "terminate"
+        ? { kind: "nothing-to-do", message: `${check.appId} is not installed on ${device}; nothing to terminate.` }
+        : { kind: "refuse", reason: `${check.appId} is not installed on ${device}; run flutter_deploy first.` };
     }
-    if (copy.kind === "unknown") {
-      return {
-        ok: false,
-        reason:
-          `Could not tell who installed ${packageId} on ${device} ` +
-          `(${copy.detail}), so it is treated as somebody's install and left alone. ` +
-          `Pass allow_store_app_removal: true to proceed anyway.`,
-      };
+    if (copy.kind === "foreign" && !check.allowStoreApp) {
+      return { kind: "refuse", reason: copy.reason };
     }
-    return { ok: true };
+    return { kind: "proceed" };
   }
 
   /** Uninstall the app to free device space / reset state via `adb uninstall`. */
@@ -1284,3 +1552,37 @@ export class AndroidAdapter implements PlatformAdapter {
   }
 }
 
+/** The override a refusal names, and what it says acting would cost. */
+interface CopyOverride {
+  arg: string;
+  consequence: string;
+}
+
+const REMOVAL_OVERRIDE: CopyOverride = {
+  arg: "allow_store_app_removal",
+  consequence: "Removing it deletes its data, so nothing was done.",
+};
+
+/**
+ * Why a verb refused an id it only guessed from the build tree: the package
+ * flutter_deploy installed is not recorded and the device has no matching
+ * install, so acting on the guess could report success on a package nobody
+ * installed while the real one is left untouched.
+ */
+function guessNotInstalled(packageId: string, device: string): string {
+  return (
+    `${packageId} is not installed on ${device}. That id is what this checkout's ` +
+    `build would produce, not one flutter_deploy recorded installing, so it may ` +
+    `not be what deploy put there; nothing was done. Run flutter_deploy, or pass ` +
+    `the package explicitly.`
+  );
+}
+
+function readLaunchLog(logPath: string | undefined): string {
+  if (!logPath) return "";
+  try {
+    return fs.readFileSync(logPath, "utf8");
+  } catch {
+    return "";
+  }
+}
