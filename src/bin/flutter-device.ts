@@ -107,7 +107,8 @@ Commands:
   set-input-mode      Select the input plane (--mode dpad|pointer) — TV
   key                 Send a remote/navigation key (--key UP|DOWN|ENTER|…) or type text (--text "hi")
   geometry            Report screen size + device pixel ratio (--view-width/--view-height to cross-check)
-  pointer             Drive the pointer (--action move|click|scroll, --x --y --dy)
+  pointer             Drive the pointer (--action move|click|scroll|drag, --x --y --dy;
+                      drag: --x2 --y2 [--duration-ms --steps --hold-ms])
                       Android: pass --x/--y directly on --action click for a one-call tap, no move needed
                       macOS: x/y are WINDOW-RELATIVE points by default (--absolute for raw screen points, --double for a double-click)
   system-prompt       Detect/tap OS-level dialogs (--action detect|tap|dismiss) — iOS

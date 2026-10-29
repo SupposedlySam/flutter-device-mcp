@@ -4,7 +4,8 @@
  * Implements the platform-neutral {@link InputController} by shelling adb's
  * input command against the resolved device serial: `input keyevent` for
  * remote/navigation keys, `input tap` for the pointer click, `input swipe` for
- * the pointer scroll, and `input text` for typing into the focused field. Works
+ * the pointer scroll, `input motionevent` for a point-to-point drag, and
+ * `input text` for typing into the focused field. Works
  * on physical devices and emulators alike (both are adb targets).
  *
  * This is the OS-LEVEL input plane, and on Android it is the one to reach for
@@ -46,6 +47,7 @@
  * another.
  */
 import { quote, RunOptions, runShell, tail } from "../cli.js";
+import { DragPlan, dragOverrunNote, effectiveDragHz, planDrag } from "./drag.js";
 import {
   filePointerStage,
   PointerStage,
@@ -57,6 +59,8 @@ import {
   InputController,
   InputMode,
   Platform,
+  PointerDragOutcome,
+  PointerDragRequest,
   PointerScrollOpts,
   PointerScrollOutcome,
   PointerScrollVerification,
@@ -109,6 +113,12 @@ export const ANDROID_SWIPE_MAX_DURATION_MS = 10000;
 
 /** Timeout for a single `adb shell input` send. */
 const INPUT_TIMEOUT_MS = 15000;
+
+/**
+ * Timeout headroom per drag event, for the `input` process start-up each one
+ * pays on the device on top of its planned interval.
+ */
+const DRAG_PER_EVENT_ALLOWANCE_MS = 250;
 
 /**
  * How long to let the screen settle before the post-scroll verification hash.
@@ -200,6 +210,70 @@ export function buildAdbSwipeCommand(
     `swipe ${Math.round(x1)} ${Math.round(y1)} ${Math.round(x2)} ` +
       `${Math.round(y2)} ${Math.round(durationMs)}`
   );
+}
+
+/** Marker the drag script prints so its on-device timing can be read back. */
+const DRAG_TIMING_MARKER = "FLUTTER_DEVICE_DRAG";
+
+function sleepSeconds(ms: number): string {
+  return (ms / 1000).toFixed(3);
+}
+
+/**
+ * The on-device script for a drag: one `input motionevent` per event, chained
+ * with `&&` and sent as ONE `adb shell`. Separate adb calls put 50-100ms of
+ * connection overhead between moves and the drag stutters.
+ *
+ * The chain stops at the first failed event, and a failure then sends CANCEL so
+ * the injected finger is never left down on the screen. The device clock is
+ * read on either side so the response can say how long the gesture really took.
+ */
+export function buildAdbDragScript(plan: DragPlan): string {
+  const event = (action: string, point: { x: number; y: number }) =>
+    `input motionevent ${action} ${point.x} ${point.y}`;
+  const pause = sleepSeconds(plan.intervalMs);
+  const chain = [event("DOWN", plan.from)];
+  for (const move of plan.moves) {
+    chain.push(`sleep ${pause}`, event("MOVE", move));
+  }
+  if (plan.holdMs > 0) chain.push(`sleep ${sleepSeconds(plan.holdMs)}`);
+  chain.push(event("UP", plan.to));
+  return [
+    "s=$(date +%s%N)",
+    chain.join(" && "),
+    "rc=$?",
+    "e=$(date +%s%N)",
+    `echo "${DRAG_TIMING_MARKER} t0=$s t1=$e rc=$rc"`,
+    `[ $rc -eq 0 ] || ${event("CANCEL", plan.to)} >/dev/null 2>&1`,
+    "exit $rc",
+  ].join("; ");
+}
+
+/** Build the `adb shell` send for a drag (see {@link buildAdbDragScript}). */
+export function buildAdbDragCommand(serial: string, plan: DragPlan): string {
+  return `adb -s ${quote(serial)} shell ${quote(buildAdbDragScript(plan))}`;
+}
+
+/**
+ * Read the drag's on-device duration from the script's timing line. Undefined
+ * when the device's `date` has no `%N` (the line then carries a literal `N`).
+ * Nanoseconds since the epoch exceed a double's exact range, hence BigInt.
+ */
+export function parseDragDeviceMs(output: string): number | undefined {
+  const match = output.match(
+    new RegExp(`${DRAG_TIMING_MARKER} t0=(\\d+) t1=(\\d+)`)
+  );
+  if (!match) return undefined;
+  const elapsedNs = BigInt(match[2]) - BigInt(match[1]);
+  return Number(elapsedNs / BigInt(1000000));
+}
+
+/**
+ * `input` reports a bad or unknown command on its output and can still exit 0,
+ * so the output is checked as well as the exit code.
+ */
+function inputReportedError(output: string): boolean {
+  return /\bError:|Unknown command|Usage: input/i.test(output);
 }
 
 /** Build the `input text` send, escaped for the device shell + host-quoted. */
@@ -548,6 +622,78 @@ export class AndroidInputController implements InputController {
       timeoutMs: INPUT_TIMEOUT_MS,
     });
     return result.success ? parseScreenHash(result.combined) : undefined;
+  }
+
+  /**
+   * Drag from one point to another with `input motionevent`, the whole gesture
+   * in a single `adb shell` (see {@link buildAdbDragScript}). Points off the
+   * screen are sent as given and noted, not clamped: the caller named them.
+   */
+  async pointerDrag(request: PointerDragRequest): Promise<PointerDragOutcome> {
+    const serial = await this.resolveSerial();
+    const plan = planDrag(request);
+    const size = await this.screenSize(serial);
+    const notes = [...plan.notes];
+    const offScreen = [plan.from, plan.to].filter(
+      (p) => size && (p.x < 0 || p.y < 0 || p.x >= size.width || p.y >= size.height)
+    );
+    if (size && offScreen.length) {
+      notes.push(
+        `${offScreen.map((p) => `(${p.x}, ${p.y})`).join(" and ")} lies outside the ` +
+          `${size.width}x${size.height} screen; the events were sent as given.`
+      );
+    }
+
+    const startedAt = Date.now();
+    const result = await this.run(buildAdbDragCommand(serial, plan), {
+      timeoutMs:
+        INPUT_TIMEOUT_MS +
+        plan.durationMs +
+        plan.holdMs +
+        plan.steps * DRAG_PER_EVENT_ALLOWANCE_MS,
+    });
+    const hostMs = Date.now() - startedAt;
+    if (!result.success || inputReportedError(result.combined)) {
+      // The on-device script only cancels its own failed events. A host-side
+      // timeout kills adb mid-chain, and an error `input` printed with exit 0
+      // never trips the script's check, so both can leave the finger down.
+      // Best-effort: a failed CANCEL must not replace the error being reported.
+      if (result.success || result.timedOut) {
+        await this.run(
+          buildAdbInputCommand(serial, `motionevent CANCEL ${plan.to.x} ${plan.to.y}`),
+          { timeoutMs: INPUT_TIMEOUT_MS }
+        ).catch(() => {});
+      }
+      throw new Error(
+        result.timedOut
+          ? `adb drag send timed out after ${hostMs}ms; a CANCEL was sent to release ` +
+              `the finger: ${tail(result.combined, 10)}`
+          : "adb drag send failed (`input motionevent` needs Android 10 or later; is the " +
+              `device online/authorized?): ${tail(result.combined, 10)}`
+      );
+    }
+
+    const deviceMs = parseDragDeviceMs(result.combined);
+    const wallMs = deviceMs ?? hostMs;
+    const overrun = dragOverrunNote(
+      plan,
+      wallMs,
+      "each `input motionevent` starts its own process on the device"
+    );
+    if (overrun) notes.push(overrun);
+    return {
+      from: plan.from,
+      to: plan.to,
+      steps: plan.steps,
+      durationMs: plan.durationMs,
+      intervalMs: plan.intervalMs,
+      holdMs: plan.holdMs,
+      distancePx: plan.distancePx,
+      wallMs,
+      wallClock: deviceMs !== undefined ? "device" : "host",
+      effectiveHz: effectiveDragHz(plan, wallMs),
+      ...(notes.length ? { notes } : {}),
+    };
   }
 
   /** Type into the focused field via `input text` (escaped — see helpers). */

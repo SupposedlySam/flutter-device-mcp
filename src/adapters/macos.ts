@@ -54,8 +54,11 @@ import {
   Platform,
   PointerClickOpts,
   PointerCoordinateOpts,
+  PointerDragOutcome,
+  PointerDragRequest,
   UnsupportedInputError,
 } from "../types.js";
+import { dragOverrunNote, effectiveDragHz, planDrag } from "../input/drag.js";
 import {
   AppLifecycle,
   DeviceTargetPreference,
@@ -70,7 +73,9 @@ import { locateCliclick } from "../cliclickLocate.js";
 import {
   buildCliclickClickAtCurrentCommand,
   buildCliclickDoubleClickAtCurrentCommand,
+  buildCliclickDragCommand,
   buildCliclickKeyCommand,
+  CLICLICK_MIN_WAIT_MS,
   buildCliclickMoveCommand,
   buildCliclickPositionCommand,
   buildCliclickRelativeMoveCommand,
@@ -1332,6 +1337,58 @@ class MacosInputController implements InputController {
     if (!result.success) {
       throw new Error(`cliclick click failed: ${tail(result.combined, 10)}`);
     }
+  }
+
+  /**
+   * Drag with the button held, in one cliclick call. Both ends are translated
+   * through the window's live bounds once, before the gesture, so a window that
+   * moves mid-drag does not bend the path. Verified like pointerMove: the cursor
+   * is read back at the end, because a denied Accessibility grant exits 0.
+   */
+  async pointerDrag(
+    request: PointerDragRequest,
+    opts?: PointerCoordinateOpts
+  ): Promise<PointerDragOutcome> {
+    const bin = this.requireCliclick();
+    const from = await this.toAbsolute(request.from.x, request.from.y, opts);
+    const to = await this.toAbsolute(request.to.x, request.to.y, opts);
+    const plan = planDrag({ ...request, from, to }, { minIntervalMs: CLICLICK_MIN_WAIT_MS });
+
+    const startedAt = Date.now();
+    const result = await runShell(buildCliclickDragCommand(bin, plan), {
+      timeoutMs: 10000 + plan.durationMs + plan.holdMs + plan.steps * CLICLICK_MIN_WAIT_MS,
+    });
+    const wallMs = Date.now() - startedAt;
+    if (!result.success) {
+      throw new Error(`cliclick drag failed: ${tail(result.combined, 10)}`);
+    }
+    const readback = await runShell(buildCliclickPositionCommand(bin), { timeoutMs: 5000 });
+    const pos = parseCliclickPosition(readback.stdout);
+    if (!pos || Math.abs(pos.x - plan.to.x) > 1 || Math.abs(pos.y - plan.to.y) > 1) {
+      throw new Error(
+        `cliclick reported success but the cursor did not end the drag at (${plan.to.x}, ` +
+          `${plan.to.y}) — read back ${pos ? `${pos.x},${pos.y}` : "nothing"}. This is the ` +
+          "signature of a DENIED Accessibility grant; run flutter_info to check it."
+      );
+    }
+    this.adapter.markAccessibilityGranted();
+
+    const notes = [...plan.notes];
+    const overrun = dragOverrunNote(plan, wallMs, "cliclick start-up and event posting");
+    if (overrun) notes.push(overrun);
+    return {
+      from: plan.from,
+      to: plan.to,
+      steps: plan.steps,
+      durationMs: plan.durationMs,
+      intervalMs: plan.intervalMs,
+      holdMs: plan.holdMs,
+      distancePx: plan.distancePx,
+      wallMs,
+      wallClock: "host",
+      effectiveHz: effectiveDragHz(plan, wallMs),
+      ...(notes.length ? { notes } : {}),
+    };
   }
 
   async pointerScroll(_dy: number, _opts?: PointerCoordinateOpts): Promise<void> {

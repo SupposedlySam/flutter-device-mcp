@@ -207,3 +207,33 @@ export function normalizeMacosKey(name: string): string {
 export function buildCliclickKeyCommand(binary: string, token: string): string {
   return `${quote(binary)} kp:${token}`;
 }
+
+/** cliclick's floor on `-w`, the wait after every event (from `cliclick -h`). */
+export const CLICLICK_MIN_WAIT_MS = 20;
+
+/**
+ * Build a drag in ONE cliclick call: `dd:` presses at the start, each `dm:`
+ * moves with the button held, `du:` releases. `-w` is the wait after every
+ * event, which makes it the step interval; the hold before release is a `w:`,
+ * which `-w` does not stretch. Points are ABSOLUTE screen points.
+ */
+export function buildCliclickDragCommand(
+  binary: string,
+  plan: {
+    from: { x: number; y: number };
+    moves: { x: number; y: number }[];
+    to: { x: number; y: number };
+    intervalMs: number;
+    holdMs: number;
+  }
+): string {
+  const at = (p: { x: number; y: number }) => `${Math.round(p.x)},${Math.round(p.y)}`;
+  const wait = Math.max(CLICLICK_MIN_WAIT_MS, Math.round(plan.intervalMs));
+  const commands = [
+    `dd:${at(plan.from)}`,
+    ...plan.moves.map((p) => `dm:${at(p)}`),
+    ...(plan.holdMs > 0 ? [`w:${Math.round(plan.holdMs)}`] : []),
+    `du:${at(plan.to)}`,
+  ];
+  return `${quote(binary)} -w ${wait} ${commands.join(" ")}`;
+}

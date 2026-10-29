@@ -255,10 +255,14 @@ class FlutterDeviceServer {
           return this.json(
             await core.pointer({
               ...common,
-              action: args.action as "move" | "click" | "scroll",
+              action: args.action as "move" | "click" | "scroll" | "drag",
               x: args.x as number | undefined,
               y: args.y as number | undefined,
+              x2: args.x2 as number | undefined,
+              y2: args.y2 as number | undefined,
               dy: args.dy as number | undefined,
+              steps: args.steps as number | undefined,
+              hold_ms: args.hold_ms as number | undefined,
               coordinateSpace: args.coordinateSpace as
                 | "device"
                 | "logical"

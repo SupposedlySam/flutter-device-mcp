@@ -1013,6 +1013,41 @@ describe("MacosInputController", () => {
     );
   });
 
+  const DRAG = { from: { x: 100, y: 100 }, to: { x: 160, y: 130 }, durationMs: 60, steps: 3 };
+
+  it("pointerDrag sends one dd:/dm:/du: call and reports the drag once the cursor ends on target", async () => {
+    const input = adapter().input();
+    runShell.mockImplementation(async (cmd: unknown) =>
+      (cmd as string).endsWith(" p:") ? ok("160, 130") : okResult
+    );
+    const outcome = await input.pointerDrag!(DRAG, { absolute: true });
+    expect(runShell.mock.calls.map(([c]) => c)).toContain(
+      `'${CLICLICK}' -w 20 dd:100,100 dm:120,110 dm:140,120 dm:160,130 du:160,130`
+    );
+    expect(outcome).toMatchObject({ from: DRAG.from, to: DRAG.to, steps: 3, wallClock: "host" });
+  });
+
+  it("pointerDrag throws the denied-Accessibility error when the cursor did not end on target", async () => {
+    const input = adapter().input();
+    runShell.mockImplementation(async (cmd: unknown) =>
+      (cmd as string).endsWith(" p:") ? ok("20, 20") : okResult
+    );
+    await expect(input.pointerDrag!(DRAG, { absolute: true })).rejects.toThrow(
+      /did not end the drag at \(160, 130\) — read back 20,20.*DENIED Accessibility grant/s
+    );
+  });
+
+  it("pointerDrag throws when cliclick itself fails, without reading the cursor back", async () => {
+    const input = adapter().input();
+    runShell.mockImplementation(async (cmd: unknown) =>
+      (cmd as string).includes(" dd:") ? fail("CGEventPost refused") : okResult
+    );
+    await expect(input.pointerDrag!(DRAG, { absolute: true })).rejects.toThrow(
+      /cliclick drag failed: CGEventPost refused/
+    );
+    expect(runShell.mock.calls.some(([c]) => (c as string).endsWith(" p:"))).toBe(false);
+  });
+
   it("pointerClick sends a single click by default, double-click when opts.double is set", async () => {
     const input = adapter().input();
     runShell.mockResolvedValue(okResult);

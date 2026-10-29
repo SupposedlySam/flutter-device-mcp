@@ -28,7 +28,9 @@ import {
   RecordFormat,
 } from "../recording.js";
 import {
+  dragUnsupportedReason,
   mapUnsupportedInput,
+  resolveDragGesture,
   resolvePointerTarget,
   resolveScrollDelta,
   resolveViewMetrics,
@@ -1100,10 +1102,14 @@ export class CommandCore {
   // =========== pointer ==========
   async pointer(
     args: CommonArgs & {
-      action: "move" | "click" | "scroll";
+      action: "move" | "click" | "scroll" | "drag";
       x?: number;
       y?: number;
+      x2?: number;
+      y2?: number;
       dy?: number;
+      steps?: number;
+      hold_ms?: number;
       coordinateSpace?: "device" | "logical";
       dpr?: number;
       absolute?: boolean;
@@ -1223,10 +1229,33 @@ export class CommandCore {
               ...(outcome ? { gesture: outcome } : {}),
             };
           }
+          case "drag": {
+            const { request, coordinateSpace } = resolveDragGesture(args);
+            let outcome;
+            try {
+              if (!input.pointerDrag) {
+                throw new UnsupportedInputError(dragUnsupportedReason(adapter.platform));
+              }
+              outcome = await input.pointerDrag(request, { absolute: args.absolute });
+            } catch (error) {
+              const notSupported = mapUnsupportedInput(error, adapter.platform, "drag");
+              if (notSupported) return notSupported;
+              throw error;
+            }
+            return {
+              platform: adapter.platform,
+              mode: input.mode,
+              action: "drag",
+              coordinateSpace,
+              sent: true,
+              deviceWarning: adapter.inputDeviceWarning?.(),
+              gesture: outcome,
+            };
+          }
           default:
             throw new McpError(
               ErrorCode.InvalidParams,
-              `action must be "move", "click", or "scroll", received ${JSON.stringify(
+              `action must be "move", "click", "scroll", or "drag", received ${JSON.stringify(
                 args.action
               )}`
             );

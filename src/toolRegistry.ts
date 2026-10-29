@@ -485,25 +485,41 @@ function buildFlutterTools(): ToolDefinition[] {
     {
       name: "flutter_pointer",
       description:
-        "Drive the device pointer. action 'click' activates the currently-focused element (KEY_ENTER) — on the focus/D-pad-driven Tizen TV this is the working 'click', so use flutter_key to move focus first, then flutter_pointer click; fall back to a driver over the Dart VM service (e.g. Marionette) for a genuine coordinate tap, since it is the only path here that reaches gesture handlers. action 'move'/'scroll' is a free-cursor primitive reserved for pointer-native platforms (webOS Magic Remote); on Tizen it is unsupported (the native Samsung touchpad channel has no observable effect) and returns a clear {supported:false} result. ANDROID (device AND emulator, via `adb shell input`): WHICH DRIVER FIRST — this is the fastest plane for a coordinate tap or scroll, and it is coordinate-native with flutter_screenshot: both speak DEVICE pixels, so a coordinate read straight off a screenshot sends as-is, while a VM-service driver takes LOGICAL coordinates and needs a dpr conversion first — the most common cause of mis-taps, and the concrete reason to prefer this plane for position-based input. Fall back to a VM-service driver for WIDGET addressing (by key or text) rather than a position, or an assertion on the widget tree. PREFER THE ONE-CALL TAP — pass `x`/`y` ON the 'click' call and it taps there directly (`input tap x y`), no 'move' needed. 'move' stages a tap position (no visible cursor — no event is sent) for a later 'click'/'scroll'; that staged position is DURABLE (persisted per device, so it survives server restarts and session boundaries — it is not lost between calls) and a 'click' reports the position it actually tapped as `devicePosition`. 'scroll' swipes vertically (`input swipe`, positive dy = scroll down), anchored at the staged position or the screen center (`wm size`), and REPORTS THE GESTURE IT SENT under `gesture` — requested vs applied dy, whether the screen's bounds clamped it, the start/end points, the duration and the resulting px/ms — because a scroll has two ways to succeed at doing nothing and `sent: true` alone hides both. Tune the gesture's SPEED with `duration_ms` (the fix when a scroll lands but nothing moves — a flick and a slow drag are different gestures to a scrollable), and pass `verify: true` to have the tool tell you whether the screen actually changed. Coordinates default to DEVICE pixels; pass coordinateSpace 'logical' together with the device's dpr to send Marionette-style LOGICAL coordinates (e.g. 1200x675) — they are converted to device pixels before sending. dpr is never assumed; it must be supplied for logical space — but it no longer has to be GUESSED: flutter_geometry reports the device's real ratio and screen sizes. MACOS (via `cliclick`): 'move' moves the REAL cursor (`m:`) and coordinates are WINDOW-RELATIVE by default — translated through the target window's LIVE bounds (0,0 = its own top-left), so a script survives the window moving; pass `absolute: true` to send raw screen points instead. 'click' clicks at the current cursor position (`c:`, or `dc:` for a double-click via `double: true`). 'scroll' is UNSUPPORTED on macOS — cliclick 5.1 has no scroll verb; use flutter_key (page-up/page-down/arrow keys) instead. macOS pointerMove VERIFIES the cursor actually moved (reads it back) and fails loudly if not — the signature of a DENIED Accessibility grant (flutter_info probes this explicitly). On macOS this IS the driver, not a fallback: there is no Dart VM service to fall back to. IOS: reports {supported:false} — no OS-level input plane is wired here; drive with a VM-service driver instead. NOTE: this exposes the logical→device pointer primitive only; element-geometry→tap orchestration lives in the agent/skill layer (this MCP does not call Marionette).",
+        "Drive the device pointer. action 'click' activates the currently-focused element (KEY_ENTER) — on the focus/D-pad-driven Tizen TV this is the working 'click', so use flutter_key to move focus first, then flutter_pointer click; fall back to a driver over the Dart VM service (e.g. Marionette) for a genuine coordinate tap, since it is the only path here that reaches gesture handlers. action 'move'/'scroll' is a free-cursor primitive reserved for pointer-native platforms (webOS Magic Remote); on Tizen it is unsupported (the native Samsung touchpad channel has no observable effect) and returns a clear {supported:false} result. ANDROID (device AND emulator, via `adb shell input`): WHICH DRIVER FIRST — this is the fastest plane for a coordinate tap or scroll, and it is coordinate-native with flutter_screenshot: both speak DEVICE pixels, so a coordinate read straight off a screenshot sends as-is, while a VM-service driver takes LOGICAL coordinates and needs a dpr conversion first — the most common cause of mis-taps, and the concrete reason to prefer this plane for position-based input. Fall back to a VM-service driver for WIDGET addressing (by key or text) rather than a position, or an assertion on the widget tree. PREFER THE ONE-CALL TAP — pass `x`/`y` ON the 'click' call and it taps there directly (`input tap x y`), no 'move' needed. 'move' stages a tap position (no visible cursor — no event is sent) for a later 'click'/'scroll'; that staged position is DURABLE (persisted per device, so it survives server restarts and session boundaries — it is not lost between calls) and a 'click' reports the position it actually tapped as `devicePosition`. 'scroll' swipes vertically (`input swipe`, positive dy = scroll down), anchored at the staged position or the screen center (`wm size`), and REPORTS THE GESTURE IT SENT under `gesture` — requested vs applied dy, whether the screen's bounds clamped it, the start/end points, the duration and the resulting px/ms — because a scroll has two ways to succeed at doing nothing and `sent: true` alone hides both. Tune the gesture's SPEED with `duration_ms` (the fix when a scroll lands but nothing moves — a flick and a slow drag are different gestures to a scrollable), and pass `verify: true` to have the tool tell you whether the screen actually changed. Coordinates default to DEVICE pixels; pass coordinateSpace 'logical' together with the device's dpr to send Marionette-style LOGICAL coordinates (e.g. 1200x675) — they are converted to device pixels before sending. dpr is never assumed; it must be supplied for logical space — but it no longer has to be GUESSED: flutter_geometry reports the device's real ratio and screen sizes. 'drag' is an ARBITRARY POINT-TO-POINT drag — press at (x, y), move in a straight line to (x2, y2) over `duration_ms` in `steps` evenly spaced moves (default ~60 per second), wait `hold_ms` with the finger still down, release — for resize handles, sliders, reorder and anything else 'scroll' cannot express. ANDROID sends it as `input motionevent` DOWN/MOVE…/UP in ONE `adb shell` (separate adb calls stutter at 50-100ms a move; needs Android 10+) and REPORTS THE GESTURE under `gesture`: start, end, steps, planned duration and interval, hold, and the MEASURED `wallMs` (on the device clock where it can read one) with `effectiveHz` — each move is its own `input` process on the device, so a drag runs slower than planned and a note says by how much; pass fewer steps if speed matters more than smoothness. Pass `hold_ms` (e.g. 200) to stop before releasing so the app sees zero release velocity instead of a fling. MACOS sends it as cliclick dd:/dm:/du: in one call (window-relative like 'move', at most 50 moves a second). Tizen, webOS, iOS and tvOS return {supported:false} with the reason. MACOS (via `cliclick`): 'move' moves the REAL cursor (`m:`) and coordinates are WINDOW-RELATIVE by default — translated through the target window's LIVE bounds (0,0 = its own top-left), so a script survives the window moving; pass `absolute: true` to send raw screen points instead. 'click' clicks at the current cursor position (`c:`, or `dc:` for a double-click via `double: true`). 'scroll' is UNSUPPORTED on macOS — cliclick 5.1 has no scroll verb; use flutter_key (page-up/page-down/arrow keys) instead. macOS pointerMove VERIFIES the cursor actually moved (reads it back) and fails loudly if not — the signature of a DENIED Accessibility grant (flutter_info probes this explicitly). On macOS this IS the driver, not a fallback: there is no Dart VM service to fall back to. IOS: reports {supported:false} — no OS-level input plane is wired here; drive with a VM-service driver instead. NOTE: this exposes the logical→device pointer primitive only; element-geometry→tap orchestration lives in the agent/skill layer (this MCP does not call Marionette).",
       inputSchema: {
         type: "object",
         properties: {
           ...platformProp,
           action: {
             type: "string",
-            enum: ["move", "click", "scroll"],
+            enum: ["move", "click", "scroll", "drag"],
             description: "Pointer action to perform.",
           },
           x: {
             type: "number",
-            description:
-              "X coordinate for 'move' — or for 'click' on Android, which then taps there in ONE call (no separate 'move'). Device pixels / logical per coordinateSpace on Android/Tizen; window-relative points on macOS unless `absolute` is set.",
+            description: "X coordinate for 'move', the START of a 'drag' — or for 'click' on Android, which then taps there in ONE call (no separate 'move'). Device pixels / logical per coordinateSpace on Android/Tizen; window-relative points on macOS unless `absolute` is set.",
           },
           y: {
             type: "number",
+            description: "Y coordinate for 'move', the START of a 'drag' — or for 'click' on Android, which then taps there in ONE call (no separate 'move'). Device pixels / logical per coordinateSpace on Android/Tizen; window-relative points on macOS unless `absolute` is set.",
+          },
+          x2: {
+            type: "number",
+            description: "For 'drag': X coordinate where the drag ENDS. Same space as x.",
+          },
+          y2: {
+            type: "number",
+            description: "For 'drag': Y coordinate where the drag ENDS. Same space as y.",
+          },
+          steps: {
+            type: "number",
             description:
-              "Y coordinate for 'move' — or for 'click' on Android, which then taps there in ONE call (no separate 'move'). Device pixels / logical per coordinateSpace on Android/Tizen; window-relative points on macOS unless `absolute` is set.",
+              "For 'drag' (Android, macOS): how many MOVE events to send between press and release, evenly spaced along the line; the last lands on (x2, y2). Default: duration_ms at ~60 per second. Whole number, 1-600. On Android each move costs an `input` start-up on the device, so more steps means smoother but slower than planned — read `gesture.wallMs`.",
+          },
+          hold_ms: {
+            type: "number",
+            description:
+              "For 'drag' (Android, macOS): wait this long at (x2, y2) with the finger still down before releasing (default 0, max 10000). A pause lets the app settle at the end position and releases with zero velocity, so the drag does not end as a fling.",
           },
           dy: {
             type: "number",
@@ -513,7 +529,7 @@ function buildFlutterTools(): ToolDefinition[] {
           duration_ms: {
             type: "number",
             description:
-              "ANDROID ONLY, for action 'scroll': how long the synthetic drag takes, in milliseconds (default 300, max 10000). This is the gesture's SPEED — the second variable of a swipe, and the one `dy` cannot reach. A short duration is a flick and carries fling velocity into the app; a long one is a slow drag that travels exactly the distance asked for and stops. Surfaces do not treat these the same, and a scrollable that ignores a flick can still accept a drag, so this is the first thing to change when a scroll lands but nothing moves — try 600-800. The cost is only wall-clock. Ignored on every other platform.",
+              "For 'drag' (Android, macOS): how long the move from (x, y) to (x2, y2) takes, in milliseconds (default 500, max 10000), not counting hold_ms. ANDROID, for action 'scroll': how long the synthetic drag takes, in milliseconds (default 300, max 10000). This is the gesture's SPEED — the second variable of a swipe, and the one `dy` cannot reach. A short duration is a flick and carries fling velocity into the app; a long one is a slow drag that travels exactly the distance asked for and stops. Surfaces do not treat these the same, and a scrollable that ignores a flick can still accept a drag, so this is the first thing to change when a scroll lands but nothing moves — try 600-800. The cost is only wall-clock. Ignored for every other action and platform.",
           },
           verify: {
             type: "boolean",
@@ -524,7 +540,7 @@ function buildFlutterTools(): ToolDefinition[] {
             type: "string",
             enum: ["device", "logical"],
             description:
-              "Coordinate space of x/y/dy. Default 'device'. 'logical' requires dpr and is converted to device pixels. Ignored on macOS (see `absolute` there instead).",
+              "Coordinate space of x/y/x2/y2/dy. Default 'device'. 'logical' requires dpr and is converted to device pixels. Ignored on macOS (see `absolute` there instead).",
           },
           dpr: {
             type: "number",
@@ -534,7 +550,7 @@ function buildFlutterTools(): ToolDefinition[] {
           absolute: {
             type: "boolean",
             description:
-              "MACOS ONLY: when true, x/y are ABSOLUTE screen points rather than the default window-relative space (bypasses translation through the target window's bounds). Ignored on every other platform.",
+              "MACOS ONLY: when true, x/y (and a drag's x2/y2) are ABSOLUTE screen points rather than the default window-relative space (bypasses translation through the target window's bounds). Ignored on every other platform.",
           },
           double: {
             type: "boolean",

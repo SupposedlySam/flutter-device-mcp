@@ -12,9 +12,15 @@
 import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import { ScreenSize } from "./deviceGeometry.js";
 import { ANDROID_SWIPE_MAX_DURATION_MS } from "./input/androidInputController.js";
+import {
+  DRAG_DEFAULT_DURATION_MS,
+  DRAG_MAX_DURATION_MS,
+  DRAG_MAX_HOLD_MS,
+  DRAG_MAX_STEPS,
+} from "./input/drag.js";
 import { logicalToDevicePx, Point } from "./input/dpr.js";
 import { ToolRoute } from "./toolRouting.js";
-import { CommandResult, UnsupportedInputError } from "./types.js";
+import { CommandResult, PointerDragRequest, UnsupportedInputError } from "./types.js";
 
 /**
  * Merge the platform an alias forces with the caller-supplied one.
@@ -139,6 +145,86 @@ function resolveScrollDurationMs(value: unknown): number | undefined {
     );
   }
   return value;
+}
+
+/**
+ * Resolve a drag's two ends and timing, checked before any device is touched.
+ *
+ * Both ends follow the {@link resolvePointerTarget} coordinate rules. Times are
+ * milliseconds in every space; `steps` is a count and is never scaled.
+ */
+export function resolveDragGesture(args: {
+  x?: unknown;
+  y?: unknown;
+  x2?: unknown;
+  y2?: unknown;
+  coordinateSpace?: unknown;
+  dpr?: unknown;
+  duration_ms?: unknown;
+  steps?: unknown;
+  hold_ms?: unknown;
+}): { request: PointerDragRequest; coordinateSpace: "device" | "logical" } {
+  const finite = (value: unknown) => typeof value === "number" && Number.isFinite(value);
+  if (![args.x, args.y, args.x2, args.y2].every(finite)) {
+    throw new McpError(
+      ErrorCode.InvalidParams,
+      "pointer drag requires numeric x, y (where it starts) and x2, y2 (where it ends)."
+    );
+  }
+  const from = resolvePointerTarget(args);
+  const to = resolvePointerTarget({ ...args, x: args.x2, y: args.y2 });
+
+  const bounded = (name: string, value: unknown, min: number, max: number, integer = false) => {
+    if (value === undefined) return undefined;
+    const inRange = finite(value) && (value as number) >= min && (value as number) <= max;
+    if (!inRange || (integer && !Number.isInteger(value))) {
+      throw new McpError(
+        ErrorCode.InvalidParams,
+        `${name} must be ${integer ? "a whole number" : "a number"} from ${min} to ${max}.`
+      );
+    }
+    return value as number;
+  };
+  // A zero duration has no interval to put between the moves.
+  const durationMs = bounded("duration_ms", args.duration_ms, 1, DRAG_MAX_DURATION_MS);
+  const steps = bounded("steps", args.steps, 1, DRAG_MAX_STEPS, true);
+  const holdMs = bounded("hold_ms", args.hold_ms, 0, DRAG_MAX_HOLD_MS);
+
+  return {
+    request: {
+      from: from.point,
+      to: to.point,
+      durationMs: durationMs ?? DRAG_DEFAULT_DURATION_MS,
+      ...(steps !== undefined ? { steps } : {}),
+      ...(holdMs !== undefined ? { holdMs } : {}),
+    },
+    coordinateSpace: from.coordinateSpace,
+  };
+}
+
+/** Why a platform whose controller has no drag cannot do one, and what to use. */
+export function dragUnsupportedReason(platform: string): string {
+  switch (platform) {
+    case "tizen":
+      return (
+        "Drag is unsupported on Tizen: the Tizen TV app is focus/D-pad-driven and the " +
+        "Samsung remote touchpad channel never reaches it as pointer events (verified " +
+        "on-device). Drive gestures with Marionette over the VM service on a debug build."
+      );
+    case "webos":
+      return (
+        "Drag is not wired on webOS: the ssap pointer socket sends moves, clicks and " +
+        "scrolls but has no way to hold the button across moves."
+      );
+    case "ios":
+    case "tvos":
+      return (
+        `Drag is unsupported on ${platform === "ios" ? "iOS" : "tvOS"}: this MCP has no ` +
+        "OS-level input injection there. Use Marionette swipe over the VM service."
+      );
+    default:
+      return `Drag is not wired on ${platform}.`;
+  }
 }
 
 /** Caller-supplied Flutter view metrics to cross-check geometry against. */

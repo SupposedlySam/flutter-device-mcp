@@ -266,6 +266,18 @@ export interface InputController {
    */
   text?(value: string): Promise<void>;
   /**
+   * Press at `from`, move to `to` in `steps` evenly spaced moves over
+   * `durationMs`, wait `holdMs`, and release — an arbitrary point-to-point
+   * drag, as opposed to {@link pointerScroll}'s vertical swipe from an anchor.
+   * OPTIONAL — implemented where the platform can hold a press across moves
+   * (Android `input motionevent`, macOS `cliclick dd:/dm:/du:`); absence is
+   * surfaced as `{ supported: false }`.
+   */
+  pointerDrag?(
+    request: PointerDragRequest,
+    opts?: PointerCoordinateOpts
+  ): Promise<PointerDragOutcome>;
+  /**
    * The DEVICE-pixel position a positional {@link pointerClick} /
    * {@link pointerScroll} would use right now. OPTIONAL — implemented where a
    * click IS positional (Android, whose click is a tap at a staged position), so
@@ -354,6 +366,46 @@ export interface PointerScrollOutcome {
   /** Why the verification concluded what it did. */
   verificationDetail?: string;
   /** Advisory notes about the gesture that was sent (clamping, speed). */
+  notes?: string[];
+}
+
+/**
+ * A point-to-point drag, already in the controller's own coordinate space.
+ * `steps` and `holdMs` are optional; the controller fills its defaults.
+ */
+export interface PointerDragRequest {
+  from: { x: number; y: number };
+  to: { x: number; y: number };
+  durationMs: number;
+  steps?: number;
+  holdMs?: number;
+}
+
+/**
+ * The drag that was actually sent. `wallMs` is measured, not planned: on
+ * Android every move is its own `input` process, whose start-up cost is paid
+ * on top of the planned interval, so the gesture runs slower than asked and
+ * only the measurement says by how much.
+ */
+export interface PointerDragOutcome {
+  from: { x: number; y: number };
+  to: { x: number; y: number };
+  /** MOVE events between the press and the release (the last lands on `to`). */
+  steps: number;
+  /** Planned press-to-last-move time. */
+  durationMs: number;
+  /** Planned wait between consecutive events. */
+  intervalMs: number;
+  /** Wait at `to` before releasing. */
+  holdMs: number;
+  /** Straight-line length of the drag. */
+  distancePx: number;
+  /** Measured time for the whole send, press to release. */
+  wallMs: number;
+  /** Where `wallMs` was measured: on the device itself, or around the host call. */
+  wallClock: "device" | "host";
+  /** `steps` / measured move time, in events per second. */
+  effectiveHz: number;
   notes?: string[];
 }
 
