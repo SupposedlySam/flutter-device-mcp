@@ -1,4 +1,9 @@
-import { quote, resolveFlutterCommand, tail } from "../src/cli.js";
+import {
+  quote,
+  runShell,
+  resolveFlutterCommand,
+  tail,
+} from "../src/cli.js";
 
 describe("quote", () => {
   it("wraps a plain argument in single quotes", () => {
@@ -37,5 +42,16 @@ describe("tail", () => {
 
   it("returns only the last N lines when over the cap", () => {
     expect(tail("a\nb\nc\nd", 2)).toBe("c\nd");
+  });
+});
+
+describe("runShell timeout", () => {
+  it("kills a grandchild of the shell, not just the shell", async () => {
+    const result = await runShell("sleep 60 & echo $!; wait", { timeoutMs: 500 });
+    expect(result.timedOut).toBe(true);
+    const grandchild = Number(result.stdout.trim());
+    expect(grandchild).toBeGreaterThan(1);
+    await new Promise((r) => setTimeout(r, 200));
+    expect(() => process.kill(grandchild, 0)).toThrow(/ESRCH/);
   });
 });

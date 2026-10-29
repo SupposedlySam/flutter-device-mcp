@@ -1,6 +1,7 @@
 import os from "os";
 import {
   buildAdbScreencapCommand,
+  extractPng,
   buildPymobiledevice3ScreenshotCommand,
   buildSimctlScreenshotCommand,
   defaultScreenshotPath,
@@ -71,6 +72,28 @@ describe("buildAdbScreencapCommand", () => {
     expect(
       buildAdbScreencapCommand("emulator-5554", "/tmp/a.png")
     ).toBe("adb -s 'emulator-5554' exec-out screencap -p > '/tmp/a.png'");
+  });
+});
+
+describe("extractPng", () => {
+  const png = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+    "base64"
+  );
+
+  it("drops the multi-display warning that precedes the PNG bytes", () => {
+    const warning = Buffer.from(
+      "[Warning] Multiple displays were found, but no display id was specified!\n"
+    );
+    const out = extractPng(Buffer.concat([warning, png]));
+    expect(out?.equals(png)).toBe(true);
+    expect(readPngDimensions(out!)).toEqual({ width: 1, height: 1 });
+  });
+
+  it("returns a clean PNG unchanged and rejects non-PNG output", () => {
+    expect(extractPng(png)?.equals(png)).toBe(true);
+    expect(extractPng(Buffer.from("error: closed"))).toBeUndefined();
+    expect(extractPng(png.subarray(0, png.length - 6))).toBeUndefined();
   });
 });
 

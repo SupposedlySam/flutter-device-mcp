@@ -79,6 +79,7 @@ import {
 } from "../deviceGeometry.js";
 import {
   buildAdbScreencapCommand,
+  extractPng,
   defaultScreenshotPath,
   ScreenshotResult,
 } from "../screenshot.js";
@@ -963,19 +964,27 @@ export class AndroidAdapter implements PlatformAdapter {
       kind: opts.target,
     });
     const outPath = opts.outPath ?? defaultScreenshotPath("android");
+    // A multi-display phone prints a warning ahead of the PNG; extractPng
+    // drops it. No `-d`: SurfaceFlinger's first id is screencap's own default,
+    // and nothing in `--display-id` says which display is lit.
     const result = await runShell(
       buildAdbScreencapCommand(resolution.target, outPath),
       { timeoutMs: 30000 }
     );
-    if (!result.success || !fs.existsSync(outPath)) {
+    const captured = fs.existsSync(outPath)
+      ? fs.readFileSync(outPath)
+      : undefined;
+    const png = result.success && captured ? extractPng(captured) : undefined;
+    if (!png) {
       return {
         captured: false,
         reason: `adb screencap failed on ${resolution.target}: ${tail(
-          result.combined,
+          result.combined || captured?.toString("latin1", 0, 300) || "",
           20
         )}`,
       };
     }
+    fs.writeFileSync(outPath, png);
     return {
       captured: true,
       savedPath: outPath,

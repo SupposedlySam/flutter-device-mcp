@@ -178,3 +178,16 @@ export function buildPymobiledevice3ScreenshotCommand(
 export function buildAdbScreencapCommand(serial: string, outPath: string): string {
   return `adb -s ${quote(serial)} exec-out screencap -p > ${quote(outPath)}`;
 }
+
+/**
+ * The PNG inside `captured`, with anything written ahead of the signature
+ * dropped; `undefined` when there is no PNG signature or the stream is cut
+ * short of its closing IEND chunk.
+ */
+export function extractPng(captured: Buffer): Buffer | undefined {
+  const start = captured.indexOf(PNG_SIGNATURE);
+  if (start < 0) return undefined;
+  const png = captured.subarray(start);
+  const iendChunkType = png.subarray(-8, -4).toString("ascii");
+  return iendChunkType === "IEND" ? png : undefined;
+}

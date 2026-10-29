@@ -10,7 +10,7 @@
  * `flutter` invocation for an app dir ({@link resolveFlutterCommand}), and tail
  * output ({@link tail}). Platform-specific commands are composed by each adapter.
  */
-import { spawn } from "child_process";
+import { ChildProcess, spawn } from "child_process";
 import { CommandResult } from "./types.js";
 
 export type { CommandResult } from "./types.js";
@@ -47,7 +47,12 @@ export function runShell(
       // Merge any caller-supplied overrides over the inherited environment so
       // PATH etc. are preserved; only the given keys (e.g. LANG/LC_ALL) change.
       env: options.env ? { ...process.env, ...options.env } : process.env,
+      // Its own process group, so a timeout can signal the shell AND whatever
+      // it spawned (xcodebuild, flutter, …); killing only the shell orphans them.
+      detached: true,
     });
+
+    if (child.pid !== undefined) liveGroups.add(child.pid);
 
     let stdout = "";
     let stderr = "";
@@ -58,7 +63,7 @@ export function runShell(
     if (options.timeoutMs && options.timeoutMs > 0) {
       timer = setTimeout(() => {
         timedOut = true;
-        child.kill("SIGKILL");
+        killProcessGroup(child);
       }, options.timeoutMs);
     }
 
@@ -74,6 +79,7 @@ export function runShell(
     });
 
     child.on("close", (code) => {
+      if (child.pid !== undefined) liveGroups.delete(child.pid);
       if (timer) clearTimeout(timer);
       resolve({
         code,
@@ -86,6 +92,7 @@ export function runShell(
     });
 
     child.on("error", (error) => {
+      if (child.pid !== undefined) liveGroups.delete(child.pid);
       if (timer) clearTimeout(timer);
       const message = error instanceof Error ? error.message : String(error);
       stderr += message;
@@ -100,6 +107,27 @@ export function runShell(
       });
     });
   });
+}
+
+const liveGroups = new Set<number>();
+process.once("exit", () => {
+  for (const pid of liveGroups) {
+    try {
+      process.kill(-pid, "SIGKILL");
+    } catch {
+      // group already gone
+    }
+  }
+});
+
+/** SIGKILL the child's whole process group; falls back to the child alone. */
+function killProcessGroup(child: ChildProcess): void {
+  try {
+    if (child.pid === undefined) throw new Error("child has no pid");
+    process.kill(-child.pid, "SIGKILL");
+  } catch {
+    child.kill("SIGKILL");
+  }
 }
 
 /** Shell-quote a single argument for safe interpolation. */
