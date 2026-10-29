@@ -5,7 +5,7 @@ import {
 
 const ROOT = "/Xcode/tvOS DeviceSupport";
 const APPLE_TV = {
-  name: "Entertainment Room",
+  name: "Den",
   productType: "AppleTV14,1",
   osVersion: "27.0",
   osBuild: "24J361",
@@ -41,9 +41,9 @@ describe("tvosDeviceSupportDiagnostic", () => {
       fakeFs({ "AppleTV14,1 26.5 (23L471)": true })
     );
     expect(diagnostic).toMatch(
-      /^Xcode has no debug symbols for tvOS 27\.0 \(24J361\), the release on "Entertainment Room"/
+      /^Xcode has no debug symbols for tvOS 27\.0 \(24J361\), the release on "Den"/
     );
-    expect(diagnostic).toMatch(/Window > Devices and Simulators, select "Entertainment Room"/);
+    expect(diagnostic).toMatch(/Window > Devices and Simulators, select "Den"/);
   });
 
   it("reports a copy that has not finalized", () => {
@@ -72,7 +72,7 @@ describe("tvosDeviceSupportDiagnostic", () => {
 
   it("is null when devicectl did not report the version and build", () => {
     expect(
-      tvosDeviceSupportDiagnostic({ name: "Entertainment Room" }, ROOT, fakeFs({}))
+      tvosDeviceSupportDiagnostic({ name: "Den" }, ROOT, fakeFs({}))
     ).toBeNull();
   });
 });
