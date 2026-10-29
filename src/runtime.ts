@@ -85,6 +85,8 @@ export function buildRuntime(opts: ResolveConfigOptions = {}): Runtime {
     appId: resolveAppId("tvos", platforms.tvos.appId, appDir),
     flutterTvosBinDir: platforms.tvos.flutterTvosBinDir,
     preBuild: platforms.tvos.preBuild,
+    launchMode: platforms.tvos.tvosLaunchMode,
+    atvId: platforms.tvos.atvId,
   });
 
   const webos = new WebOSAdapter({

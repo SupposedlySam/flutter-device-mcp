@@ -39,6 +39,7 @@ import { crossCheckView, DeviceGeometryReading } from "../deviceGeometry.js";
 import {
   clearLaunch,
   clearLaunches,
+  LaunchRecord,
   readRecords,
   recordLaunch,
   resolveLaunch,
@@ -46,11 +47,21 @@ import {
 import { runKillStale } from "../killStaleFlow.js";
 import { runDeployCore, runUninstallCore } from "../deployFlow.js";
 import { VmServiceClient } from "../vmServiceClient.js";
-import { hotReload, ReloadOutcome } from "../hotReload.js";
+import {
+  ReloadFallbackReason,
+  vmServiceFallbackReload,
+} from "../vmServiceFallbackReload.js";
 import { hotControl } from "../hotControl.js";
 import { sendControlChar, removeControlFifo } from "../ptyControl.js";
 import { NO_PTY_FORWARDER_REASON } from "../ptyForward.js";
 import { confirmHotAction, logSize } from "../hotConfirm.js";
+import {
+  NoControlPlan,
+  OWNING_RUN_ONLY,
+  planHotReload,
+  planWithoutControlChannel,
+  runLiveness,
+} from "../hotReloadPlan.js";
 import {
   MarionetteProbeResult,
   probeMarionetteReady,
@@ -363,6 +374,7 @@ export class CommandCore {
           pid: outcome.pid,
           logPath: outcome.logPath,
           controlFifoPath: outcome.controlFifoPath,
+          reloadNeedsOwningRun: outcome.reloadNeedsOwningRun,
           recordedAt: Date.now(),
         });
       }
@@ -387,10 +399,14 @@ export class CommandCore {
                 "flutter_foreground to exercise app lifecycle."
               : "") +
             (adapter.platform === "tvos"
-              ? " NOTE (tvOS): the VM-service URI is a ws://127.0.0.1:<port>/<authCode>=/ws loopback " +
-                "forward held open by the launch process over the CoreDevice tunnel — the auth code is " +
-                "PER-RUN, so re-deploy (not just reconnect) after a relaunch. This launch has seized the " +
-                "Apple TV's HDMI display."
+              ? " On a physical Apple TV flutter_key sends Siri Remote presses (UP/DOWN/LEFT/RIGHT/" +
+                "ENTER/MENU/HOME/PLAY_PAUSE) through pyatv's atvremote when it is installed and paired, " +
+                "and reports {supported:false} with the setup steps otherwise; there is no free cursor, " +
+                "so flutter_pointer does not apply. NOTE (tvOS): on a physical Apple TV the URI is the " +
+                "one flutter-tvos announces (the resident run's DDS on loopback, or the Apple TV's LAN " +
+                "address found over Bonjour, which needs Local Network permission for the host); its auth " +
+                "code is PER-RUN, so re-deploy (not just reconnect) after a relaunch. flutter_kill_stale " +
+                "or flutter_terminate ends the run. This launch has seized the Apple TV's HDMI display."
               : "") +
             (isTvLike && adapter.platform !== "tvos"
               ? " This launch has seized the physical TV/monitor display."
@@ -614,49 +630,49 @@ export class CommandCore {
     adapter: PlatformAdapter,
     record: { device: string; vmServiceUriWs: string },
     timeoutMs: number | undefined,
-    fellBackFrom:
-      | "no-control-channel"
-      | "dead-control-channel"
-      | "unconfirmed-control-channel"
+    fellBackFrom: ReloadFallbackReason
   ): Promise<CommandOutput> {
-    const client = new VmServiceClient({
-      wsUri: record.vmServiceUriWs,
-      timeoutMs: timeoutMs ?? undefined,
+    const result = await vmServiceFallbackReload({
+      platform: adapter.platform,
+      device: record.device,
+      vmServiceUriWs: record.vmServiceUriWs,
+      fellBackFrom,
+      refusal: adapter.vmServiceReloadRefusal
+        ? () => adapter.vmServiceReloadRefusal!(record.device)
+        : undefined,
+      connect: () =>
+        new VmServiceClient({
+          wsUri: record.vmServiceUriWs,
+          timeoutMs: timeoutMs ?? undefined,
+        }),
     });
-    try {
-      const outcome: ReloadOutcome = await hotReload(client);
-      return {
-        platform: adapter.platform,
-        success: outcome.success,
-        triggered: true,
-        via: "vm-service",
-        fellBackFrom,
-        operation: outcome.kind,
-        device: record.device,
-        vmServiceUriWs: record.vmServiceUriWs,
-        isolates: outcome.isolates,
-        reports: outcome.reports,
-        note:
-          "Reloaded over the VM service (reloadSources + reassemble) because no live pty control " +
-          "channel was available. This is weaker than the flutter tool's `r`: a fresh deploy " +
-          "(flutter_deploy) re-establishes the control channel for a true `r`/`R`. A hot RESTART " +
-          "(re-run main()) is not reachable over the VM service — redeploy.",
-      };
-    } catch (error) {
-      clearLaunch(adapter.platform, record.device);
-      return {
-        platform: adapter.platform,
-        success: false,
-        triggered: false,
-        device: record.device,
-        vmServiceUriWs: record.vmServiceUriWs,
-        reason:
-          (error instanceof Error ? error.message : String(error)) +
-          " The launch daemon may have exited — redeploy with flutter_deploy.",
-      };
-    } finally {
-      client.close();
+    // A failed connection means the daemon has gone: clear only this device's
+    // record so the next call says "run flutter_deploy" rather than retrying a
+    // dead URI.
+    if (result.clearLaunch) clearLaunch(adapter.platform, record.device);
+    return result.body;
+  }
+
+  /** A reload the owning run cannot carry: refuse it, or reload over the VM service. */
+  private async reloadWithoutControlChannel(
+    adapter: PlatformAdapter,
+    record: LaunchRecord,
+    timeoutMs: number | undefined,
+    plan: NoControlPlan
+  ): Promise<CommandOutput> {
+    if (plan.kind === "vm-service") {
+      return this.vmServiceReload(adapter, record, timeoutMs, plan.fellBackFrom);
     }
+    clearLaunch(adapter.platform, record.device);
+    if (record.controlFifoPath) removeControlFifo(record.controlFifoPath);
+    return {
+      platform: adapter.platform,
+      success: false,
+      triggered: false,
+      fellBackFrom: plan.fellBackFrom,
+      device: record.device,
+      reason: plan.reason,
+    };
   }
 
   // =========== hot_reload ==========
@@ -671,8 +687,14 @@ export class CommandCore {
         const found = this.findLaunchRecord(adapter, args.device);
         if (found.miss) return found.miss;
         const { record } = found;
+        const reloadNeedsOwningRun = record.reloadNeedsOwningRun === true;
 
-        if (record.controlFifoPath) {
+        const plan = planHotReload({
+          hasControlChannel: Boolean(record.controlFifoPath),
+          liveness: runLiveness(record.pid),
+          reloadNeedsOwningRun,
+        });
+        if (plan.kind === "send-control") {
           // Measure the log BEFORE sending, so a previous reload's
           // acknowledgement cannot be read as this one's.
           const logFrom = record.logPath
@@ -690,6 +712,23 @@ export class CommandCore {
                   })
               : undefined
           );
+          if (outcome.triggered && outcome.confirmed === false && reloadNeedsOwningRun) {
+            // The run is alive and may still be compiling; a VM-service reload
+            // cannot work here and would race it.
+            return {
+              platform: adapter.platform,
+              success: false,
+              triggered: true,
+              confirmed: false,
+              device: record.device,
+              logPath: record.logPath,
+              reason:
+                "Wrote `r` to the owning flutter run but saw no acknowledgement in its log within " +
+                "the confirmation window. The run is still alive, so the reload may yet complete: " +
+                `read the end of the launch log for "Reloaded N of M libraries" before redeploying. ` +
+                OWNING_RUN_ONLY,
+            };
+          }
           if (outcome.triggered && outcome.confirmed === false) {
             // The bytes landed and flutter never acknowledged them, so nothing
             // is known to have reloaded. The VM service can still reload
@@ -722,20 +761,20 @@ export class CommandCore {
                 "a reload can't apply (main(), top-level/global state, new enums/static fields).",
             };
           }
-          return this.vmServiceReload(
+          // The FIFO exists but the write did not land, so the run has exited.
+          return this.reloadWithoutControlChannel(
             adapter,
             record,
             args.timeout_ms,
-            "dead-control-channel"
+            planWithoutControlChannel({
+              hasControlChannel: true,
+              liveness: "dead",
+              reloadNeedsOwningRun,
+            })
           );
         }
 
-        return this.vmServiceReload(
-          adapter,
-          record,
-          args.timeout_ms,
-          "no-control-channel"
-        );
+        return this.reloadWithoutControlChannel(adapter, record, args.timeout_ms, plan);
       }
     );
   }
@@ -764,6 +803,20 @@ export class CommandCore {
               "redeploy's response carries a controlChannelWarning, the host is missing what the " +
               "channel needs: " +
               NO_PTY_FORWARDER_REASON,
+          };
+        }
+
+        if (runLiveness(record.pid) === "dead") {
+          clearLaunch(adapter.platform, record.device);
+          removeControlFifo(record.controlFifoPath);
+          return {
+            platform: adapter.platform,
+            success: false,
+            triggered: false,
+            device: record.device,
+            reason:
+              "The run that owns this app is gone (its process has exited), so nothing can take " +
+              "`R`. Redeploy with flutter_deploy.",
           };
         }
 

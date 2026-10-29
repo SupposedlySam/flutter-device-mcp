@@ -2,10 +2,10 @@
  * tvOS (Apple TV) platform adapter — EXPERIMENTAL.
  *
  * Drives a Flutter app on Apple TV behind the neutral {@link PlatformAdapter}
- * seam — the TV-family sibling of {@link IosAdapter}. Where iOS wraps `flutter`
- * + `xcrun devicectl`/`simctl`, tvOS wraps the community **flutter-tvos**
- * toolchain for info/setup/build/launch, and drives `xcrun devicectl`/`simctl`
- * directly for device resolution, install, lifecycle, and uninstall.
+ * seam — the TV-family sibling of {@link IosAdapter}. It wraps the community
+ * **flutter-tvos** toolchain for info/setup/build and for every launch on a
+ * physical Apple TV, and drives `xcrun devicectl`/`simctl` directly for device
+ * resolution, install, lifecycle, and uninstall.
  *
  * flutter-tvos is a community fork and is not verifiable on-device from this
  * project, so the command surface reconstructed here is a best effort. Each
@@ -22,40 +22,44 @@
  * under the server and silently fell through to a simulator; devicectl reports
  * the same CoreDevice id used for install/launch, so nothing downstream changes.
  *
- * VM-service-URI capture works EXACTLY like the iOS adapter (the crown jewel): a
- * PROFILE launch is wrapped in a pty and its loopback
- * `http://127.0.0.1:PORT/<authCode>/` line is scraped, then the process is LEFT
- * RUNNING to hold the service open. On a physical Apple TV there is no LAN IP
- * (only a per-command CoreDevice IPv6 tunnel that tears down when a one-shot
- * devicectl command exits), so `flutter-tvos run -d <id> --profile` is used:
- * flutter holds a localhost port-forward over the tunnel open for the lifetime of
- * the process and prints the standard loopback VM-service line, e.g.
- *   A Dart VM Service on Example Apple TV is available at: http://127.0.0.1:53182/<authCode>/
- * The `127.0.0.1` forward is loopback-scoped to THIS run's device, so a running
- * iOS simulator (same bundle id) cannot collide with it — the collision an
- * mDNS/bundle-name resolve suffered.
+ * LAUNCH MODES (see `tvosLaunchMode.ts`). The default is debug, the only mode
+ * with hot reload and a working Marionette screenshot:
+ *  - debug, physical Apple TV: `flutter-tvos run -d <id> --debug` in the app
+ *    dir. The engine refuses to run debug in an untraced process, so flutter-tvos
+ *    builds, installs, launches the app stopped and attaches lldb before the
+ *    Dart VM starts. The runner stays resident behind a control channel (hot
+ *    reload/restart) and holds the VM-service forward open; flutter-tvos's
+ *    Xcode-debugger fallback is treated as a failure, because it needs an
+ *    automation prompt answered.
+ *  - profile / release, physical Apple TV: `flutter-tvos run -d <id> --<mode>`.
+ *    Profile has a VM service, without hot reload or Marionette screenshots;
+ *    release has no VM service. Both say so on the response.
+ *  - simulator: `simctl launch --console-pty` of the debug build, the only build
+ *    a tvOS simulator runs. A profile/release request there is answered in debug
+ *    with a caveat saying so.
+ * A requested mode is never swapped for another without the response naming
+ * both.
  *
  * GUARDRAILS encoded here:
- *  - Physical Apple TV is AOT-only — a standalone DEBUG launch segfaults (the
- *    engine's ptrace check). AND a RELEASE build STRIPS the Dart VM service, so
- *    there would be nothing for Marionette to attach to. So the driving/deploy
- *    flow uses a PROFILE build (AOT + a live VM service): both the default device
- *    build (`--profile`) and the launch (`flutter-tvos run --profile`).
  *  - Only Apple TV / tvOS targets are ever selected — an iPhone/iPad in the same
- *    device list is excluded (the mirror of the iOS adapter's Apple-TV exclusion;
- *    see {@link ../tvosDeviceTarget}).
+ *    device list is excluded (see {@link ../tvosDeviceTarget}).
+ *  - A sleeping Apple TV refuses a foreground launch ("System is asleep"). The
+ *    launch fails on that line instead of waiting out its timeout, and the
+ *    recovery wakes the box with pyatv's `atvremote turn_on` when it is
+ *    installed and paired, then retries once; without it the failure says how
+ *    to wake it.
+ *  - CoreDevice drops network-paired Apple TVs mid-transfer ("Connection reset
+ *    by peer"). An install or launch that fails that way is retried once.
  *
- * SCOPE: OS-level device control only. In-app taps/gestures are Marionette's job
- * over the Dart VM service and are NOT reimplemented here; the Siri-Remote/focus
- * model has no free cursor, so the input controller reports `{ supported: false }`
- * for key/pointer (mirroring iOS/Android).
+ * INPUT: `flutter_key` sends Siri Remote presses through pyatv's `atvremote`
+ * (Companion protocol) when it is installed and paired, see {@link ../atvRemote};
+ * otherwise it reports `{supported:false}` with the setup steps. There is no
+ * free cursor on tvOS, so pointer move/scroll is always unsupported, and taps go
+ * through Marionette over the VM service.
  *
- * KNOWN MARIONETTE LIMITATION on tvOS: `take_screenshots` returns a server error
- * against a tvOS PROFILE/AOT build (the render-surface capture path Marionette
- * uses is unavailable in AOT there). Element-tree inspection and coordinate/
- * element taps DO work over the VM service — so drive by element tree, not by
- * screenshot, on tvOS. This is a Marionette AOT limitation, not a fault of this
- * adapter or the returned URI.
+ * SCREENSHOTS: the simulator uses `simctl io screenshot`; a physical Apple TV
+ * uses `pymobiledevice3 developer dvt screenshot --native`, addressed by its
+ * hardware UDID (not the CoreDevice id).
  */
 import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import fs from "fs";
@@ -75,33 +79,67 @@ import {
   OpenUrlResult,
 } from "../openUrl.js";
 import {
+  allocateControlChannel,
   buildPtyCaptureCommand,
+  ControlChannel,
   launchAndCaptureUri as neutralLaunchAndCaptureUri,
+  SettleOptions,
 } from "../launchCapture.js";
 import {
+  buildPymobiledevice3ScreenshotCommand,
   buildSimctlScreenshotCommand,
   defaultScreenshotPath,
+  readPngDimensions,
   ScreenshotResult,
 } from "../screenshot.js";
 import { RecordResult } from "../recording.js";
 import { logger } from "../logger.js";
-import { parseVmServiceUri } from "../vmServiceUri.js";
-import { killScopedLaunchDrivers } from "../killStaleScope.js";
+import { parseAnnouncedVmServiceUri, parseVmServiceUri } from "../vmServiceUri.js";
+import { KILL_STALE_EXIT, killScopedLaunchDrivers } from "../killStaleScope.js";
+import { tvosDeviceSupportDiagnostic } from "../tvosDeviceSupport.js";
 import {
   parseDevicectlAppleTvs,
   parseTvosSimulators,
   resolveTvosTarget,
   TvosDeviceKind,
+  TvosDeviceResolution,
 } from "../tvosDeviceTarget.js";
 import {
+  isTvosAsleepFailure,
+  resolveTvosLaunchMode,
+  TVOS_ASLEEP_SIGNATURES,
+  TVOS_CONNECTION_RESET_PATTERN,
+  TVOS_DEVICE_DEBUG_FAILURE_SIGNATURES,
+  TVOS_DEVICE_LAUNCH_TIMEOUT_MS,
+  TVOS_PROFILE_NO_VM_SERVICE_REASON,
+  TVOS_RELEASE_NO_VM_SERVICE_REASON,
+  TVOS_RESIDENT_SETTLE_SIGNATURES,
+  TVOS_SETTLE_GRACE_MS,
+  tvosLaunchModeCaveat,
+  TvosLaunchMode,
+} from "../tvosLaunchMode.js";
+import {
+  AtvRemoteInputController,
+  AtvTarget,
+  ATVREMOTE_INSTALL_HINT,
+  buildAtvremoteCommand,
+  describeAtvremoteFailure,
+  resolveAtvremote,
+} from "../atvRemote.js";
+import {
+  Pymobiledevice3Resolution,
+  resolvePymobiledevice3,
+} from "../pymobiledevice3Locate.js";
+import { dartDefineArgs } from "../dartDefine.js";
+import {
+  BuildMode,
   BuildOptions,
   BuildResult,
   DeviceResolution,
   InputController,
-  InputMode,
+  isLaunchFailure,
   LaunchOutcome,
   Platform,
-  UnsupportedInputError,
 } from "../types.js";
 import {
   AppLifecycle,
@@ -109,6 +147,7 @@ import {
   InstallOptions,
   KillStaleScope,
   KillStaleScopeKind,
+  LaunchRecovery,
   PlatformAdapter,
 } from "./platformAdapter.js";
 
@@ -132,7 +171,6 @@ export const TVOS_FAILURE_SIGNATURES: RegExp[] = [
   /No devices found/i,
   /No supported devices connected/i,
   /No .*Apple TV.* found/i,
-  /physical Apple TV runs must be --release or --profile/i,
   /Unable to find bundle/i,
   /Could not build the (?:precompiled )?application/i,
   /Error launching application on/i,
@@ -156,6 +194,21 @@ export interface TvosAdapterConfig {
   flutterTvosBinDir?: string;
   /** Shell commands run in order (cwd=appDir) before build; non-zero exit aborts. */
   preBuild?: string[];
+  /** `FLUTTER_DEVICE_TVOS_LAUNCH_MODE`: the mode used when a call names none. */
+  launchMode?: TvosLaunchMode;
+  /**
+   * `FLUTTER_DEVICE_TVOS_ATV_ID`: pyatv's identifier for the Apple TV. Without it
+   * atvremote addresses the box by the name devicectl reports.
+   */
+  atvId?: string;
+  /** Injected for tests; defaults to {@link resolveAtvremote}. */
+  resolveAtvremote?: () => string | undefined;
+  /** Injected for tests; defaults to {@link resolvePymobiledevice3}. */
+  resolvePymobiledevice3?: () => Pymobiledevice3Resolution;
+  /** Injected for tests; defaults to Xcode's tvOS DeviceSupport directory. */
+  deviceSupportRoot?: string;
+  /** Wait between checks that a terminated app has gone; injected for tests. */
+  terminatePollMs?: number;
 }
 
 /**
@@ -210,6 +263,9 @@ export class TvosAdapter implements PlatformAdapter {
    */
   private readonly binDir: string;
 
+  /** The full last resolution: its name addresses atvremote, its hardware UDID pymobiledevice3. */
+  private lastResolution: TvosDeviceResolution | undefined;
+
   constructor(private readonly config: TvosAdapterConfig) {
     this.binDir =
       config.flutterTvosBinDir ?? defaultFlutterTvosBinDir(os.homedir());
@@ -217,6 +273,30 @@ export class TvosAdapter implements PlatformAdapter {
 
   get appId(): string {
     return this.config.appId;
+  }
+
+  private requestedMode(mode?: BuildMode, debug?: boolean): TvosLaunchMode {
+    return resolveTvosLaunchMode({
+      explicitMode: mode,
+      explicitDebug: debug,
+      envMode: this.config.launchMode,
+    });
+  }
+
+  private atvremoteBinary(): string | undefined {
+    return (this.config.resolveAtvremote ?? resolveAtvremote)();
+  }
+
+  private pymobiledevice3(): Pymobiledevice3Resolution {
+    return (this.config.resolvePymobiledevice3 ?? resolvePymobiledevice3)();
+  }
+
+  /**
+   * A device launch rebuilds, and a debug one also waits on lldb, so the 180s
+   * every other platform defaults to cannot fit it.
+   */
+  defaultLaunchTimeoutMs(): number | undefined {
+    return this.lastKind === "device" ? TVOS_DEVICE_LAUNCH_TIMEOUT_MS : undefined;
   }
 
   /**
@@ -291,39 +371,25 @@ export class TvosAdapter implements PlatformAdapter {
   }
 
   /**
-   * Build the app for Apple TV via `flutter-tvos build`.
+   * Build the app for Apple TV via `flutter-tvos build tvos`.
    *
    * Any configured {@link TvosAdapterConfig.preBuild} shell commands run first
    * (in order, cwd=appDir); the first non-zero exit aborts the build and is
    * returned as the failing result.
    *
-   * A `simulator` profile builds for the tvOS simulator (a debug/JIT slice is
-   * fine there); otherwise a PHYSICAL Apple TV build is produced with `--profile`
-   * — a standalone debug launch SEGFAULTS on-device (the engine's ptrace check),
-   * and a `--release` AOT build STRIPS the Dart VM service, so nothing would
-   * remain for Marionette to attach to. `--profile` gives AOT plus a live VM
-   * service, the only drivable device build. `skip_flutter` short-circuits to a
-   * no-op success; `skip_rust` is accepted for interface parity and ignored (a
-   * Rust engine, if any, builds inside Xcode via cargokit on tvOS, not as a
-   * separate step).
+   * A `simulator` profile builds for the tvOS simulator, always debug (JIT).
+   * Otherwise the build is for a PHYSICAL Apple TV in the resolved mode (debug by
+   * default). A device DEBUG build is not done here: a debug app only runs with
+   * lldb attached at launch, so `flutter_deploy` builds, installs and launches it
+   * in one `flutter-tvos run --debug`. Building it separately would cost a full
+   * build that the deploy then repeats. `skip_flutter` short-circuits to a no-op
+   * success; `skip_rust` is accepted for interface parity and ignored (a Rust
+   * engine, if any, builds inside Xcode via cargokit on tvOS, not as a separate
+   * step).
    */
   async build(opts: BuildOptions): Promise<BuildResult> {
     if (opts.skip_flutter) {
-      const message = "skip_flutter set — reusing existing tvOS build artifact.";
-      const result: CommandResult = {
-        code: 0,
-        stdout: message,
-        stderr: "",
-        combined: message,
-        success: true,
-        timedOut: false,
-      };
-      return {
-        result,
-        enospc: false,
-        installFailed: false,
-        launchedDisplay: false,
-      };
+      return succeeded("skip_flutter set — reusing existing tvOS build artifact.");
     }
 
     // Run pre-build shell commands (cwd=appDir); abort on the first failure.
@@ -338,20 +404,25 @@ export class TvosAdapter implements PlatformAdapter {
     }
 
     const forSimulator = opts.profile === "simulator";
+    const mode = this.requestedMode(opts.mode, opts.debug);
     // flutter-tvos ships a dedicated `build tvos` subcommand (verified on-device)
     // with a `--[no-]simulator` flag — NOT the `build ios` target.
-    const flags: string[] = forSimulator ? ["tvos", "--simulator"] : ["tvos"];
-    if (forSimulator) {
-      // Simulator builds can be debug/JIT — no profile requirement, no signing.
-      flags.push(opts.debug === false ? "--release" : "--debug");
-    } else {
-      // Physical Apple TV: AOT + a live VM service. --profile keeps the Dart VM
-      // service (a --release AOT build STRIPS it, leaving nothing to attach to);
-      // a device --debug build SEGFAULTS on-device. A physical build must be
-      // CODE-SIGNED (installed via devicectl), which `flutter-tvos build tvos`
-      // does using the Xcode project's development team — so no --no-codesign.
-      flags.push("--profile");
+    const flags: string[] = forSimulator ? ["tvos", "--simulator", "--debug"] : ["tvos"];
+    if (!forSimulator) {
+      if (mode === "debug") {
+        return succeeded(
+          "Nothing built: a physical Apple TV debug build is produced by flutter_deploy, " +
+            "which runs `flutter-tvos run --debug` (build, install, launch, lldb attach) in one " +
+            "step, and the app cannot start in debug without the debugger that run attaches. " +
+            "Call flutter_deploy (mode debug, the default) directly."
+        );
+      }
+      // A physical build must be CODE-SIGNED (installed via devicectl), which
+      // `flutter-tvos build tvos` does using the Xcode project's development team
+      // — so no --no-codesign.
+      flags.push(`--${mode}`);
     }
+    for (const token of dartDefineArgs(opts.dartDefine)) flags.push(quote(token));
 
     const result = await this.runFlutterTvos("build", flags, {
       timeoutMs: 2400000, // 40 min — flutter-tvos engine + Rust-in-Xcode can run long.
@@ -462,7 +533,7 @@ export class TvosAdapter implements PlatformAdapter {
    */
   async discoverDevice(
     preference: DeviceTargetPreference = {}
-  ): Promise<DeviceResolution> {
+  ): Promise<TvosDeviceResolution> {
     const { physical, simulators } = await this.listTargets();
     // Make the resolution order explicit and logged: a PHYSICAL paired Apple TV
     // (devicectl) is preferred over a simulator; a simulator is only chosen when
@@ -507,22 +578,84 @@ export class TvosAdapter implements PlatformAdapter {
       source: resolution.source,
     });
     this.lastKind = resolution.kind;
+    this.lastResolution = resolution;
     return resolution;
+  }
+
+  /**
+   * Missing tvOS debug symbols for a physical Apple TV (see
+   * {@link tvosDeviceSupportDiagnostic}). Null for a simulator, and null when
+   * discovery fails, so it can never fail a deploy or an info call.
+   */
+  async environmentDiagnostic(
+    resolved?: DeviceResolution
+  ): Promise<string | null> {
+    try {
+      const resolution =
+        (resolved as TvosDeviceResolution | undefined) ??
+        (await this.discoverDevice({ readOnly: true }));
+      if (resolution.kind !== "device") return null;
+      return tvosDeviceSupportDiagnostic(resolution, this.config.deviceSupportRoot);
+    } catch (error) {
+      logger.warn("tvOS DeviceSupport diagnostic skipped", { error });
+      return null;
+    }
+  }
+
+  /**
+   * A physical Apple TV debug app has no kernel compiler, so `reloadSources`
+   * fails on every isolate with "Error while starting Kernel isolate task". Only
+   * the flutter tool's `r`, which compiles on this Mac, can reload it. Only a
+   * device devicectl names as a paired Apple TV is refused; anything else,
+   * including a devicectl that could not be read, is left to try, and a reload
+   * that then fails for want of a compiler is reported as not triggered.
+   */
+  async vmServiceReloadRefusal(device: string): Promise<string | undefined> {
+    const physical = parseDevicectlAppleTvs(await this.listPhysicalDevicectlJson());
+    if (!physical.some((tv) => tv.id === device)) return undefined;
+    return (
+      "A VM-service reload cannot work on a physical Apple TV: the debug app has no " +
+      "on-device kernel compiler, so reloadSources fails on every isolate. Only the " +
+      "flutter tool's `r` over the launch's control channel can reload it."
+    );
   }
 
   /**
    * Install the already-built app on the resolved target.
    *
-   * Physical Apple TV: `xcrun devicectl device install app` with the
-   * `Release-appletvos` Runner.app — where the `--profile` device build lands,
-   * see {@link artifactPathFor}. Simulator: `xcrun simctl install` with the
-   * `Debug-appletvsimulator` (or `Release-appletvsimulator`) Runner.app. The
-   * neutral deploy handler calls install THEN launch; keeping install separate
-   * lets the ENOSPC uninstall-and-retry seam work uniformly with the other
-   * adapters.
+   * Physical Apple TV: `xcrun devicectl device install app` with the Runner.app
+   * for the resolved mode (see {@link artifactPathFor}), retried once when
+   * CoreDevice drops the connection mid-transfer. A debug deploy that goes on to
+   * launch installs nothing here: `flutter-tvos run --debug` builds and installs
+   * the debug app itself, and installing the last AOT build first would only put
+   * the wrong binary on the box for the length of a build. Simulator:
+   * `xcrun simctl install` with the `Debug-appletvsimulator` Runner.app. The
+   * deploy calls install THEN launch, which keeps the ENOSPC uninstall-and-retry
+   * seam uniform with the other adapters.
    */
-  async install(device: string, _opts: InstallOptions): Promise<CommandResult> {
-    const appPath = this.artifactPathFor(this.lastKind);
+  async install(device: string, opts: InstallOptions): Promise<CommandResult> {
+    const mode = this.requestedMode(opts.mode, opts.debug);
+    if (this.lastKind === "device" && mode === "debug" && opts.launchFollows) {
+      return okResult(
+        "Install deferred: the debug launch (`flutter-tvos run --debug`) builds and installs " +
+          "the debug app itself."
+      );
+    }
+    const appPath = this.artifactPathFor(this.lastKind, mode);
+    if (this.lastKind === "device" && mode === "debug" && !fs.existsSync(appPath)) {
+      const message =
+        `No debug Apple TV build at ${appPath}. A device debug build only comes out of ` +
+        "`flutter-tvos run --debug`; deploy with a launch (omit no_launch) to build, install " +
+        "and attach in one step.";
+      return {
+        code: 1,
+        stdout: "",
+        stderr: message,
+        combined: message,
+        success: false,
+        timedOut: false,
+      };
+    }
     if (this.lastKind === "simulator") {
       // A `simctl install` against a SHUTDOWN simulator fails with SimError 405
       // ("Unable to lookup in current state: Shutdown"). Boot it first (idempotent
@@ -542,130 +675,194 @@ export class TvosAdapter implements PlatformAdapter {
         { timeoutMs: 300000 }
       );
     }
-    return runShell(
-      `xcrun devicectl device install app --device ${quote(device)} ${quote(appPath)}`,
-      { timeoutMs: 600000 }
-    );
-  }
-
-  /**
-   * The built Runner.app path for a device kind.
-   *
-   * The device path reads as a mistake and is not one: flutter-tvos derives the
-   * Xcode configuration from the Flutter build mode alone — debug maps to
-   * `Debug`, EVERY other mode maps to `Release` — and stages the product under
-   * `build/tvos/<configuration>-<sdk>/Runner.app`. So the `--profile` device
-   * build this adapter performs lands in `Release-appletvos`. The Runner project
-   * does define a Profile configuration, but flutter-tvos never selects it, so
-   * `Profile-appletvos` is never written. It used to be the first choice here
-   * and the path returned when nothing was on disk, so a missing build surfaced
-   * as devicectl's NSCocoaErrorDomain 260 ("the file couldn't be opened because
-   * it doesn't exist") on a directory no build could have produced. Read from
-   * the flutter-tvos toolchain source (`lib/build_targets/application.dart`),
-   * not from an install on hardware.
-   *
-   * The candidates are exactly the bundles {@link build} can produce, and
-   * nothing else is discovered. The device build is always `--profile`, so the
-   * device list has one entry. The simulator build is `--debug` or `--release`,
-   * and which one ran is not known here, so both are checked, debug first.
-   * There used to be a fallback to any `*-<sdk>/Runner.app` on disk; it could
-   * only ever find a bundle this adapter did not build — a stale sibling from a
-   * manual Xcode run, or a device `Debug-appletvos` that segfaults on launch —
-   * and installing that is worse than failing on the path the build should
-   * have written. When nothing exists, the first candidate is returned so the
-   * install error names that path.
-   */
-  private artifactPathFor(kind: TvosDeviceKind): string {
-    const buildDir = path.join(this.config.appDir, "build", "tvos");
-    const candidates =
-      kind === "simulator"
-        ? ["Debug-appletvsimulator", "Release-appletvsimulator"]
-        : ["Release-appletvos"];
-    for (const config of candidates) {
-      const p = path.join(buildDir, config, "Runner.app");
-      if (fs.existsSync(p)) return p;
+    const install = () =>
+      runShell(
+        `xcrun devicectl device install app --device ${quote(device)} ${quote(appPath)}`,
+        { timeoutMs: 600000 }
+      );
+    const first = await install();
+    if (first.success || !TVOS_CONNECTION_RESET_PATTERN.test(first.combined)) {
+      return first;
     }
-    return path.join(buildDir, candidates[0], "Runner.app");
+    logger.warn("tvOS install hit a connection reset; retrying once", { device });
+    const second = await install();
+    const note = "First install attempt failed with \"Connection reset by peer\"; retried once.\n";
+    return { ...second, combined: note + second.combined };
   }
 
   /**
-   * Launch and capture the Dart VM Service URI.
+   * The built Runner.app path for a device kind and mode.
    *
-   * PHYSICAL Apple TV: run `flutter-tvos run -d <id> --profile` through a pty and
-   * scrape the loopback `http://127.0.0.1:PORT/<authCode>/` line flutter prints.
-   * flutter holds a localhost port-forward over the CoreDevice tunnel open for
-   * the lifetime of the process, so the loopback URI is connectable from this
-   * Mac; the process is LEFT RUNNING (like iOS) to hold that forward open. The
-   * `127.0.0.1` forward is loopback-scoped to THIS run's device, so a running iOS
-   * simulator (same bundle id) cannot collide with it.
+   * A profile path of `Release-appletvos` reads as a mistake and is not one:
+   * flutter-tvos derives the Xcode configuration from the Flutter build mode
+   * alone — debug maps to `Debug`, EVERY other mode maps to `Release` — and
+   * stages the product under `build/tvos/<configuration>-<sdk>/Runner.app`. The
+   * Runner project defines a Profile configuration, but flutter-tvos never
+   * selects it, so `Profile-appletvos` is never written. Read from the
+   * flutter-tvos toolchain source (`lib/build_targets/application.dart`).
+   * Simulator builds are always debug, hence `Debug-appletvsimulator`.
    *
-   * SIMULATOR: `simctl launch --console-pty` prints the usual loopback URI
-   * (the sim shares the Mac's loopback), so the neutral loopback parser applies.
+   * Only the bundle {@link build} produces for that kind and mode is returned,
+   * and nothing else on disk is discovered: a fallback could only find a bundle
+   * this adapter did not build (a stale sibling from a manual Xcode run), and
+   * installing that is worse than failing on the path the build should have
+   * written.
+   */
+  private artifactPathFor(kind: TvosDeviceKind, mode: TvosLaunchMode): string {
+    return path.join(this.config.appDir, "build", "tvos", tvosArtifactDir(kind, mode), "Runner.app");
+  }
+
+  /**
+   * Launch and capture the Dart VM Service URI, in the resolved mode.
    *
-   * On either path the launched process is left running to hold the VM service
-   * open — matching the other adapters.
+   * PHYSICAL Apple TV: `flutter-tvos run -d <id> --<mode>` in the app dir,
+   * through a pty so the announcement line flushes. In debug, flutter-tvos
+   * builds, installs, launches the app stopped and attaches lldb, which the
+   * engine requires before it will start a debug VM. The run is LEFT RUNNING: it
+   * holds the VM-service forward open and, in debug, takes `r`/`R` over the
+   * control channel. Only the "A Dart VM Service on <device> is available at:"
+   * line is read, because the app's own console output reaches the same log
+   * with the device-side URI, which is not connectable from this Mac.
+   *
+   * A device launch always builds, so `dartDefine` is passed to the run and the
+   * app that starts is compiled with it.
+   *
+   * SIMULATOR: `simctl launch --console-pty` of the installed debug build, the
+   * only build a tvOS simulator runs; a profile/release request there carries a
+   * caveat naming both modes.
    */
   async launchAndCaptureUri(
     device: string,
-    timeoutMs: number
+    timeoutMs: number,
+    mode?: BuildMode,
+    dartDefine?: Record<string, string>
   ): Promise<LaunchOutcome> {
-    return this.lastKind === "simulator"
-      ? this.launchSimulator(device, timeoutMs)
-      : this.launchDevice(device, timeoutMs);
+    const requested = this.requestedMode(mode);
+    if (this.lastKind === "simulator") {
+      const outcome = await this.launchSimulator(device, timeoutMs);
+      return isLaunchFailure(outcome)
+        ? outcome
+        : {
+            ...outcome,
+            launchMode: "debug",
+            launchModeCaveat: tvosLaunchModeCaveat(requested, "debug") ?? undefined,
+          };
+    }
+    await this.wakeBestEffort();
+    const outcome = await this.launchDevice(device, timeoutMs, requested, dartDefine);
+    if (isLaunchFailure(outcome)) {
+      if (requested === "debug") {
+        // flutter-tvos answers a failed lldb attach by driving Xcode's debugger
+        // through AppleScript, which waits on an automation prompt nobody is
+        // there to answer. Ending the run here keeps it from starting.
+        await this.killStale({ kind: "device", device });
+      }
+      return outcome;
+    }
+    return {
+      ...outcome,
+      launchMode: requested,
+      launchModeCaveat: tvosLaunchModeCaveat(requested, requested) ?? undefined,
+      reloadNeedsOwningRun: true,
+    };
   }
 
-  /**
-   * Physical-device launch: pty-wrap `flutter-tvos run -d <id> --profile` and
-   * feed it (with the flutter-tvos bin dir on PATH) into the SAME neutral launch
-   * core the iOS adapter uses. The core spawns the launch detached, tees its
-   * output to a temp log, and polls for the loopback VM-service URI (or a failure
-   * signature). Leaving the run process alive holds the CoreDevice tunnel's
-   * localhost port-forward open so Marionette can connect.
-   */
   private async launchDevice(
     device: string,
-    timeoutMs: number
+    timeoutMs: number,
+    mode: TvosLaunchMode,
+    dartDefine?: Record<string, string>
   ): Promise<LaunchOutcome> {
-    const command = this.buildTvosRunPtyCommand(device);
+    // A cold profile/release run has no reload or restart to drive, so only
+    // debug gets a channel; one elsewhere would advertise an inner loop that
+    // cannot exist.
+    const controlChannel = mode === "debug" ? allocateControlChannel() : undefined;
+    const command = buildTvosDeviceRunCommand({
+      appDir: this.config.appDir,
+      device,
+      mode,
+      extraArgs: dartDefineArgs(dartDefine),
+      flutterTvosBinDir: this.binDir,
+      dirExists: (dir) => fs.existsSync(dir),
+      controlChannel,
+    });
     return neutralLaunchAndCaptureUri(
       command,
       this.config.appDir,
       timeoutMs,
-      TVOS_FAILURE_SIGNATURES
+      tvosDeviceFailureSignatures(mode),
+      controlChannel?.fifoPath,
+      tvosSettleOptionsFor(mode),
+      parseAnnouncedVmServiceUri
     );
   }
 
   /**
-   * Build the pty-wrapped `flutter-tvos run -d <id> --profile` launch command.
-   *
-   * `flutter-tvos run` prints the standard flutter run output (including the
-   * "A Dart VM Service … is available at:" loopback line). Wrapping it in a pty
-   * (via {@link buildPtyCaptureCommand}) makes flutter line-flush that URI —
-   * identical mechanism to the iOS/Tizen pty launch. The flutter-tvos bin dir is
-   * prepended to PATH (when present) so `flutter-tvos` resolves under a
-   * GUI-spawned (non-login-shell) server. `--profile` keeps the Dart VM service
-   * alive (a device debug launch segfaults; a release build strips the service).
-   *
-   * NOTE: `flutter-tvos run -d <id> --profile` mirrors `flutter run`; confirm the
-   * fork accepts `-d`/`--profile` on real hardware. A future
-   * `--use-application-binary <Runner.app>` would skip the rebuild after a prior
-   * build/install — leaving the run to build is acceptable for now (it matches
-   * how iOS deploy runs `flutter run`).
+   * Wake the Apple TV before a launch, when pyatv's atvremote is installed. A
+   * sleeping box refuses the launch only after the build, which on a device
+   * takes minutes, so waking first saves that round trip. Any failure is
+   * ignored here: the launch's own asleep signature and
+   * {@link recoverLaunchFailure} report it with what to do.
    */
-  private buildTvosRunPtyCommand(device: string): string {
-    const inner = `flutter-tvos run -d ${quote(device)} --profile`;
-    return buildTvosPtyLaunchCommand(
-      inner,
-      this.binDir,
-      (dir) => fs.existsSync(dir)
-    );
+  private async wakeBestEffort(): Promise<void> {
+    const binary = this.atvremoteBinary();
+    const target = this.atvTarget();
+    if (!binary || !target) return;
+    const result = await runShell(buildAtvremoteCommand(binary, target, "turn_on"), {
+      timeoutMs: 30000,
+    });
+    logger.info("tvOS pre-launch wake", { code: result.code, success: result.success });
+  }
+
+  /** The Apple TV atvremote addresses: the configured pyatv id, else the devicectl name. */
+  private atvTarget(): AtvTarget | undefined {
+    if (this.config.atvId) return { id: this.config.atvId };
+    const name = this.lastResolution?.kind === "device" ? this.lastResolution.name : undefined;
+    return name ? { name } : undefined;
+  }
+
+  /**
+   * After a failed launch: a sleeping Apple TV is woken with atvremote and the
+   * launch retried once; a connection reset is retried once. Anything else is
+   * left to the caller.
+   */
+  async recoverLaunchFailure(_device: string, log: string): Promise<LaunchRecovery> {
+    if (isTvosAsleepFailure(log)) {
+      const binary = this.atvremoteBinary();
+      const target = this.atvTarget();
+      if (!binary || !target) {
+        return {
+          action: "none",
+          note:
+            "The Apple TV is asleep and refused the launch. Wake it (press a remote button, or " +
+            "`atvremote turn_on`) and deploy again. To have deploys wake it themselves: " +
+            ATVREMOTE_INSTALL_HINT,
+        };
+      }
+      const wake = await runShell(buildAtvremoteCommand(binary, target, "turn_on"), {
+        timeoutMs: 30000,
+      });
+      if (!wake.success) {
+        return {
+          action: "none",
+          note: `The Apple TV is asleep and the wake failed. ${describeAtvremoteFailure(wake)}`,
+        };
+      }
+      return { action: "retry", note: "The Apple TV was asleep; woke it with atvremote turn_on." };
+    }
+    if (TVOS_CONNECTION_RESET_PATTERN.test(log)) {
+      return {
+        action: "retry",
+        note: "CoreDevice reset the connection to the Apple TV mid-launch; retrying once.",
+      };
+    }
+    return { action: "none" };
   }
 
   /**
    * Simulator launch: `simctl launch --console-pty` prints the loopback VM
    * service URI (the sim shares the Mac's loopback), captured with the neutral
-   * loopback parser. Polls the captured output until the URI appears or the
-   * deadline passes.
+   * loopback parser.
    */
   private async launchSimulator(
     device: string,
@@ -756,14 +953,15 @@ export class TvosAdapter implements PlatformAdapter {
   }
 
   /**
-   * Capture the current screen.
+   * Capture the current screen of the resolved target (the same resolution a
+   * deploy uses, `device_udid` and `target` included).
    *
-   * tvOS SIMULATOR: `xcrun simctl io <udid> screenshot <path>` works (same as the
-   * iOS simulator). PHYSICAL Apple TV: no CLI capture path — devicectl has no
-   * screenshot subcommand and there is no idevicescreenshot equivalent — so it
-   * returns `{ supported: false }`. Discovers the target first to know which kind
-   * is active — the same resolution a deploy uses, `device_udid` and `target`
-   * included.
+   * SIMULATOR: `xcrun simctl io <udid> screenshot`. PHYSICAL Apple TV:
+   * `pymobiledevice3 developer dvt screenshot --native --udid <hardware UDID>`.
+   * `--native` rides the tunnel macOS's own `remoted` already holds to a
+   * network-paired Apple TV, so no root tunnel daemon is needed; pymobiledevice3
+   * addresses the box by its hardware UDID, not the CoreDevice id devicectl
+   * uses. The capture is the whole HDMI frame, not only the Flutter view.
    */
   async screenshot(opts: {
     outPath?: string;
@@ -771,39 +969,89 @@ export class TvosAdapter implements PlatformAdapter {
     deviceUdid?: string;
     target?: "device" | "simulator";
   }): Promise<ScreenshotResult> {
-    const resolution = await this.discoverDevice({
-      udid: opts.deviceUdid,
-      kind: opts.target,
-    });
-    if (this.lastKind !== "simulator") {
+    const resolution = await this.discoverDevice({ udid: opts.deviceUdid, kind: opts.target });
+    const identity: Pick<ScreenshotResult, "device" | "deviceName" | "deviceKind"> = {
+      device: resolution.target,
+      deviceName: resolution.name,
+      deviceKind: resolution.kind,
+    };
+    const outPath = opts.outPath ?? defaultScreenshotPath("tvos");
+    if (resolution.kind === "simulator") {
+      const result = await runShell(
+        buildSimctlScreenshotCommand(resolution.target, outPath),
+        { timeoutMs: 30000 }
+      );
+      if (!result.success || !fs.existsSync(outPath)) {
+        return {
+          captured: false,
+          via: "simctl",
+          ...identity,
+          reason: `simctl screenshot failed: ${tail(result.combined, 20)}`,
+        };
+      }
+      return { captured: true, savedPath: outPath, via: "simctl", ...identity, ...describePng(outPath, opts.includeBase64) };
+    }
+    return this.screenshotPhysical(outPath, opts.includeBase64, resolution, identity);
+  }
+
+  private async screenshotPhysical(
+    outPath: string,
+    includeBase64: boolean | undefined,
+    resolution: TvosDeviceResolution,
+    identity: Pick<ScreenshotResult, "device" | "deviceName" | "deviceKind">
+  ): Promise<ScreenshotResult> {
+    const { binary, overrideWarning } = this.pymobiledevice3();
+    const common = {
+      via: "pymobiledevice3" as const,
+      ...identity,
+      ...(overrideWarning ? { pymobiledevice3Warning: overrideWarning } : {}),
+    };
+    if (!binary) {
       return {
         captured: false,
         supported: false,
+        ...common,
         reason:
-          "Screen capture is not available for a PHYSICAL Apple TV: `xcrun devicectl` has no " +
-          "screenshot subcommand and there is no idevicescreenshot equivalent for tvOS hardware.",
+          `The capture target is the physical Apple TV ${resolution.target}, and capturing it ` +
+          "needs pymobiledevice3, which was not found. devicectl has no screenshot verb.",
         hint:
-          "Use a tvOS SIMULATOR for screenshot walkthroughs, or Marionette take_screenshots over " +
-          "the VM service to capture the Flutter view on the device.",
+          "Install it (`pipx install pymobiledevice3`) or set FLUTTER_DEVICE_PYMOBILEDEVICE3 to its " +
+          "path. Marionette take_screenshots over the VM service captures the Flutter view " +
+          "without it.",
       };
     }
-    const outPath = opts.outPath ?? defaultScreenshotPath("tvos");
+    if (!resolution.hardwareUdid) {
+      return {
+        captured: false,
+        ...common,
+        reason:
+          "devicectl did not report this Apple TV's hardware UDID, which pymobiledevice3 " +
+          "addresses it by, so the capture cannot be routed to it.",
+        hint: "Check `xcrun devicectl list devices` shows the Apple TV as paired and available.",
+      };
+    }
     const result = await runShell(
-      buildSimctlScreenshotCommand(resolution.target, outPath),
-      { timeoutMs: 30000 }
+      buildPymobiledevice3ScreenshotCommand(binary, outPath, resolution.hardwareUdid, {
+        native: true,
+      }),
+      { timeoutMs: 60000 }
     );
     if (!result.success || !fs.existsSync(outPath)) {
       return {
         captured: false,
-        reason: `simctl screenshot failed: ${tail(result.combined, 20)}`,
+        ...common,
+        reason: `pymobiledevice3 screenshot failed: ${tail(result.combined, 30)}`,
+        hint:
+          "The Apple TV must be awake and its Developer Disk Image mounted (a deploy from " +
+          "Xcode or flutter-tvos mounts it). A sleeping box drops off the native tunnel; " +
+          "wake it (flutter_key HOME with atvremote paired) and retry.",
       };
     }
     return {
       captured: true,
       savedPath: outPath,
-      base64: opts.includeBase64
-        ? fs.readFileSync(outPath).toString("base64")
-        : undefined,
+      ...common,
+      ...describePng(outPath, includeBase64),
     };
   }
 
@@ -885,10 +1133,13 @@ export class TvosAdapter implements PlatformAdapter {
   /**
    * Terminate the running app.
    *
-   * Simulator (simctl): `simctl terminate <udid> <bundleId>` — simctl terminates
-   * by bundle id directly. Physical Apple TV (devicectl): `process terminate`
-   * requires a pid, so we resolve the running pid from `device info processes`
-   * and terminate by pid, treating "not running" as a successful no-op.
+   * Simulator: `simctl terminate` by bundle id. Physical Apple TV: the app is
+   * found by its installed bundle path, since every Flutter app's process is a
+   * `Runner.app/Runner`. Its pids are read BEFORE the resident `flutter-tvos run`
+   * is ended, because a debug app sits under that run's lldb and usually exits
+   * with it; reading afterwards would report a running app as "not running".
+   * Whatever is still alive is terminated with devicectl, and the result is the
+   * process list read back afterwards, not the exit code of the terminate.
    */
   private async terminate(
     device: string,
@@ -899,59 +1150,195 @@ export class TvosAdapter implements PlatformAdapter {
         timeoutMs: 60000,
       });
     }
+    const apps = await runShell(
+      `xcrun devicectl device info apps --device ${quote(device)} --bundle-id ${quote(appId)} --json-output - 2>/dev/null`,
+      { timeoutMs: 60000 }
+    );
+    const installed = parseDevicectlAppBundlePath(apps.stdout, appId);
+    if (installed.kind === "unreadable") {
+      return failedResult(
+        `Could not read the apps installed on ${device} (devicectl exited ${apps.code}), so ` +
+          `whether ${appId} is running is unknown. Nothing was terminated.`
+      );
+    }
+    if (installed.kind === "absent") {
+      const killed = await this.killStale({ kind: "device", device });
+      return okResult(
+        `${appId} is not installed on ${device}; nothing to terminate.${runnerNote(killed)}`
+      );
+    }
+
+    const before = await this.readAppPids(device, installed.bundlePath);
+    if (before === undefined) {
+      return failedResult(
+        `Could not read the processes on ${device}, so whether ${appId} is running is ` +
+          "unknown. Nothing was terminated."
+      );
+    }
+    const killed = await this.killStale({ kind: "device", device });
+    if (before.length === 0) {
+      return okResult(`${appId} was not running on ${device}.${runnerNote(killed)}`);
+    }
+
+    const afterRunner = await this.readAppPids(device, installed.bundlePath);
+    if (afterRunner !== undefined && afterRunner.length === 0) {
+      return okResult(
+        `${appId} (pid ${before.join(", ")}) exited when its resident flutter-tvos run ` +
+          `was ended.${runnerNote(killed)}`
+      );
+    }
+
+    const targets = afterRunner ?? before;
+    const outputs: string[] = [];
+    for (const pid of targets) {
+      const result = await runShell(
+        `xcrun devicectl device process terminate --device ${quote(device)} --pid ${pid}`,
+        { timeoutMs: 60000 }
+      );
+      outputs.push(result.combined.trim());
+    }
+    const remaining = await this.waitForAppExit(device, installed.bundlePath);
+    const detail = outputs.filter(Boolean).join("\n");
+    if (remaining === undefined) {
+      return failedResult(
+        `Sent terminate to ${appId} (pid ${targets.join(", ")}) but could not read the ` +
+          `processes back to confirm it exited.${runnerNote(killed)}`,
+        detail
+      );
+    }
+    if (remaining.length > 0) {
+      return failedResult(
+        `${appId} is still running on ${device} (pid ${remaining.join(", ")}) after ` +
+          `terminate.${runnerNote(killed)}`,
+        detail
+      );
+    }
+    return okResult(
+      `Terminated ${appId} (pid ${targets.join(", ")}) on ${device}.${runnerNote(killed)}`
+    );
+  }
+
+  /** The app's pids, or undefined when the process list could not be read. */
+  private async readAppPids(
+    device: string,
+    bundlePath: string
+  ): Promise<number[] | undefined> {
     const processes = await runShell(
       `xcrun devicectl device info processes --device ${quote(device)} --json-output - 2>/dev/null`,
       { timeoutMs: 60000 }
     );
-    const pid = findRunnerPid(processes.stdout);
-    if (pid === undefined) {
-      const message = `No running Runner process for ${appId} on ${device}; nothing to terminate.`;
-      return {
-        code: 0,
-        stdout: message,
-        stderr: "",
-        combined: message,
-        success: true,
-        timedOut: false,
-      };
+    return findAppPids(processes.stdout, bundlePath);
+  }
+
+  private async waitForAppExit(
+    device: string,
+    bundlePath: string
+  ): Promise<number[] | undefined> {
+    const pollMs = this.config.terminatePollMs ?? TERMINATE_POLL_MS;
+    let remaining: number[] | undefined;
+    for (let attempt = 0; attempt < TERMINATE_POLL_ATTEMPTS; attempt++) {
+      if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, pollMs));
+      remaining = await this.readAppPids(device, bundlePath);
+      if (remaining !== undefined && remaining.length === 0) return remaining;
     }
-    return runShell(
-      `xcrun devicectl device process terminate --device ${quote(device)} --pid ${pid}`,
-      { timeoutMs: 60000 }
-    );
+    return remaining;
   }
 
   /**
-   * tvOS input controller. Navigation and taps are Marionette's job over the VM
-   * service, so this MCP does not drive them; the Siri-Remote/focus model has no
-   * free cursor. Every send reports unsupported (throws
-   * {@link UnsupportedInputError}, surfaced by the server as `{supported:false}`).
+   * Siri Remote presses on a physical Apple TV, through pyatv's atvremote (see
+   * {@link AtvRemoteInputController}). The target is resolved per key, so a
+   * simulator, a missing install or a missing pairing each surface as
+   * `{supported:false}` with the reason. There is no free cursor on tvOS.
    */
   input(): InputController {
     if (!this.inputController) {
-      this.inputController = new TvosInputStub();
+      this.inputController = new AtvRemoteInputController({
+        binary: () => this.atvremoteBinary(),
+        target: () => this.inputTarget(),
+        run: (command) => runShell(command, { timeoutMs: 30000 }),
+      });
     }
     return this.inputController;
   }
+
+  private async inputTarget(): Promise<AtvTarget | { unsupported: string }> {
+    if (this.config.atvId) return { id: this.config.atvId };
+    const resolution = await this.discoverDevice({ readOnly: true });
+    if (resolution.kind === "simulator") {
+      return {
+        unsupported:
+          "The resolved tvOS target is a simulator, which has no remote channel. Drive it " +
+          "with Marionette over the VM service, or use the Simulator's own remote window.",
+      };
+    }
+    if (!resolution.name) {
+      return {
+        unsupported:
+          "devicectl reported no name for this Apple TV, and atvremote needs its name or " +
+          "FLUTTER_DEVICE_TVOS_ATV_ID (its pyatv id from `atvremote scan`).",
+      };
+    }
+    return { name: resolution.name };
+  }
+}
+
+const TERMINATE_POLL_ATTEMPTS = 5;
+const TERMINATE_POLL_MS = 1000;
+
+/** A devicectl `file://` URL as a path, with `/private/var` folded to `/var`. */
+export function deviceFilePath(url: string): string {
+  let filePath = url;
+  if (filePath.startsWith("file://")) {
+    try {
+      filePath = decodeURIComponent(filePath.slice("file://".length));
+    } catch {
+      filePath = filePath.slice("file://".length);
+    }
+  }
+  return filePath.replace(/^\/private\/var\//, "/var/");
+}
+
+export type InstalledApp =
+  | { kind: "installed"; bundlePath: string }
+  | { kind: "absent" }
+  | { kind: "unreadable" };
+
+/**
+ * The installed bundle directory of `appId` from `devicectl device info apps
+ * --bundle-id <appId> --json-output -`, normalized with a trailing slash.
+ */
+export function parseDevicectlAppBundlePath(
+  json: string,
+  appId: string
+): InstalledApp {
+  let parsed: { result?: { apps?: unknown } };
+  try {
+    parsed = JSON.parse(json);
+  } catch {
+    return { kind: "unreadable" };
+  }
+  const apps = parsed?.result?.apps;
+  if (!Array.isArray(apps)) return { kind: "unreadable" };
+  const app = apps.find(
+    (entry) =>
+      entry && typeof entry === "object" && (entry as { bundleIdentifier?: unknown }).bundleIdentifier === appId
+  ) as { url?: unknown } | undefined;
+  if (!app) return { kind: "absent" };
+  if (typeof app.url !== "string" || app.url.length === 0) return { kind: "unreadable" };
+  const bundlePath = deviceFilePath(app.url);
+  return {
+    kind: "installed",
+    bundlePath: bundlePath.endsWith("/") ? bundlePath : `${bundlePath}/`,
+  };
 }
 
 /**
- * Resolve the Runner pid from `xcrun devicectl device info processes
- * --json-output -`. Running-process entries carry an `executable` file URL
- * (e.g. `…/Runner.app/Runner`) and an integer `processIdentifier`; the tvOS
- * Runner's executable path contains `/Runner.app/`. Returns the first match or
- * undefined (app not running → the caller no-ops). Defensive parse: a shape
- * drift degrades to "not running", never throws.
+ * Pids from `devicectl device info processes --json-output -` whose executable
+ * lives inside `bundlePath`, or undefined when the output is not a process list.
+ * An empty array means the list was read and the app is not in it.
  */
-export function findRunnerPid(json: string): number | undefined {
-  let parsed: {
-    result?: {
-      runningProcesses?: Array<{
-        processIdentifier?: number;
-        executable?: string | null;
-      }>;
-    };
-  };
+export function findAppPids(json: string, bundlePath: string): number[] | undefined {
+  let parsed: { result?: { runningProcesses?: unknown } };
   try {
     parsed = JSON.parse(json);
   } catch {
@@ -959,14 +1346,79 @@ export function findRunnerPid(json: string): number | undefined {
   }
   const processes = parsed?.result?.runningProcesses;
   if (!Array.isArray(processes)) return undefined;
-  for (const proc of processes) {
-    const exe = proc?.executable;
-    if (typeof exe !== "string") continue;
-    if (exe.includes("/Runner.app/") && typeof proc.processIdentifier === "number") {
-      return proc.processIdentifier;
+  const pids: number[] = [];
+  for (const proc of processes as Array<{ executable?: unknown; processIdentifier?: unknown }>) {
+    if (typeof proc?.executable !== "string") continue;
+    if (typeof proc.processIdentifier !== "number") continue;
+    if (deviceFilePath(proc.executable).startsWith(bundlePath)) {
+      pids.push(proc.processIdentifier);
     }
   }
-  return undefined;
+  return pids;
+}
+
+function runnerNote(killed: Record<string, CommandResult>): string {
+  return killed.tvosRun?.code === KILL_STALE_EXIT.killed
+    ? " Ended the resident flutter-tvos run as well."
+    : "";
+}
+
+/** The `build/tvos/<configuration>-<sdk>` directory a build lands in. */
+export function tvosArtifactDir(kind: TvosDeviceKind, mode: TvosLaunchMode): string {
+  if (kind === "simulator") return "Debug-appletvsimulator";
+  return mode === "debug" ? "Debug-appletvos" : "Release-appletvos";
+}
+
+/** Read a saved capture once: its dimensions, and its bytes when asked for. */
+function describePng(
+  outPath: string,
+  includeBase64?: boolean
+): Pick<ScreenshotResult, "base64" | "pixelWidth" | "pixelHeight"> {
+  let bytes: Buffer;
+  try {
+    bytes = fs.readFileSync(outPath);
+  } catch {
+    return {};
+  }
+  const dimensions = readPngDimensions(bytes);
+  return {
+    base64: includeBase64 ? bytes.toString("base64") : undefined,
+    pixelWidth: dimensions?.width,
+    pixelHeight: dimensions?.height,
+  };
+}
+
+function failedResult(message: string, detail = ""): CommandResult {
+  const combined = detail ? `${message}\n${detail}` : message;
+  return {
+    code: 1,
+    stdout: "",
+    stderr: combined,
+    combined,
+    success: false,
+    timedOut: false,
+  };
+}
+
+/** A successful result for a step that had nothing to run. */
+function okResult(message: string): CommandResult {
+  return {
+    code: 0,
+    stdout: message,
+    stderr: "",
+    combined: message,
+    success: true,
+    timedOut: false,
+  };
+}
+
+function succeeded(message: string): BuildResult {
+  return {
+    result: okResult(message),
+    enospc: false,
+    installFailed: false,
+    launchedDisplay: false,
+  };
 }
 
 /** Return the last `maxLines` lines of `text` (for log tails in launch failures). */
@@ -1011,71 +1463,72 @@ export function withFlutterTvosPath(
 }
 
 /**
- * Wrap a `flutter-tvos run` invocation in a pty allocator so flutter-tvos
- * line-flushes its "A Dart VM Service … is available at:" URI (buffered under a
- * plain pipe otherwise) — the same mechanism as the iOS/Tizen pty launch. The
- * flutter-tvos bin dir is prepended to PATH (when present) so `flutter-tvos`
- * resolves under a GUI-spawned non-login-shell server; the PATH prefix is applied
- * to the INNER command so it survives inside the pty.
+ * The pty-wrapped `flutter-tvos run` for a physical Apple TV.
  *
- * This adapter owns only the PATH-guarded inner; the cross-platform
- * `script`/`/bin/sh -c` wrapping (and the leading `exec`) is delegated to the
- * shared {@link buildPtyCaptureCommand}, so tvOS matches the other adapters and
- * the `script` signature lives in exactly one place. Pure over its inputs (the
- * inner command, the bin dir, and a "does it exist" predicate) so it is
- * unit-testable; the adapter supplies the fs check.
+ * The pty makes flutter-tvos line-flush its VM-service announcement (it is
+ * buffered under a plain pipe). With a control channel the pty bridge owns the
+ * terminal, so `r`/`R` written to the FIFO reach the runner's key handler. The
+ * flutter-tvos bin dir goes on PATH inside the pty, because a GUI-spawned server
+ * runs a non-login shell whose PATH omits it.
  */
-export function buildTvosPtyLaunchCommand(
-  innerCommand: string,
-  flutterTvosBinDir: string | undefined,
-  dirExists: (dir: string) => boolean,
-  platform: NodeJS.Platform = process.platform
-): string {
-  const inner = withFlutterTvosPath(innerCommand, flutterTvosBinDir, dirExists);
-  return buildPtyCaptureCommand({ inner, platform });
+export function buildTvosDeviceRunCommand(opts: {
+  appDir: string;
+  device: string;
+  mode: TvosLaunchMode;
+  extraArgs?: string[];
+  flutterTvosBinDir: string | undefined;
+  dirExists: (dir: string) => boolean;
+  controlChannel?: ControlChannel;
+  platform?: NodeJS.Platform;
+}): string {
+  const run = [
+    "flutter-tvos",
+    "run",
+    "-d",
+    quote(opts.device),
+    `--${opts.mode}`,
+    ...(opts.extraArgs ?? []).map(quote),
+  ].join(" ");
+  const inner = withFlutterTvosPath(
+    `cd ${quote(opts.appDir)} && ${run}`,
+    opts.flutterTvosBinDir,
+    opts.dirExists
+  );
+  return buildPtyCaptureCommand({
+    inner,
+    platform: opts.platform,
+    controlChannel: opts.controlChannel,
+  });
+}
+
+/**
+ * Lines that end a device launch early, for the mode being launched. A
+ * connection reset is not among them: CoreDevice can recover from one inside the
+ * same run, so it is read only after the run has failed, to decide on a retry.
+ */
+export function tvosDeviceFailureSignatures(mode: TvosLaunchMode): RegExp[] {
+  return [
+    ...TVOS_FAILURE_SIGNATURES,
+    ...TVOS_ASLEEP_SIGNATURES,
+    ...(mode === "debug" ? TVOS_DEVICE_DEBUG_FAILURE_SIGNATURES : []),
+  ];
+}
+
+/**
+ * How a non-debug device launch ends its wait when no URI is coming. Debug
+ * returns undefined: its URI is the success criterion.
+ */
+export function tvosSettleOptionsFor(mode: TvosLaunchMode): SettleOptions | undefined {
+  if (mode === "debug") return undefined;
+  return {
+    signatures: TVOS_RESIDENT_SETTLE_SIGNATURES,
+    graceMs: TVOS_SETTLE_GRACE_MS,
+    reason:
+      mode === "release" ? TVOS_RELEASE_NO_VM_SERVICE_REASON : TVOS_PROFILE_NO_VM_SERVICE_REASON,
+  };
 }
 
 /** The documented default flutter-tvos bin dir (`~/flutter-tvos/bin`). */
 export function defaultFlutterTvosBinDir(homeDir: string): string {
   return path.join(homeDir, "flutter-tvos", "bin");
-}
-
-/**
- * tvOS input stub: physical-remote/cursor input is not driven by this MCP.
- * Navigation and taps are performed by Marionette over the Dart VM service, so
- * this controller reports every input path as unsupported. `mode` is tracked
- * only for interface parity.
- */
-class TvosInputStub implements InputController {
-  readonly platform: Platform = "tvos";
-  private _mode: InputMode = "dpad";
-  get mode(): InputMode {
-    return this._mode;
-  }
-  setMode(mode: InputMode): void {
-    this._mode = mode;
-  }
-  async key(): Promise<void> {
-    throw new UnsupportedInputError(
-      "Remote/D-pad keys are not wired on tvOS. Drive the app with Marionette " +
-        "(tap/enter_text/scroll) over the Dart VM service instead."
-    );
-  }
-  async pointerMove(): Promise<void> {
-    throw new UnsupportedInputError(
-      "Free-cursor pointer move is unsupported on tvOS (the Siri Remote is a " +
-        "focus/gesture model, not a free cursor). Use Marionette over the VM service."
-    );
-  }
-  async pointerClick(): Promise<void> {
-    throw new UnsupportedInputError(
-      "Pointer click is unsupported on tvOS. Use Marionette tap over the VM service."
-    );
-  }
-  async pointerScroll(): Promise<void> {
-    throw new UnsupportedInputError(
-      "Free-cursor scroll is unsupported on tvOS. Use Marionette scroll/swipe " +
-        "over the VM service."
-    );
-  }
 }

@@ -45,6 +45,14 @@ describe("buildPymobiledevice3ScreenshotCommand", () => {
     );
   });
 
+  it("adds --native, for a network-paired device usbmux cannot see", () => {
+    expect(
+      buildPymobiledevice3ScreenshotCommand("pymobiledevice3", "/tmp/out.png", "UDID", {
+        native: true,
+      })
+    ).toBe("'pymobiledevice3' developer dvt screenshot '/tmp/out.png' --native --udid 'UDID'");
+  });
+
   it("omits --udid entirely when no udid is given (single-device assumption)", () => {
     expect(
       buildPymobiledevice3ScreenshotCommand("pymobiledevice3", "/tmp/out.png")

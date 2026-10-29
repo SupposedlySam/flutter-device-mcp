@@ -111,6 +111,13 @@ export function allocateControlChannel(
   return makeControlFifo(fifoPath) ? { fifoPath, forwarder } : undefined;
 }
 
+/**
+ * Reads the VM-service URI out of the launch log. The default takes any
+ * loopback URI; a runner whose log also carries device-side URIs passes
+ * {@link parseAnnouncedVmServiceUri} instead.
+ */
+export type VmServiceUriParser = (text: string) => VmServiceUri | null;
+
 /** One evaluation of the launch log so far: URI found, failed, or keep polling. */
 export type LogEvaluation =
   | { kind: "uri"; uri: VmServiceUri }
@@ -124,9 +131,10 @@ export type LogEvaluation =
  */
 export function evaluateLaunchLog(
   contents: string,
-  failureSignatures: RegExp[]
+  failureSignatures: RegExp[],
+  parseUri: VmServiceUriParser = parseVmServiceUri
 ): LogEvaluation {
-  const uri = parseVmServiceUri(contents);
+  const uri = parseUri(contents);
   if (uri) return { kind: "uri", uri };
 
   for (const signature of failureSignatures) {
@@ -161,14 +169,30 @@ export interface SettleOptions {
 /** Default grace window after a settle match; see {@link SettleOptions}. */
 export const DEFAULT_SETTLE_GRACE_MS = 5000;
 
-/** Poll a growing log file for the VM Service URI or a failure signature. */
+/** How the launch process ended, once it has. */
+export interface RunnerExit {
+  code: number | null;
+  signal: NodeJS.Signals | null;
+}
+
+/**
+ * Poll a growing log file for the VM Service URI or a failure signature.
+ *
+ * `runnerExit` reports the launch process's end. Once it has ended the log is
+ * final, so a launch with no URI in it fails then instead of holding the caller
+ * until the deadline — which on a tvOS device launch is 40 minutes. The exit is
+ * sampled BEFORE each read, so the read that follows it sees everything the
+ * runner wrote.
+ */
 export async function pollLogForUri(
   logPath: string,
   timeoutMs: number,
   pid: number | undefined,
   failureSignatures: RegExp[],
   controlFifoPath?: string,
-  settle?: SettleOptions
+  settle?: SettleOptions,
+  parseUri?: VmServiceUriParser,
+  runnerExit?: () => RunnerExit | undefined
 ): Promise<LaunchOutcome> {
   const deadline = Date.now() + timeoutMs;
   const pollInterval = 500;
@@ -176,6 +200,7 @@ export async function pollLogForUri(
 
   // eslint-disable-next-line no-constant-condition
   while (true) {
+    const exited = runnerExit?.();
     let contents = "";
     try {
       contents = fs.readFileSync(logPath, "utf8");
@@ -183,7 +208,7 @@ export async function pollLogForUri(
       contents = "";
     }
 
-    const evaluation = evaluateLaunchLog(contents, failureSignatures);
+    const evaluation = evaluateLaunchLog(contents, failureSignatures, parseUri);
     if (evaluation.kind === "uri") {
       return {
         vmServiceUriWs: evaluation.uri.ws,
@@ -229,6 +254,18 @@ export async function pollLogForUri(
       }
     }
 
+    if (exited) {
+      const how =
+        exited.signal !== null ? `signal ${exited.signal}` : `exit code ${exited.code}`;
+      return {
+        failed: true,
+        reason: `The launch process ended (${how}) without printing a Dart VM Service URI`,
+        logPath,
+        pid,
+        logTail: tailString(contents, 60),
+      };
+    }
+
     if (Date.now() > deadline) {
       return {
         failed: true,
@@ -268,7 +305,8 @@ export async function launchAndCaptureUri(
   timeoutMs: number,
   failureSignatures: RegExp[],
   controlFifoPath?: string,
-  settle?: SettleOptions
+  settle?: SettleOptions,
+  parseUri?: VmServiceUriParser
 ): Promise<LaunchOutcome> {
   const logPath = createLogPath();
   const logStream = fs.openSync(logPath, "a");
@@ -289,6 +327,10 @@ export async function launchAndCaptureUri(
   });
 
   const pid = child.pid;
+  let exit: RunnerExit | undefined;
+  child.on("exit", (code, signal) => {
+    exit = { code, signal };
+  });
   // Detach so the launch outlives this poll and this server process.
   child.unref();
 
@@ -298,7 +340,9 @@ export async function launchAndCaptureUri(
     pid,
     failureSignatures,
     controlFifoPath,
-    settle
+    settle,
+    parseUri,
+    () => exit
   );
   try {
     fs.closeSync(logStream);

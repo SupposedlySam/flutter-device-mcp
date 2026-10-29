@@ -92,6 +92,13 @@ export interface InstallOptions {
   /** Install only; do not launch. (Present for parity with future modes.) */
   noLaunch?: boolean;
   /**
+   * The deploy will call {@link PlatformAdapter.launchAndCaptureUri} right after
+   * this install. An adapter whose launch builds and installs by itself (tvOS
+   * debug on a device) can then leave the install to it, rather than install an
+   * artifact the launch replaces.
+   */
+  launchFollows?: boolean;
+  /**
    * The 3-way build mode of the artifact to reinstall. Reinstalls the existing
    * package of that mode (skipping the long rebuild) so a debug OR profile
    * build can be redeployed + relaunched for a driver. `mode` wins over the
@@ -358,6 +365,14 @@ export interface PlatformAdapter {
   recoverLaunchFailure?(device: string, logTail: string): Promise<LaunchRecovery>;
 
   /**
+   * OPTIONAL launch timeout for a deploy whose caller passed none, for the
+   * device the last {@link discoverDevice} resolved. Undefined keeps the
+   * deploy's own default. tvOS needs it: a device launch always rebuilds, which
+   * the shared default cannot cover.
+   */
+  defaultLaunchTimeoutMs?(mode?: BuildMode): number | undefined;
+
+  /**
    * OPTIONAL check that uninstalling `check.packageId` from `device` is safe.
    * Space recovery is refused on a platform without it, because a package id
    * that cannot be confirmed is never uninstalled.
@@ -409,8 +424,9 @@ export interface PlatformAdapter {
    * would make `connect`/deploy fail cryptically, or `null` when it looks fine.
    *
    * Implemented by Tizen (Samsung Developer Mode "Host PC IP" must point at this
-   * Mac; a mismatch makes `sdb connect` fail with an opaque error). Other
-   * platforms don't implement it — absence means "no environment pre-check".
+   * Mac; a mismatch makes `sdb connect` fail with an opaque error) and tvOS
+   * (Xcode has not prepared debug symbols for the Apple TV's tvOS release, so a
+   * debug launch fails after the build). Absence means "no environment pre-check".
    * Best-effort and non-throwing: a transient failure to inspect the environment
    * resolves to `null`, never an error, so it can't fail a deploy.
    *
@@ -419,6 +435,14 @@ export interface PlatformAdapter {
    * when omitted, the implementation discovers the device itself (the info path).
    */
   environmentDiagnostic?(resolved?: DeviceResolution): Promise<string | null>;
+
+  /**
+   * OPTIONAL: why a VM-service `reloadSources` cannot work on `device`, or
+   * undefined when it might. The hot-reload fallback asks before connecting, so
+   * a target that cannot recompile on-device is told to redeploy rather than
+   * reported as reloaded.
+   */
+  vmServiceReloadRefusal?(device: string): Promise<string | undefined>;
 
   /**
    * OS-level app-lifecycle control. OPTIONAL — appliance platforms (Tizen,

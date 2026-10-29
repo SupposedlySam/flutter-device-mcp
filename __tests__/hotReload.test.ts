@@ -1,4 +1,4 @@
-import { hotReload, VmDriver } from "../src/hotReload.js";
+import { hotReload, reloadNeedsHostCompiler, VmDriver } from "../src/hotReload.js";
 
 /**
  * A scriptable fake VM driver. Records every RPC and returns canned replies
@@ -115,5 +115,51 @@ describe("hotReload", () => {
     });
     const outcome = await hotReload(driver);
     expect(outcome.reports[0].message).toContain("1 library was recompiled");
+  });
+});
+
+describe("reloadNeedsHostCompiler", () => {
+  const kernelFailure = {
+    success: false,
+    message: "Error while starting Kernel isolate task",
+  };
+
+  it("is true when every isolate failed for want of a kernel compiler", () => {
+    expect(
+      reloadNeedsHostCompiler({
+        kind: "reload",
+        success: false,
+        isolates: 2,
+        reports: [
+          { isolateId: "isolates/1", ...kernelFailure },
+          { isolateId: "isolates/2", ...kernelFailure },
+        ],
+      })
+    ).toBe(true);
+  });
+
+  it("is false when any isolate reloaded or failed for another reason", () => {
+    expect(
+      reloadNeedsHostCompiler({
+        kind: "reload",
+        success: false,
+        isolates: 2,
+        reports: [
+          { isolateId: "isolates/1", ...kernelFailure },
+          { isolateId: "isolates/2", success: true },
+        ],
+      })
+    ).toBe(false);
+    expect(
+      reloadNeedsHostCompiler({
+        kind: "reload",
+        success: false,
+        isolates: 1,
+        reports: [{ isolateId: "isolates/1", success: false, message: "compile error" }],
+      })
+    ).toBe(false);
+    expect(
+      reloadNeedsHostCompiler({ kind: "reload", success: false, isolates: 0, reports: [] })
+    ).toBe(false);
   });
 });

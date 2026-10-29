@@ -32,6 +32,7 @@ export type DeployAdapter = Pick<
   | "uninstall"
   | "launchAndCaptureUri"
   | "recoverLaunchFailure"
+  | "defaultLaunchTimeoutMs"
   | "verifyUninstallTarget"
   | "environmentDiagnostic"
 >;
@@ -94,6 +95,7 @@ export async function runDeployCore(deps: {
 
   const installOptions: InstallOptions = {
     noLaunch: true,
+    launchFollows: !args.no_launch,
     mode: args.mode,
     debug: args.debug,
     dartDefine: args.dart_define,
@@ -141,8 +143,9 @@ export async function runDeployCore(deps: {
   // The launch must name the mode of what was just installed (Tizen's
   // `--no-build` reuses only a TPK of the named mode); `mode` wins over the
   // legacy `debug` boolean.
-  const timeoutMs = args.timeout_ms ?? 180000;
   const launchMode = args.mode ?? (args.debug ? "debug" : undefined);
+  const timeoutMs =
+    args.timeout_ms ?? adapter.defaultLaunchTimeoutMs?.(launchMode) ?? 180000;
   const launch = () =>
     adapter.launchAndCaptureUri(device, timeoutMs, launchMode, args.dart_define);
   let outcome = await launch();

@@ -1,4 +1,70 @@
-import { parseVmServiceUri } from "../src/vmServiceUri.js";
+import {
+  parseAnnouncedVmServiceUri,
+  parseVmServiceUri,
+} from "../src/vmServiceUri.js";
+
+describe("parseAnnouncedVmServiceUri", () => {
+  it("takes the DDS loopback URI flutter announces", () => {
+    const line =
+      "A Dart VM Service on Living Room is available at: http://127.0.0.1:53182/Vr2ii1ySMoE=/";
+    expect(parseAnnouncedVmServiceUri(line)).toEqual({
+      http: "http://127.0.0.1:53182/Vr2ii1ySMoE=/",
+      ws: "ws://127.0.0.1:53182/Vr2ii1ySMoE=/ws",
+    });
+  });
+
+  it("takes a LAN address, a Bonjour name and a bracketed IPv6 host", () => {
+    expect(
+      parseAnnouncedVmServiceUri(
+        "A Dart VM Service on TV is available at: http://192.168.1.40:40123/"
+      )?.ws
+    ).toBe("ws://192.168.1.40:40123/ws");
+    expect(
+      parseAnnouncedVmServiceUri(
+        "A Dart VM Service on TV is available at: http://Living-Room.local:40123/tok=/"
+      )?.ws
+    ).toBe("ws://Living-Room.local:40123/tok=/ws");
+    expect(
+      parseAnnouncedVmServiceUri(
+        "A Dart VM Service on TV is available at: http://[fd12:3456::1]:40123/tok=/"
+      )?.ws
+    ).toBe("ws://[fd12:3456::1]:40123/tok=/ws");
+  });
+
+  it("ignores the device's own listening line, which names a port on the device", () => {
+    const log = [
+      "The Dart VM service is listening on http://127.0.0.1:52281/",
+      "flutter: booting",
+    ].join("\n");
+    expect(parseAnnouncedVmServiceUri(log)).toBeNull();
+    expect(parseVmServiceUri(log)?.http).toBe("http://127.0.0.1:52281/");
+  });
+
+  it("refuses the 0.0.0.0 bind address and reads past the DevTools line", () => {
+    expect(
+      parseAnnouncedVmServiceUri(
+        "A Dart VM Service on TV is available at: http://0.0.0.0:40123/tok=/"
+      )
+    ).toBeNull();
+    const log = [
+      "A Dart VM Service on TV is available at: http://127.0.0.1:61000/abc=/",
+      "The Flutter DevTools debugger and profiler on TV is available at: http://127.0.0.1:9101?uri=http://127.0.0.1:61000/abc=/",
+    ].join("\n");
+    expect(parseAnnouncedVmServiceUri(log)?.http).toBe(
+      "http://127.0.0.1:61000/abc=/"
+    );
+  });
+
+  it("takes the last announcement", () => {
+    const log = [
+      "A Dart VM Service on TV is available at: http://127.0.0.1:1111/old=/",
+      "A Dart VM Service on TV is available at: http://127.0.0.1:2222/new=/",
+    ].join("\n");
+    expect(parseAnnouncedVmServiceUri(log)?.http).toBe(
+      "http://127.0.0.1:2222/new=/"
+    );
+  });
+});
 
 describe("parseVmServiceUri", () => {
   it("extracts the URI from a flutter-tizen launch line and derives ws", () => {

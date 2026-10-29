@@ -108,7 +108,11 @@ describe("parseDevicectlAppleTvs", () => {
       devices: [
         {
           identifier: "A1B2C3D4-5E6F-7A8B-9C0D-1E2F3A4B5C6D",
-          deviceProperties: { name: "Example Apple TV" },
+          deviceProperties: {
+            name: "Example Apple TV",
+            osVersionNumber: "27.0",
+            osBuildUpdate: "24J361",
+          },
           connectionProperties: {
             pairingState: "paired",
             tunnelState: "disconnected",
@@ -117,6 +121,7 @@ describe("parseDevicectlAppleTvs", () => {
             deviceType: "appleTV",
             platform: "tvOS",
             productType: "AppleTV14,1",
+            udid: "00000000-0000000000000000",
           },
         },
         {
@@ -144,6 +149,23 @@ describe("parseDevicectlAppleTvs", () => {
     expect(devices[0].kind).toBe("device");
     // Paired => available, even though the tunnel is disconnected.
     expect(devices[0].available).toBe(true);
+  });
+
+  it("carries the hardware UDID through to the resolution, for pymobiledevice3", () => {
+    const devices = parseDevicectlAppleTvs(DEVICECTL);
+    expect(devices[0].hardwareUdid).toBe("00000000-0000000000000000");
+    const resolution = resolveTvosTarget(undefined, devices, []);
+    expect(resolution?.target).toBe("A1B2C3D4-5E6F-7A8B-9C0D-1E2F3A4B5C6D");
+    expect(resolution?.hardwareUdid).toBe("00000000-0000000000000000");
+  });
+
+  it("carries the product type, tvOS version and build through to the resolution", () => {
+    const resolution = resolveTvosTarget(undefined, parseDevicectlAppleTvs(DEVICECTL), []);
+    expect(resolution).toMatchObject({
+      productType: "AppleTV14,1",
+      osVersion: "27.0",
+      osBuild: "24J361",
+    });
   });
 
   it("does NOT pick the iPhone (excluded by deviceType/platform)", () => {

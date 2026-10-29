@@ -19,6 +19,7 @@ import path from "path";
 import { Platform } from "../types.js";
 import { AndroidLaunchMode, parseAndroidLaunchModeEnv } from "../androidLaunchMode.js";
 import { IosLaunchMode, parseIosLaunchModeEnv } from "../iosLaunchMode.js";
+import { TvosLaunchMode, parseTvosLaunchModeEnv } from "../tvosLaunchMode.js";
 import { findAppDir, isFlutterAppDir, isFvmManaged } from "./appDir.js";
 
 /** Where a resolved value came from (for provenance in `info`/doctor output). */
@@ -55,6 +56,10 @@ export interface PlatformSettings {
   iosLaunchMode?: IosLaunchMode;
   /** Directory holding the `flutter-tvos` bin, prepended to PATH for tvOS. */
   flutterTvosBinDir?: string;
+  /** tvOS launch/build mode when a call passes no explicit `mode`/`debug` arg. */
+  tvosLaunchMode?: TvosLaunchMode;
+  /** pyatv's identifier for the Apple TV; else atvremote addresses it by name. */
+  atvId?: string;
   /**
    * macOS: default `.app`/`.tar.gz`/`.dmg` PATH to stage when a deploy call
    * passes no `app_path`. This MCP does not build macOS apps, so a source has
@@ -135,6 +140,8 @@ interface ConfigFile {
         androidLaunchMode?: string;
         iosLaunchMode?: string;
         flutterTvosBinDir?: string;
+        tvosLaunchMode?: string;
+        atvId?: string;
         appPath?: string;
         appUrl?: string;
         processName?: string;
@@ -255,6 +262,11 @@ export function resolveConfig(opts: ResolveConfigOptions = {}): ResolvedConfig {
         ? parseIosLaunchModeEnv(env[`${ENV_PREFIX}_IOS_LAUNCH_MODE`]) ??
           parseIosLaunchModeEnv(fromFile.iosLaunchMode)
         : undefined;
+    const tvosLaunchMode =
+      p === "tvos"
+        ? parseTvosLaunchModeEnv(env[`${ENV_PREFIX}_TVOS_LAUNCH_MODE`]) ??
+          parseTvosLaunchModeEnv(fromFile.tvosLaunchMode)
+        : undefined;
     platforms[p] = {
       device: envValue(env, `${ENV_PREFIX}_${P}_DEVICE`) ?? fromFile.device,
       appId: envValue(env, `${ENV_PREFIX}_${P}_APP_ID`) ?? fromFile.appId,
@@ -284,6 +296,11 @@ export function resolveConfig(opts: ResolveConfigOptions = {}): ResolvedConfig {
         p === "tvos"
           ? envValue(env, `${ENV_PREFIX}_TVOS_FLUTTER_BIN`) ??
             fromFile.flutterTvosBinDir
+          : undefined,
+      tvosLaunchMode,
+      atvId:
+        p === "tvos"
+          ? envValue(env, `${ENV_PREFIX}_TVOS_ATV_ID`) ?? fromFile.atvId
           : undefined,
       macosAppPath:
         p === "macos"

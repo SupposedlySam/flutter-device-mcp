@@ -38,8 +38,19 @@ export async function logSize(logPath: string): Promise<number> {
   }
 }
 
+/**
+ * The text written after `fromByte`. The offset comes from the file's size, so
+ * it is cut from the bytes: a launch log carries emoji and other multi-byte
+ * output, and slicing the decoded string at a byte offset lands past the new
+ * lines, so the flutter tool's acknowledgement was never seen.
+ */
+function appendedSince(content: Buffer | string, fromByte: number): string {
+  const bytes = typeof content === "string" ? Buffer.from(content, "utf8") : content;
+  return bytes.subarray(fromByte).toString("utf8");
+}
+
 export interface ConfirmDeps {
-  read?: (path: string) => Promise<string>;
+  read?: (path: string) => Promise<Buffer | string>;
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
 }
@@ -64,7 +75,7 @@ export async function confirmHotAction(opts: {
   const { logPath, action, fromByte } = opts;
   const timeoutMs = opts.timeoutMs ?? 20000;
   const pollMs = opts.pollMs ?? 500;
-  const read = opts.deps?.read ?? ((p: string) => readFile(p, "utf8"));
+  const read = opts.deps?.read ?? ((p: string) => readFile(p));
   const sleep =
     opts.deps?.sleep ??
     ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
@@ -75,7 +86,7 @@ export async function confirmHotAction(opts: {
   for (;;) {
     let appended = "";
     try {
-      appended = (await read(logPath)).slice(fromByte);
+      appended = appendedSince(await read(logPath), fromByte);
     } catch {
       // An unreadable log cannot confirm anything. Keep waiting rather than
       // reporting a failure the app may not have.

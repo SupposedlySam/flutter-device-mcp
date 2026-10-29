@@ -43,3 +43,31 @@ export function parseVmServiceUri(text: string): VmServiceUri | null {
 
   return { http, ws };
 }
+
+// flutter's own announcement of the URI to connect to. The host is whatever
+// flutter made reachable: loopback when DDS fronts the service, or the device's
+// LAN address, Bonjour name or bracketed IPv6 when it does not. 0.0.0.0 is the
+// device-side bind address and is never connectable from the Mac.
+const ANNOUNCED_VM_SERVICE_PATTERN =
+  /A Dart VM Service on .+? is available at: (https?:\/\/(?!0\.0\.0\.0[:/])(?:\[[0-9A-Fa-f:.%]+\]|[A-Za-z0-9.-]+):\d+\/[A-Za-z0-9_=-]*\/?)/g;
+
+/**
+ * Extract the VM Service URI from the line flutter announces it on, and from
+ * nothing else.
+ *
+ * A device runner that echoes the app's console also echoes the VM's own
+ * "listening on http://127.0.0.1:PORT/" line, and that port is on the device,
+ * not the Mac. {@link parseVmServiceUri} would take it; this does not, because
+ * only the announcement carries an address flutter has made reachable. The last
+ * announcement wins, as it does there.
+ */
+export function parseAnnouncedVmServiceUri(text: string): VmServiceUri | null {
+  if (!text) return null;
+  let raw: string | undefined;
+  for (const match of text.matchAll(ANNOUNCED_VM_SERVICE_PATTERN)) {
+    raw = match[1];
+  }
+  if (!raw) return null;
+  const http = raw.endsWith("/") ? raw : `${raw}/`;
+  return { http, ws: `${http.replace(/^http/, "ws")}ws` };
+}

@@ -185,6 +185,11 @@ export interface LaunchResult {
    * which gives up nothing.
    */
   launchModeCaveat?: string;
+  /**
+   * Only the flutter run that started this launch can reload it: the device VM
+   * has no kernel compiler, so a VM-service reload cannot work there.
+   */
+  reloadNeedsOwningRun?: boolean;
 }
 
 export interface LaunchFailure {

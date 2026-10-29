@@ -7,6 +7,7 @@ import {
   pollLogForUri,
 } from "../src/launchCapture.js";
 import { isLaunchFailure } from "../src/types.js";
+import { parseAnnouncedVmServiceUri } from "../src/vmServiceUri.js";
 import { TIZEN_FAILURE_SIGNATURES } from "../src/adapters/tizen.js";
 import { mockBuildPtyCaptureCommand } from "./support/mockBuildPtyCaptureCommand.js";
 
@@ -298,6 +299,52 @@ describe("pollLogForUri", () => {
     fs.writeFileSync(logPath, "Install failed: -12\n");
     const outcome = await pollLogForUri(logPath, 2000, 99, SIGS);
     expect(isLaunchFailure(outcome)).toBe(true);
+    fs.rmSync(logPath, { force: true });
+  });
+
+  it("fails as soon as the runner has exited without a URI, well before the deadline", async () => {
+    const logPath = createLogPath();
+    fs.writeFileSync(logPath, "Building...\nError: something the signatures do not know\n");
+    const started = Date.now();
+    const outcome = await pollLogForUri(
+      logPath, 60000, 5, SIGS, undefined, undefined, undefined,
+      () => ({ code: 1, signal: null })
+    );
+    expect(Date.now() - started).toBeLessThan(5000);
+    expect(isLaunchFailure(outcome)).toBe(true);
+    if (isLaunchFailure(outcome)) {
+      expect(outcome.reason).toBe(
+        "The launch process ended (exit code 1) without printing a Dart VM Service URI"
+      );
+      expect(outcome.logTail).toContain("something the signatures do not know");
+    }
+    fs.rmSync(logPath, { force: true });
+  });
+
+  it("still takes a URI the runner printed before it exited", async () => {
+    const logPath = createLogPath();
+    fs.writeFileSync(logPath, URI_LINE);
+    const outcome = await pollLogForUri(
+      logPath, 60000, 5, SIGS, undefined, undefined, undefined,
+      () => ({ code: 0, signal: null })
+    );
+    expect(isLaunchFailure(outcome)).toBe(false);
+    fs.rmSync(logPath, { force: true });
+  });
+
+  it("uses the parser it is given, so a device-side listening line is not taken for the URI", async () => {
+    const logPath = createLogPath();
+    fs.writeFileSync(
+      logPath,
+      "The Dart VM service is listening on http://127.0.0.1:52281/\n" + URI_LINE
+    );
+    const outcome = await pollLogForUri(
+      logPath, 2000, 5, SIGS, undefined, undefined, parseAnnouncedVmServiceUri
+    );
+    expect(isLaunchFailure(outcome)).toBe(false);
+    if (!isLaunchFailure(outcome)) {
+      expect(outcome.vmServiceUriWs).toBe("ws://127.0.0.1:51182/tys47XX1iAw=/ws");
+    }
     fs.rmSync(logPath, { force: true });
   });
 

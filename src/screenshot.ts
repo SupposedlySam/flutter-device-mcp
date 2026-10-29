@@ -152,14 +152,20 @@ export function buildSimctlScreenshotCommand(udid: string, outPath: string): str
  * bins under a GUI-launched server), so it is passed in already-quoted-ready and
  * quoted here for safety. `--udid` targets a specific device when more than one
  * is attached; omitted when undefined (single-device assumption).
+ *
+ * `native` adds `--native`, which reaches the device through the tunnel Apple's
+ * own `remoted` already holds (macOS only, no root). A network-paired Apple TV
+ * has no USB connection for the default usbmux lookup to find, so tvOS needs it.
  */
 export function buildPymobiledevice3ScreenshotCommand(
   binary: string,
   outPath: string,
-  udid?: string
+  udid?: string,
+  opts: { native?: boolean } = {}
 ): string {
   const udidArg = udid ? ` --udid ${quote(udid)}` : "";
-  return `${quote(binary)} developer dvt screenshot ${quote(outPath)}${udidArg}`;
+  const nativeArg = opts.native ? " --native" : "";
+  return `${quote(binary)} developer dvt screenshot ${quote(outPath)}${nativeArg}${udidArg}`;
 }
 
 /**

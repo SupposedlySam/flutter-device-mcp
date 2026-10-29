@@ -106,6 +106,21 @@ async function reassemble(driver: VmDriver): Promise<void> {
   }
 }
 
+/**
+ * True when every isolate refused the reload because the device VM has no kernel
+ * compiler. `reloadSources` without a host-compiled kernel asks the VM to compile
+ * the sources itself, which a device debug build cannot do, so nothing reloaded
+ * and retrying over the VM service cannot change that.
+ */
+export function reloadNeedsHostCompiler(outcome: ReloadOutcome): boolean {
+  return (
+    outcome.reports.length > 0 &&
+    outcome.reports.every(
+      (report) => !report.success && /Kernel isolate/i.test(report.message ?? "")
+    )
+  );
+}
+
 /** Pull a human-readable notice out of a ReloadReport, when present. */
 function extractNotice(result: object): string | undefined {
   const notices = (result as { notices?: unknown }).notices;

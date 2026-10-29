@@ -1,3 +1,7 @@
+import fs from "fs";
+import os from "os";
+import path from "path";
+
 import { ackPatternFor, confirmHotAction } from "../src/hotConfirm.js";
 
 const noSleep = async () => {};
@@ -29,6 +33,22 @@ describe("confirmHotAction", () => {
         sleep: noSleep,
       },
     });
+    expect(ok).toBe(true);
+  });
+
+  it("confirms an acknowledgement that follows multi-byte log output", async () => {
+    // The offset is the log's size in BYTES. An Apple TV run's log is full of
+    // emoji level markers, so cutting the decoded text at that offset skipped
+    // the new lines and a reload the flutter tool had performed read as unconfirmed.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hot-confirm-"));
+    const logPath = path.join(dir, "launch.log");
+    fs.writeFileSync(logPath, "flutter: 🟢 DEBUG pushed\n".repeat(200));
+    const fromByte = fs.statSync(logPath).size;
+    fs.appendFileSync(logPath, "Performing hot reload...\nReloaded 197 of 7518 libraries\n");
+
+    const ok = await confirmHotAction({ logPath, action: "reload", fromByte, timeoutMs: 0 });
+
+    fs.rmSync(dir, { recursive: true });
     expect(ok).toBe(true);
   });
 

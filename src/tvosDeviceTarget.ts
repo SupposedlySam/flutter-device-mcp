@@ -66,6 +66,17 @@ export interface TvosDeviceResolution extends DeviceResolution {
   kind: TvosDeviceKind;
   /** Human-readable device name, when parsed (e.g. "Example Apple TV"). */
   name?: string;
+  /**
+   * The hardware UDID of a physical Apple TV — the id lockdown-level tools such
+   * as pymobiledevice3 address it by, which is not the CoreDevice id.
+   */
+  hardwareUdid?: string;
+  /** devicectl's `hardwareProperties.productType`, e.g. "AppleTV14,1"; physical only. */
+  productType?: string;
+  /** The tvOS version on a physical Apple TV, e.g. "27.0". */
+  osVersion?: string;
+  /** The tvOS build on a physical Apple TV, e.g. "24J361". */
+  osBuild?: string;
 }
 
 /** One parsed Apple TV / tvOS-simulator target. */
@@ -76,6 +87,11 @@ export interface TvosDevice {
   kind: TvosDeviceKind;
   /** True when the device is connected (devicectl) / booted (simctl). */
   available: boolean;
+  /** devicectl's `hardwareProperties.udid`; physical devices only. */
+  hardwareUdid?: string;
+  productType?: string;
+  osVersion?: string;
+  osBuild?: string;
 }
 
 /**
@@ -154,10 +170,17 @@ export function isDevicectlAppleTv(
 /** One raw device entry from `xcrun devicectl list devices --json-output`. */
 interface DevicectlDevice {
   identifier?: unknown;
-  deviceProperties?: { name?: unknown } | null;
+  deviceProperties?:
+    | { name?: unknown; osVersionNumber?: unknown; osBuildUpdate?: unknown }
+    | null;
   connectionProperties?: { pairingState?: unknown } | null;
   hardwareProperties?:
-    | { deviceType?: unknown; platform?: unknown; productType?: unknown }
+    | {
+        deviceType?: unknown;
+        platform?: unknown;
+        productType?: unknown;
+        udid?: unknown;
+      }
     | null;
 }
 
@@ -206,9 +229,22 @@ export function parseDevicectlAppleTvs(jsonOutput: string): TvosDevice[] {
       name,
       kind: "device",
       available: pairingState === "paired",
+      ...(typeof hw?.udid === "string" ? { hardwareUdid: hw.udid } : {}),
+      ...stringField("productType", hw?.productType),
+      ...stringField("osVersion", entry.deviceProperties?.osVersionNumber),
+      ...stringField("osBuild", entry.deviceProperties?.osBuildUpdate),
     });
   }
   return out;
+}
+
+function stringField<K extends string>(
+  key: K,
+  value: unknown
+): Partial<Record<K, string>> {
+  return typeof value === "string" && value.length > 0
+    ? ({ [key]: value } as Record<K, string>)
+    : {};
 }
 
 /**
@@ -275,6 +311,10 @@ function toResolution(
     source,
     kind: d.kind,
     name: d.name,
+    ...(d.hardwareUdid ? { hardwareUdid: d.hardwareUdid } : {}),
+    ...(d.productType ? { productType: d.productType } : {}),
+    ...(d.osVersion ? { osVersion: d.osVersion } : {}),
+    ...(d.osBuild ? { osBuild: d.osBuild } : {}),
     ...(warning ? { warning } : {}),
   };
 }

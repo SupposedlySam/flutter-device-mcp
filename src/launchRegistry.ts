@@ -40,6 +40,8 @@ export interface LaunchRecord {
    * Durable on disk so it survives MCP restarts, like the VM-service URI.
    */
   controlFifoPath?: string;
+  /** See LaunchResult.reloadNeedsOwningRun. */
+  reloadNeedsOwningRun?: boolean;
   /** Epoch ms the record was written (latest wins). */
   recordedAt: number;
 }
