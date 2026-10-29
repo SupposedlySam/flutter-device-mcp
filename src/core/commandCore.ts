@@ -9,6 +9,8 @@
  * pty VM-service-URI capture, named-device refusal, Marionette drivability probe)
  * run identically for both callers because they run HERE, not in the frontends.
  */
+import fs from "fs";
+import os from "os";
 import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import { logger } from "../logger.js";
 import { CommandResult, tail } from "../cli.js";
@@ -69,6 +71,13 @@ import {
   MarionetteProbeResult,
   probeMarionetteReady,
 } from "../marionetteProbe.js";
+import {
+  isLoopbackHost,
+  localBackendDefines,
+  LocalBackendPlan,
+  resolveLocalBackendHost,
+  TargetKind,
+} from "../localBackend.js";
 
 /**
  * Per-request VM-service timeout for the post-deploy Marionette probe. Kept well
@@ -113,6 +122,13 @@ export type CommandOutput = Record<string, unknown>;
 export interface CommonArgs {
   platform?: string;
 }
+
+/** What a `local_backend` deploy injects, reports, or stops on. */
+type LocalBackendDeployPlan = {
+  defines: Record<string, string>;
+  report: Record<string, unknown>;
+  fatal?: string;
+};
 
 export class CommandCore {
   constructor(
@@ -263,6 +279,127 @@ export class CommandCore {
   }
 
   // =========== deploy ==========
+  /**
+   * Resolve where a local backend lives from the DEVICE's point of view, and set
+   * up any tunnel that answer depends on.
+   *
+   * Returns `fatal` rather than injecting a guessed host. The whole hazard this
+   * addresses is that a wrong host does not look like a wrong host: the app
+   * reports a connection error, and every reading of that points at the backend
+   * or the app rather than at the address. So an unresolvable target STOPS the
+   * deploy with the question, instead of shipping a build that will fail later
+   * and elsewhere.
+   */
+  private async planLocalBackend(
+    adapter: PlatformAdapter,
+    device: string,
+    args: {
+      local_backend_ports?: number[];
+      local_backend_host?: string;
+      local_backend_keys?: { env?: string; host?: string };
+    }
+  ): Promise<LocalBackendDeployPlan> {
+    const kind: TargetKind = adapter.targetKind
+      ? adapter.targetKind(device)
+      : "device";
+    const ports = args.local_backend_ports ?? [];
+    const keys = { envKey: args.local_backend_keys?.env, hostKey: args.local_backend_keys?.host };
+
+    let plan: LocalBackendPlan = resolveLocalBackendHost(
+      { platform: adapter.platform, kind },
+      os.networkInterfaces(),
+      ports
+    );
+
+    // An explicit host is the caller answering the question this cannot: which
+    // address the device can actually reach. It overrides the resolved host and
+    // keeps whatever tunnelling the target still needs.
+    if (args.local_backend_host) {
+      plan = {
+        ...plan,
+        host: args.local_backend_host,
+        rationale: `Host supplied explicitly by the caller (${args.local_backend_host}); ` +
+          `resolution for this ${adapter.platform} ${kind} target would otherwise say: ${plan.rationale}`,
+        unresolved: undefined,
+      };
+      // The tunnel exists only to make a LOOPBACK name true on the device. A
+      // caller who named a routable address does not depend on it, so it is not
+      // attempted: attempting it would let a failed `adb reverse` abort a deploy
+      // whose host never needed one.
+      if (!isLoopbackHost(args.local_backend_host)) {
+        plan.reversePorts = [];
+      }
+    }
+
+    const report: Record<string, unknown> = {
+      targetKind: kind,
+      host: plan.host,
+      rationale: plan.rationale,
+      reversePorts: plan.reversePorts,
+      defineKeys: {
+        env: keys.envKey ?? "USE_LOCAL_ENV",
+        host: keys.hostKey ?? "LOCAL_HOST",
+      },
+    };
+
+    if (!plan.host) {
+      return {
+        defines: {},
+        report,
+        fatal:
+          `Could not resolve a local-backend host for this ${adapter.platform} ` +
+          `${kind} target. ${plan.unresolved ?? ""} ` +
+          "Pass local_backend_host explicitly, or drop local_backend. Nothing was " +
+          "installed — a build carrying a wrong host fails later, somewhere that " +
+          "says nothing about the address.",
+      };
+    }
+
+    // Checked AFTER resolution so the refusal can hand over the host it worked
+    // out, and BEFORE any tunnel, so a refused deploy changes nothing on the
+    // device.
+    if (!adapter.deployCompilesDefines) {
+      const defines = localBackendDefines(plan, keys);
+      return {
+        defines: {},
+        report: { ...report, buildDartDefine: defines },
+        fatal:
+          `local_backend cannot take effect on a ${adapter.platform} deploy: it installs an ` +
+          "app compiled EARLIER, and a host is a compile-time constant, so a deploy-time " +
+          "define would change nothing while this response claimed it had. Nothing was " +
+          `installed. Resolved for this target: ${plan.host}. Rebuild with flutter_build ` +
+          `passing dart_define ${JSON.stringify(defines)}, then deploy without local_backend.`,
+      };
+    }
+
+    if (plan.reversePorts.length > 0) {
+      if (!adapter.setupReverseTunnels) {
+        return {
+          defines: {},
+          report,
+          fatal:
+            `This target needs an \`adb reverse\` tunnel for ${plan.reversePorts.join(", ")}, ` +
+            `but the ${adapter.platform} adapter cannot make one. Pass a routable ` +
+            "local_backend_host instead.",
+        };
+      }
+      const tunnel = await adapter.setupReverseTunnels(device, plan.reversePorts);
+      report.tunnel = tunnel.detail;
+      if (!tunnel.ok) {
+        return {
+          defines: {},
+          report,
+          fatal:
+            `${tunnel.detail} The host \`${plan.host}\` depends on that tunnel, so ` +
+            "nothing was installed rather than shipping a build pointed at a " +
+            "loopback address that does not reach this machine.",
+        };
+      }
+    }
+
+    return { defines: localBackendDefines(plan, keys), report };
+  }
+
   async deploy(
     args: CommonArgs & {
       no_launch?: boolean;
@@ -275,6 +412,10 @@ export class CommandCore {
       app_path?: string;
       app_url?: string;
       allow_store_app_removal?: boolean;
+      local_backend?: boolean;
+      local_backend_ports?: number[];
+      local_backend_host?: string;
+      local_backend_keys?: { env?: string; host?: string };
     }
   ): Promise<CommandOutput> {
     const adapter = this.adapterFor(args);
@@ -283,9 +424,43 @@ export class CommandCore {
       // runDeployCore) resolves the target and tears down only the drivers
       // holding IT, so a deploy to the emulator leaves the `flutter run` on the
       // phone beside it running.
-      const core = await runDeployCore({ adapter, args });
+      const localBackend: { plan?: LocalBackendDeployPlan } = {};
+      const core = await runDeployCore({
+        adapter,
+        args,
+        beforeInstall: args.local_backend
+          ? async (target: string) => {
+              const plan = await this.planLocalBackend(adapter, target, args);
+              localBackend.plan = plan;
+              if (plan.fatal) return { stop: true };
+              // Explicit dart_define WINS: a caller who named a key was specific,
+              // and silently overwriting it would make the flag change what their
+              // own define means.
+              return {
+                stop: false,
+                dartDefine:
+                  Object.keys(plan.defines).length > 0
+                    ? { ...plan.defines, ...(args.dart_define ?? {}) }
+                    : args.dart_define,
+              };
+            }
+          : undefined,
+      });
       const device = core.resolution.target;
       const deviceWarning = core.resolution.warning;
+      if (core.stage === "stopped-before-install") {
+        return {
+          platform: adapter.platform,
+          stage: "local-backend",
+          success: false,
+          device,
+          deviceWarning,
+          environmentDiagnostic: core.environmentDiagnostic,
+          staleKilled: core.killed,
+          localBackend: localBackend.plan?.report,
+          reason: localBackend.plan?.fatal,
+        };
+      }
       const common = {
         platform: adapter.platform,
         device,
@@ -294,6 +469,7 @@ export class CommandCore {
         staleKilled: core.killed,
         enospcRecoveryAttempted: core.enospcRecoveryAttempted,
         enospcRecoveryRefused: core.enospcRecoveryRefused,
+        localBackend: localBackend.plan?.report,
       };
 
       if (core.stage === "install-failed") {
@@ -328,6 +504,11 @@ export class CommandCore {
           launched: false,
           launchRecovery,
           reason: outcome.reason,
+          runtimeDiagnostic: adapter.runtimeCrashDiagnostic
+            ? (adapter.runtimeCrashDiagnostic(
+                outcome.logTail ?? outcome.reason ?? ""
+              ) ?? undefined)
+            : undefined,
           pid: outcome.pid,
           logPath: outcome.logPath,
           logTail: outcome.logTail,
@@ -444,6 +625,7 @@ export class CommandCore {
         staleKilled: core.killed,
         enospcRecoveryAttempted: core.enospcRecoveryAttempted,
         enospcRecoveryRefused: core.enospcRecoveryRefused,
+        localBackend: localBackend.plan?.report,
         launchRecovery,
         vmServiceUriWs: outcome.vmServiceUriWs,
         vmServiceUriHttp: outcome.vmServiceUriHttp,
@@ -943,6 +1125,119 @@ export class CommandCore {
                 "A hot ") +
             "RESTART: re-runs main() and drops in-memory state, while KEEPING the process, its VM " +
             "service URI, and any driver connection alive (no redeploy, no new URI).",
+        };
+      }
+    );
+  }
+
+  // =========== diagnose ==========
+  /**
+   * Read a launch log and name any RUNTIME crash class in it.
+   *
+   * WHY THIS TOOL EXISTS, and it is the whole point: the launch poll stops the
+   * moment the VM-service URI appears, deliberately — a found URI outranks every
+   * failure signature, because the launch genuinely succeeded. But an Impeller
+   * constant-buffer overflow fires when a shader is first RASTERIZED, which is
+   * normally AFTER that. So the crash that most needs naming lands in the window
+   * where nothing is watching any more: `flutter_deploy` returns success, the app
+   * is dead, and the log holds the only evidence.
+   *
+   * Wiring the detector solely into the launch-failure branch would have shipped a
+   * check that cannot fire in its own common case. This is the surface that fires.
+   *
+   * `log_path` defaults to the log of the most recent recorded launch, so the
+   * ordinary call is argument-free right after a deploy.
+   */
+  async diagnose(
+    args: CommonArgs & { device?: string; log_path?: string }
+  ): Promise<CommandOutput> {
+    const adapter = this.adapterFor(args);
+    return this.guard(
+      "flutter_diagnose",
+      { platform: adapter.platform, device: args.device },
+      async () => {
+        let logPath = args.log_path;
+        let device: string | undefined;
+
+        if (!logPath) {
+          const found = this.findLaunchRecord(adapter, args.device);
+          if (found.miss) {
+            return {
+              platform: adapter.platform,
+              success: false,
+              reason:
+                "No launch is recorded for this platform and no log_path was given, so there is " +
+                "nothing to read. Run flutter_deploy first, or pass log_path explicitly.",
+            };
+          }
+          device = found.record.device;
+          logPath = found.record.logPath;
+          if (!logPath) {
+            return {
+              platform: adapter.platform,
+              success: false,
+              device,
+              reason:
+                "The recorded launch carries no log path (it predates log capture). Redeploy with " +
+                "flutter_deploy, or pass log_path explicitly.",
+            };
+          }
+        }
+
+        let contents: string;
+        try {
+          contents = fs.readFileSync(logPath, "utf8");
+        } catch {
+          // A log that cannot be READ is not a log with no crash in it. Saying
+          // "no known crash" here would report ignorance as a clean bill of health.
+          return {
+            platform: adapter.platform,
+            success: false,
+            device,
+            logPath,
+            reason:
+              `Could not read the launch log at ${logPath}. This is NOT a finding that the log ` +
+              "is clean — nothing was examined. The launch process may have cleaned it up, or " +
+              "the path may be from a previous boot's temp dir.",
+          };
+        }
+
+        if (!adapter.runtimeCrashDiagnostic) {
+          return {
+            platform: adapter.platform,
+            success: true,
+            device,
+            logPath,
+            crashFound: false,
+            note:
+              `No runtime-crash classifier is wired for ${adapter.platform}, so this log was NOT ` +
+              "examined. Absence of a finding here says nothing about the log's contents.",
+          };
+        }
+
+        const diagnostic = adapter.runtimeCrashDiagnostic(contents);
+        if (!diagnostic) {
+          return {
+            platform: adapter.platform,
+            success: true,
+            device,
+            logPath,
+            crashFound: false,
+            note:
+              "No KNOWN runtime crash class matched this log. That is not the same as the app " +
+              "being healthy — it means nothing in the classifier's set is present. " +
+              `Read ${logPath} directly if the app is misbehaving.`,
+          };
+        }
+
+        return {
+          platform: adapter.platform,
+          success: true,
+          device,
+          logPath,
+          crashFound: true,
+          runtimeDiagnostic: diagnostic,
+          logTail: tail(contents, 40),
         };
       }
     );

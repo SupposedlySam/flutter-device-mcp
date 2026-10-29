@@ -54,10 +54,27 @@ export interface DeployArgs {
   allow_store_app_removal?: boolean;
 }
 
-export type DeployCoreResult = {
+/**
+ * Runs once the device is resolved and before anything is installed. On iOS and
+ * Android the install IS the `flutter run` that compiles the app, so a define
+ * that depends on the device (a local-backend host) has to be decided here or
+ * it never reaches the binary. `stop` ends the deploy with nothing installed.
+ */
+export type BeforeInstall = (
+  device: string
+) => Promise<{ stop: true } | { stop: false; dartDefine?: Record<string, string> }>;
+
+type DeployPrelude = {
   resolution: DeviceResolution;
   killed: Record<string, CommandResult>;
   environmentDiagnostic?: string;
+};
+
+export type DeployCoreResult =
+  | (DeployPrelude & { stage: "stopped-before-install" })
+  | DeployInstallResult;
+
+export type DeployInstallResult = DeployPrelude & {
   install: CommandResult;
   enospcRecoveryAttempted: boolean;
   /** Why an install-stage space recovery was not attempted. */
@@ -80,6 +97,16 @@ const NEUTRAL_STORAGE_FAILURE = /No space left on device/i;
 export async function runDeployCore(deps: {
   adapter: DeployAdapter;
   args: DeployArgs;
+}): Promise<DeployInstallResult>;
+export async function runDeployCore(deps: {
+  adapter: DeployAdapter;
+  args: DeployArgs;
+  beforeInstall?: BeforeInstall;
+}): Promise<DeployCoreResult>;
+export async function runDeployCore(deps: {
+  adapter: DeployAdapter;
+  args: DeployArgs;
+  beforeInstall?: BeforeInstall;
 }): Promise<DeployCoreResult> {
   const { adapter, args } = deps;
 
@@ -97,12 +124,18 @@ export async function runDeployCore(deps: {
     ? (await adapter.environmentDiagnostic(resolution)) ?? undefined
     : undefined;
 
+  const prepared = deps.beforeInstall ? await deps.beforeInstall(device) : undefined;
+  if (prepared?.stop) {
+    return { resolution, killed, environmentDiagnostic, stage: "stopped-before-install" };
+  }
+  const dartDefine = prepared?.dartDefine ?? args.dart_define;
+
   const installOptions: InstallOptions = {
     noLaunch: true,
     launchFollows: !args.no_launch,
     mode: args.mode,
     debug: args.debug,
-    dartDefine: args.dart_define,
+    dartDefine,
     // macOS-only (ignored by every other adapter): the .app source for this
     // deploy, overriding the configured
     // FLUTTER_DEVICE_MACOS_APP_PATH/FLUTTER_DEVICE_MACOS_APP_URL defaults.
@@ -154,7 +187,7 @@ export async function runDeployCore(deps: {
   const timeoutMs =
     args.timeout_ms ?? adapter.defaultLaunchTimeoutMs?.(launchMode) ?? 180000;
   const launch = () =>
-    adapter.launchAndCaptureUri(device, timeoutMs, launchMode, args.dart_define);
+    adapter.launchAndCaptureUri(device, timeoutMs, launchMode, dartDefine);
   let outcome = await launch();
 
   let launchRecovery: { recovered: boolean; note?: string } | undefined;

@@ -17,6 +17,7 @@ import {
   LaunchOutcome,
   Platform,
 } from "../types.js";
+import { TargetKind } from "../localBackend.js";
 import { ScreenshotResult } from "../screenshot.js";
 import { DeviceGeometryReading } from "../deviceGeometry.js";
 import { RecordFormat, RecordResult } from "../recording.js";
@@ -364,6 +365,59 @@ export interface PlatformAdapter {
    * simply omits the field then.
    */
   installFailureDiagnostic?(combined: string): string | null;
+
+  /**
+   * OPTIONAL classification of a RUNTIME crash read out of a launch log into an
+   * ACTIONABLE message. Returns `null` when nothing known matches.
+   *
+   * Distinct from {@link installFailureDiagnostic} in the event it describes, not
+   * merely in wording: this one's subject is an app that BUILT, INSTALLED and
+   * STARTED, then died — so the two must never share a precedence chain, or a
+   * stale crash in a log spanning a retry can outrank the build failure that is
+   * the real reason the current deploy produced nothing.
+   *
+   * Absent on platforms with nothing to add; the caller omits the field then.
+   */
+  runtimeCrashDiagnostic?(log: string): string | null;
+
+  /**
+   * OPTIONAL: how the resolved target reaches the network — which is the fact
+   * that decides what "the host my backend is on" means for it. See
+   * {@link ../localBackend}.
+   *
+   * Absent on platforms with no simulator/emulator distinction (Tizen, webOS):
+   * a television is always a separate machine, and the caller's default of
+   * `"device"` is correct there rather than merely a fallback.
+   */
+  targetKind?(device: string): TargetKind;
+
+  /**
+   * OPTIONAL: `true` when this adapter's DEPLOY compiles the app (iOS/Android,
+   * where the launch is a `flutter run`), so a dart-define handed to deploy
+   * reaches the binary that runs. Absent means deploy installs an artifact that
+   * was compiled earlier (Tizen TPK, webOS IPK, tvOS bundle, a prebuilt macOS
+   * `.app`) and a deploy-time define changes nothing.
+   *
+   * `local_backend` reads this and REFUSES where it is absent. Without it, the
+   * deploy reported an injected host on four platforms where nothing was
+   * injected, and the app kept its old host while the response said otherwise.
+   */
+  readonly deployCompilesDefines?: boolean;
+
+  /**
+   * OPTIONAL: tunnel `ports` from the DEVICE back to this host, so a loopback
+   * host string means this machine from the device's point of view (`adb
+   * reverse`). Android hardware only.
+   *
+   * Returns whether every port was tunnelled plus a detail string for surfacing.
+   * A partial success is reported as a FAILURE: an app pointed at loopback with
+   * only some of its ports tunnelled fails on the untunnelled one, and that
+   * reads as a bug in the app rather than a missing tunnel.
+   */
+  setupReverseTunnels?(
+    device: string,
+    ports: number[]
+  ): Promise<{ ok: boolean; detail: string }>;
 
   /**
    * Launch the app through a pty and capture the Dart VM Service URI for

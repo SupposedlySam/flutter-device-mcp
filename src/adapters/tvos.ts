@@ -62,6 +62,7 @@
  * hardware UDID (not the CoreDevice id).
  */
 import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
+import { TargetKind } from "../localBackend.js";
 import fs from "fs";
 import os from "os";
 import path from "path";
@@ -765,6 +766,15 @@ export class TvosAdapter implements PlatformAdapter {
       launchModeCaveat: tvosLaunchModeCaveat(requested, requested) ?? undefined,
       reloadNeedsOwningRun: true,
     };
+  }
+
+  /**
+   * A tvOS simulator is this machine, so loopback reaches a local backend; a
+   * physical Apple TV needs a routable address. `lastKind` is set by
+   * {@link discoverDevice}, so this answers for the target actually resolved.
+   */
+  targetKind(): TargetKind {
+    return this.lastKind === "simulator" ? "simulator" : "device";
   }
 
   private async launchDevice(

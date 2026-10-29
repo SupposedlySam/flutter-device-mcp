@@ -165,6 +165,14 @@ class FlutterDeviceServer {
               allow_store_app_removal: args.allow_store_app_removal as
                 | boolean
                 | undefined,
+              local_backend: args.local_backend as boolean | undefined,
+              local_backend_ports: args.local_backend_ports as
+                | number[]
+                | undefined,
+              local_backend_host: args.local_backend_host as string | undefined,
+              local_backend_keys: args.local_backend_keys as
+                | { env?: string; host?: string }
+                | undefined,
             })
           );
         case "flutter_uninstall":
@@ -206,6 +214,14 @@ class FlutterDeviceServer {
             await core.hotRestart({
               ...common,
               device: args.device as string | undefined,
+            })
+          );
+        case "flutter_diagnose":
+          return this.json(
+            await core.diagnose({
+              ...common,
+              device: args.device as string | undefined,
+              log_path: args.log_path as string | undefined,
             })
           );
         case "flutter_screenshot":

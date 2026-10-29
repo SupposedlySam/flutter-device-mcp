@@ -17,6 +17,7 @@ export type CanonicalTool =
   | "flutter_kill_stale"
   | "flutter_hot_reload"
   | "flutter_hot_restart"
+  | "flutter_diagnose"
   | "flutter_screenshot"
   | "flutter_record"
   | "flutter_terminate"
@@ -48,6 +49,7 @@ const CANONICAL: Record<string, CanonicalTool> = {
   flutter_kill_stale: "flutter_kill_stale",
   flutter_hot_reload: "flutter_hot_reload",
   flutter_hot_restart: "flutter_hot_restart",
+  flutter_diagnose: "flutter_diagnose",
   flutter_screenshot: "flutter_screenshot",
   flutter_record: "flutter_record",
   flutter_terminate: "flutter_terminate",

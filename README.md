@@ -327,7 +327,7 @@ flutter-device record --platform android --duration-s 10 --output-path ./demo.mp
 
 ## MCP tools
 
-The server advertises **19 tools**. Each takes an optional `platform` arg
+The server advertises **20 tools**. Each takes an optional `platform` arg
 (`ios` | `android` | `tizen` | `tvos` | `webos` | `macos`); omit it to use the
 default platform from your config.
 
@@ -357,8 +357,9 @@ removes it.
 | `flutter_info` | Device + environment status and resolved config with provenance |
 | `flutter_setup` | Prepare the device for development |
 | `flutter_build` | Build the app package. `mode` picks release/profile/debug — reach for `profile` when measuring, since it is AOT-timed *and* keeps the VM service open. `dart_define` passes compile-time constants. macOS: `{supported:false}` — building/signing an arbitrary desktop app is out of scope |
-| `flutter_deploy` | **Install + launch through a pty and return the captured `ws://…/ws` VM Service URI** to hand to a driver. Runs the guardrails: kills the stale drivers holding **the device it is deploying to** first (a session on another device survives), recovers from `ENOSPC`, records the launch for hot reload/restart, and probes whether the build is Marionette-drivable. iOS honors `mode` for the launch itself (see [iOS launch modes](#ios-launch-modes)). macOS: stages + launches a prebuilt signed `.app` (`app_path`/`app_url`); no VM Service URI exists there |
+| `flutter_deploy` | **Install + launch through a pty and return the captured `ws://…/ws` VM Service URI** to hand to a driver. Runs the guardrails: kills the stale drivers holding **the device it is deploying to** first (a session on another device survives), recovers from `ENOSPC`, records the launch for hot reload/restart, and probes whether the build is Marionette-drivable. iOS honors `mode` for the launch itself (see [iOS launch modes](#ios-launch-modes)). macOS: stages + launches a prebuilt signed `.app` (`app_path`/`app_url`); no VM Service URI exists there. `local_backend` points the app at a server on **this** machine, doing the per-target host arithmetic (simulator → `localhost`, Android emulator → `10.0.2.2`, Android hardware → `adb reverse` + `localhost`, physical device/TV → this machine's LAN IP) — see [Local backend](#local-backend-local_backend) |
 | `flutter_open_url` | **Open a URL on the device — the deep-link driver.** Drives custom schemes (`myapp://…`) and `https://…` App Links / universal links through the real OS plumbing, so intent-filters and domain associations are actually exercised. Android (scoped to the package deploy installed) + Apple **simulators**; a physical iPhone/Apple TV reports `{supported:false}` because Apple provides no url-open verb — see [Deep links](#deep-links-flutter_open_url) |
+| `flutter_diagnose` | **Name a runtime crash the deploy could not catch.** `flutter_deploy` stops polling at the VM Service URI — correctly, the launch succeeded — but a rendering crash fires after that, so the app dies with nothing watching. Run this when deploy reported success and the app is dead or blank. Today: the iOS Impeller/Metal constant-buffer overflow — see [Runtime crashes](#runtime-crashes-flutter_diagnose) |
 | `flutter_uninstall` | Remove the app from the device. Needs the device named when more than one is online, and leaves a copy somebody else installed (Android: not by adb; physical iOS: App Store/TestFlight) alone unless `allow_store_app_removal` is set |
 | `flutter_kill_stale` | Kill leftover launch processes. **iOS/Android: for ONE device** — the resolved target, or the one `device_udid` names — the `flutter run` driver whose process tree holds it, plus its children; another device's session is left running, and a driver that can't be tied to a device is reported with its pid rather than killed. **Tizen/webOS/tvOS/macOS: platform-wide** (`flutter-tizen`, `ares-launch`/`flutter-webos`, `flutter-tvos` and their children, or the staged macOS process) — those names can't belong to another platform, so no device is needed and the response says `scope: platform-wide`. `all_devices: true` is the iOS/Android opt-in hammer. With nothing attached on iOS/Android it kills nothing and says why. See [Teardown scope](#teardown-scope-one-deploy-at-a-time-per-device) |
 | `flutter_hot_reload` | Real hot reload, **confirmed against the flutter tool's own acknowledgement in the launch log** before it is reported — not merely that the keystroke was written. Falls back to a weaker VM-service reload when unconfirmed or when no control channel exists. On a physical Apple TV only the control channel can reload (the device has no kernel compiler), so the fallback is refused and says so |
@@ -657,6 +658,85 @@ reload and restart reach it.
   `FLUTTER_DEVICE_TVOS_ATV_ID` or else the device's name. Install it with
   `pipx install pyatv --python python3.12` and pair once with
   `atvremote --protocol companion pair`.
+
+## Local backend (`local_backend`)
+
+Pointing an app on a device at a server on your own machine is not one address —
+it is a different string per target, and every wrong one fails looking like a
+broken app or a dead server rather than a wrong host.
+
+```bash
+# iOS simulator: shares this machine's network stack.
+flutter-device deploy --platform ios --target simulator --local-backend
+
+# Physical Android: reaching this host is per-PORT, over adb reverse.
+flutter-device deploy --platform android --local-backend --local-backend-ports 8080,9099
+```
+
+| Target | Host injected | Why |
+| --- | --- | --- |
+| iOS / tvOS **simulator** | `localhost` | it shares this machine's network stack |
+| Android **emulator** | `10.0.2.2` | the emulator's alias for the host; its own `localhost` is the emulated device |
+| Android **hardware** | `localhost` | made true by `adb reverse` on each port you name |
+| Physical iPhone / iPad | this machine's LAN IP | it is a separate machine on the network |
+
+**iOS and Android only.** On those two, deploy *is* the `flutter run` that
+compiles the app, so the host lands in the binary. Tizen, webOS, tvOS and macOS
+deploy an app that was compiled earlier, and a host is a compile-time constant,
+so a deploy-time define would change nothing while the response said it had.
+There, `local_backend` refuses before installing anything. The refusal still
+reports the host it resolved, as `localBackend.buildDartDefine`, ready to pass to
+`flutter_build`'s `dart_define`.
+
+It injects `USE_LOCAL_ENV=true` and `LOCAL_HOST=<host>` as dart-defines; rename
+them with `local_backend_keys` if your app reads different ones. An explicit
+`dart_define` for the same key always wins.
+
+**It refuses rather than guessing.** If this machine has two LAN addresses — Wi-Fi
+and Ethernet both up — or none, the deploy stops and names them instead of
+picking. Which address the *device* can reach is not knowable from here, and
+either choice works from the host while failing from the phone. Pass
+`--local-backend-host` to answer it. Physical Android with no ports is refused for
+the same reason: without a tunnel `localhost` means the device and `10.0.2.2`
+means nothing, so there is no host to inject.
+
+An explicit `--local-backend-host` that is a routable address (not `localhost`,
+`127.x` or `::1`) skips `adb reverse` entirely: the tunnel exists only to make a
+loopback name true on the device, and a host that never needed it should not
+fail the deploy because it could not be made.
+
+Two things it cannot do for you: your backend must listen on the LAN interface
+rather than only on loopback for a physical target to reach it, and every port
+must tunnel — a partial `adb reverse` is reported as a failure, because an app
+pointed at loopback with one dead port looks like an app bug.
+
+## Runtime crashes (`flutter_diagnose`)
+
+`flutter_deploy` reporting success while the app is dead or blank is not a
+contradiction, and this tool is why it is diagnosable. The launch poll stops the
+moment the Dart VM Service URI appears — a found URI outranks every failure
+signature, because the launch genuinely succeeded. A *rendering* crash fires when
+a shader is first rasterized, which is normally after that point, so the app dies
+in the window where nothing is watching and the log holds the only evidence.
+
+```bash
+flutter-device diagnose --platform ios          # the last recorded launch's log
+flutter-device diagnose --platform ios --log-path /path/to/older.log
+```
+
+Today's class, iOS only: the **Impeller/Metal constant-buffer overflow**. Flutter
+3.44+ is Impeller-only on iOS (the Skia backend was removed) and the iOS Simulator
+caps constant-buffer bindings at 14, so a runtime-effect shader binding 16 fails
+Metal pipeline creation and takes the app down. `flutter_diagnose` reports both
+numbers and says plainly that the two obvious escapes — `--no-enable-impeller` and
+`FLTEnableImpeller=false` in `Info.plist` — are **no-ops** on iOS in this version.
+The fix is app-side: select a shader variant that fits the ceiling on a simulator.
+
+**Read its three outcomes as three.** A crash found; no *known* class matched,
+which is not "the app is healthy" but "nothing in the classifier's set is
+present"; and the log could not be read, which is not a clean bill of health
+either, because nothing was examined. A platform with no classifier wired says so
+rather than returning a silent pass.
 
 ## Deep links (`flutter_open_url`)
 

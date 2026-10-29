@@ -4,3 +4,6 @@ dist-tests/
 *.log
 *.tsbuildinfo
 .DS_Store
+
+# llm_chat identity for this project
+.llm_chat/

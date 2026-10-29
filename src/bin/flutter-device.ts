@@ -16,6 +16,7 @@
  */
 import { buildRuntime } from "../runtime.js";
 import { CommandCore, CommonArgs } from "../core/commandCore.js";
+import { parseLocalBackendPorts } from "../localBackend.js";
 import { InputMode } from "../types.js";
 
 /** Parsed argv: the subcommand, global options, and a bag of tool flags. */
@@ -93,6 +94,7 @@ Commands:
   build               Build the app package (--mode release|profile|debug, --profile, --target, --install, --run)
   deploy              Install + launch, capture the VM Service URI (THE key command; --mode to match the built artifact)
                       macOS: stages + launches a prebuilt signed .app (--app-path <path> | --app-url <url>); no VM Service URI exists there
+                      --local-backend [--local-backend-ports 8080,9099] [--local-backend-host <ip>]
   uninstall           Remove the app from the device (refuses a copy somebody else installed
                       unless --allow-store-app-removal)
   kill-stale          Kill the stale launch/driver processes holding THIS device's lock
@@ -104,6 +106,7 @@ Commands:
   foreground          Bring the app back to the foreground (mobile)
   hot-reload          Real hot reload on the running app (--device, --timeout-ms)
   hot-restart         Hot restart (re-run main()) on the running app
+  diagnose            Name any known runtime crash in the launch log (--log-path)
   screenshot          Capture the screen to a PNG (--output-path, --include-base64, --target device|simulator)
   record              Record a bounded screen clip (--duration-s, --fps, --format mp4|gif, --target device|simulator)
   set-input-mode      Select the input plane (--mode dpad|pointer) — TV
@@ -168,7 +171,19 @@ async function run(): Promise<number> {
       result = await core.build(merge(f));
       break;
     case "deploy":
-      result = await core.deploy(merge(f));
+      result = await core.deploy(
+        merge({
+          ...f,
+          local_backend_ports: parseLocalBackendPorts(f.local_backend_ports),
+          local_backend_keys:
+            f.local_backend_env_key || f.local_backend_host_key
+              ? {
+                  env: f.local_backend_env_key as string | undefined,
+                  host: f.local_backend_host_key as string | undefined,
+                }
+              : undefined,
+        })
+      );
       break;
     case "uninstall":
       result = await core.uninstall({
@@ -225,6 +240,9 @@ async function run(): Promise<number> {
     case "hot-restart":
     case "hot_restart":
       result = await core.hotRestart(merge(f));
+      break;
+    case "diagnose":
+      result = await core.diagnose(merge(f));
       break;
     case "screenshot":
       result = await core.screenshot(merge(f));

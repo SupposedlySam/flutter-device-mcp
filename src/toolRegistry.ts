@@ -247,6 +247,31 @@ function buildFlutterTools(): ToolDefinition[] {
             description:
               "MACOS ONLY: a URL to fetch (a `.tar.gz`/`.tgz` or `.dmg`, sniffed by extension), used when `app_path` is not set. Overrides FLUTTER_DEVICE_MACOS_APP_URL for this call. Ignored on every other platform.",
           },
+          local_backend: {
+            type: "boolean",
+            description:
+              "Point the app at a backend running on THIS machine, and do the per-target host arithmetic for you. The host is a DIFFERENT STRING for every target and each wrong answer fails looking like a broken app or a dead server rather than a wrong address: iOS/tvOS SIMULATOR → `localhost` (it shares this machine's network stack); ANDROID EMULATOR → `10.0.2.2` (its own `localhost` is the emulated device); ANDROID HARDWARE → `localhost` MADE TRUE by `adb reverse` on each port in local_backend_ports (which is therefore REQUIRED there — without ports this refuses rather than guessing); physical iPhone → this machine's LAN IP, and your backend must be listening on that interface, not only on loopback. iOS and ANDROID ONLY: their deploy is the `flutter run` that compiles the app. Tizen, webOS, tvOS and macOS deploy an app compiled EARLIER, where a deploy-time define changes nothing, so there it REFUSES before installing and reports the resolved host as a dart_define to pass to flutter_build instead. Injects USE_LOCAL_ENV=true and LOCAL_HOST=<host> as dart-defines (rename them with local_backend_keys). IT REFUSES RATHER THAN GUESSING: if this machine has two LAN addresses (Wi-Fi and Ethernet both up) or none, the deploy STOPS and names them, because which one the device can reach is not knowable from here and either choice works from the host while failing from the device — pass local_backend_host to answer it. An explicit dart_define for the same key always wins over the injected one. The response's `localBackend` block reports the host, why it was chosen, and any tunnel that was set up.",
+          },
+          local_backend_ports: {
+            type: "array",
+            items: { type: "number" },
+            description:
+              "The port(s) your local backend listens on (e.g. [8080, 9099] for an API plus a Firebase emulator). REQUIRED for physical Android, where reaching this host is per-port via `adb reverse` — every port must tunnel or the deploy fails, since an app pointed at loopback with one dead port looks like an app bug. Ignored by targets that need no tunnel.",
+          },
+          local_backend_host: {
+            type: "string",
+            description:
+              "Override the resolved local-backend host. This is the answer to the one question host resolution cannot ask the network: which address the DEVICE can reach. Use it when this machine has several LAN addresses, when it is reachable at an address this cannot see (a VPN, a tunnel, a container host), or to point a physical device at a routable address instead of an adb tunnel.",
+          },
+          local_backend_keys: {
+            type: "object",
+            properties: {
+              env: { type: "string" },
+              host: { type: "string" },
+            },
+            description:
+              "Rename the injected dart-defines when your app reads different keys. Defaults: env=USE_LOCAL_ENV, host=LOCAL_HOST.",
+          },
         },
       },
     },
@@ -387,6 +412,27 @@ function buildFlutterTools(): ToolDefinition[] {
             type: "string",
             description:
               "Optional device target to disambiguate when multiple devices have been deployed to. Defaults to the most recent launch for the platform.",
+          },
+        },
+      },
+    },
+    {
+      name: "flutter_diagnose",
+      description:
+        "Read a launch log and NAME any known runtime-crash class in it. RUN THIS WHEN flutter_deploy REPORTED SUCCESS AND THE APP IS DEAD OR BLANK — that combination is not a contradiction and this tool is the reason it is diagnosable. The deploy's launch poll stops at the Dart VM Service URI (a found URI outranks every failure signature, because the launch did succeed), but a rendering crash fires when a shader is first rasterized, which is normally AFTER that — so the app dies in the window where nothing is watching and the log holds the only evidence. TODAY'S CLASSES (iOS only): the Impeller/Metal CONSTANT-BUFFER OVERFLOW — Flutter 3.44+ is Impeller-ONLY on iOS (Skia removed) and the iOS Simulator caps constant-buffer bindings at 14, so a runtime-effect shader binding 16 fails Metal pipeline creation and takes the app down. It reports both numbers and says plainly that BOTH obvious escapes are no-ops on iOS in this version (`--no-enable-impeller`, `FLTEnableImpeller=false` in Info.plist) and that the fix is APP-SIDE. Defaults to the most recent recorded launch's log, so the ordinary call needs no arguments. IT DISTINGUISHES THREE OUTCOMES, and you must too: a crash found; no KNOWN class matched (which is NOT 'the app is healthy' — it means nothing in the classifier's set is present); and the log could not be READ (which is not a clean bill of health either — nothing was examined). Platforms with no classifier wired say so rather than returning a silent pass.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          ...platformProp,
+          device: {
+            type: "string",
+            description:
+              "Optional device target to disambiguate when multiple devices have been deployed to. Defaults to the most recent launch for the platform.",
+          },
+          log_path: {
+            type: "string",
+            description:
+              "Optional explicit launch-log path to examine. Defaults to the log recorded by the most recent launch. Pass this to inspect an older log the launch registry no longer points at.",
           },
         },
       },

@@ -16,11 +16,6 @@ review, framed as future work.
   runtime file and add a `flutter-device attach` command, so any driver or a
   second agent can connect to an already-running app without a redeploy.
 
-- **Richer environment configuration.** `dart_define` covers compile-time
-  constants; the per-target host resolution an app usually needs alongside them
-  (simulator → `localhost`, Android emulator → `10.0.2.2`, a physical Android
-  device → `adb reverse` back to the host) is still the caller's job.
-
 - **Executable config + lifecycle hooks.** A typed `flutter-device.config.ts` with
   `preBuild`/`postDeploy`-style hooks for richer extensibility beyond today's shell
   `preBuild` array. Would ship with a clear trust-boundary note: executing config
