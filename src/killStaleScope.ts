@@ -638,6 +638,43 @@ export function planScopedKill(opts: {
   };
 }
 
+/**
+ * The `flutter run` drivers attributed to one device, split by whether they
+ * descend from `ownPid`. The same attribution a teardown uses, so a session a
+ * teardown would treat as this device's is the one reported here.
+ */
+export function launchDriversOn(opts: {
+  processes: readonly ProcessEntry[];
+  identity: DeviceIdentity;
+  ownPid: number;
+}): { own: ProcessEntry[]; foreign: ProcessEntry[] } {
+  const plan = planScopedKill({
+    processes: opts.processes,
+    driverPatterns: FLUTTER_RUN_DRIVER_PATTERNS,
+    identity: opts.identity,
+    protectedPids: [opts.ownPid],
+  });
+  const byPid = new Map(opts.processes.map((p) => [p.pid, p] as const));
+  const own: ProcessEntry[] = [];
+  const foreign: ProcessEntry[] = [];
+  for (const { process: driver } of plan.targeted) {
+    if (ancestorsOf(driver, byPid).includes(opts.ownPid)) own.push(driver);
+    else foreign.push(driver);
+  }
+  return { own, foreign };
+}
+
+/** The reconciled process table, or undefined when it could not be read. */
+export async function readProcessTable(): Promise<ProcessEntry[] | undefined> {
+  const [table, pairsRead] = await Promise.all([
+    runShell(PROCESS_TABLE_COMMAND, { timeoutMs: 10000 }),
+    runShell(PROCESS_PAIRS_COMMAND, { timeoutMs: 10000 }),
+  ]);
+  const pairs = parseProcessPairs(pairsRead?.stdout ?? "");
+  if (!table?.success || !pairsRead?.success || pairs.size === 0) return undefined;
+  return reconcileProcessTable(parseProcessTable(table.stdout), pairs);
+}
+
 /** Shorten a command line so a result note stays readable. */
 function brief(command: string, max = 110): string {
   return command.length <= max ? command : `${command.slice(0, max - 1)}…`;

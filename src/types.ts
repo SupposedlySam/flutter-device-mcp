@@ -121,13 +121,15 @@ export interface DeviceResolution {
    * resolved to something else, so this is the only source a named device has.
    * `discovered` — the first online device from platform device discovery.
    * `discovered-offline` — a listed-but-offline device (best effort, no pin set).
+   * `claimed` — nothing was named and several simulators were booted, so this is
+   * the simulator this MCP process claimed for itself (iOS; see simulatorClaim).
    * `stale-pin` — macOS only: a process-name pin kept although no such process
    * is running (it names an app, not a device, so nothing is substituted).
    *
    * These names are platform-neutral by design; how a platform discovers
    * devices (sdb, ssap, etc.) is an adapter detail and is not leaked here.
    */
-  source: "pin" | "discovered" | "discovered-offline" | "stale-pin";
+  source: "pin" | "discovered" | "discovered-offline" | "claimed" | "stale-pin";
   /**
    * The bare network host (no port) the resolved device is reachable at, when
    * the target name is NOT itself dial-able. On a name-addressed platform

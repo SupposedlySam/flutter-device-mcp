@@ -61,6 +61,7 @@ import {
 } from "../iosLaunchMode.js";
 import { logger } from "../logger.js";
 import {
+  IosDevice,
   IosDeviceKind,
   IosDeviceResolution,
   mergeFlutterIds,
@@ -72,9 +73,19 @@ import {
 import {
   buildDeviceIdentity,
   DeviceIdentity,
+  EnumeratedDevice,
   FLUTTER_RUN_DRIVER_PATTERNS,
   killScopedLaunchDrivers,
+  launchDriversOn,
+  readProcessTable,
 } from "../killStaleScope.js";
+import {
+  claimSimulator,
+  claimsHeldBy,
+  describeExhaustedClaims,
+  holdsClaim,
+  releaseClaimsOnExit,
+} from "../simulatorClaim.js";
 import { findLaunch } from "../launchRegistry.js";
 import {
   parseSimulatorDestinations,
@@ -96,6 +107,7 @@ import {
 } from "../types.js";
 import {
   AppLifecycle,
+  DeviceClaim,
   DeviceTargetPreference,
   InstallOptions,
   KillStaleScope,
@@ -340,6 +352,11 @@ export interface IosAdapterConfig {
    * of the host's real filesystem. Used by the PHYSICAL-device capture paths.
    */
   resolvePymobiledevice3?: () => Pymobiledevice3Resolution;
+  /**
+   * Where simulator claims are kept. Optional; defaults to a shared dir under the
+   * OS temp dir, so every flutter-device-mcp process on the host sees the same claims.
+   */
+  simulatorClaimDir?: string;
 }
 
 export class IosAdapter implements PlatformAdapter {
@@ -583,6 +600,128 @@ export class IosAdapter implements PlatformAdapter {
   }
 
   /**
+   * {@link resolveIosTarget}, except that a call naming nothing while several
+   * simulators are booted gets this process's claimed simulator instead of a
+   * refusal. See {@link claimForUnnamedCall}.
+   */
+  private async resolveTarget(
+    preference: DeviceTargetPreference,
+    physical: IosDevice[],
+    simulators: IosDevice[]
+  ): Promise<IosDeviceResolution | null> {
+    const claimed = await this.claimForUnnamedCall(preference, physical, simulators);
+    if (claimed) {
+      const resolution = resolveIosTarget(undefined, physical, simulators, {
+        kind: "simulator",
+        udid: claimed,
+      });
+      return resolution && { ...resolution, source: "claimed" };
+    }
+    return resolveIosTarget(this.config.device, physical, simulators, {
+      kind: preference.kind,
+      udid: preference.udid,
+    });
+  }
+
+  /**
+   * The simulator this process owns, when the call names no device and more than
+   * one simulator is booted. Returns undefined whenever the old resolution
+   * applies: a named device, one booted simulator, a phone request, or a phone
+   * and simulators both available with no `kind` (still refused as ambiguous).
+   *
+   * The first such call claims a booted simulator that no other live process
+   * holds and no other session's `flutter run` is attached to; every later call
+   * reuses it while it stays booted. With none left this throws rather than share
+   * one, since a shared simulator is the collision the claim exists to prevent.
+   */
+  private async claimForUnnamedCall(
+    preference: DeviceTargetPreference,
+    physical: IosDevice[],
+    simulators: IosDevice[]
+  ): Promise<string | undefined> {
+    if (preference.udid?.trim() || this.config.device?.trim()) return undefined;
+    if (preference.kind === "device") return undefined;
+    const booted = simulators.filter((s) => s.available && !s.ambiguous);
+    if (booted.length < 2) return undefined;
+    if (
+      preference.kind !== "simulator" &&
+      physical.some((d) => d.available && !d.ambiguous)
+    ) {
+      return undefined;
+    }
+
+    const dir = this.config.simulatorClaimDir;
+    const held = booted.find((s) => holdsClaim(s.udid, { dir }));
+    if (held) return held.udid;
+
+    const { own, foreign } = await this.launchSessionsOn(booted, physical, simulators);
+    // A simulator already running this process's own launch is the one it was
+    // using before it had to claim.
+    const candidates = [...booted].sort(
+      (a, b) => Number(own.has(b.udid)) - Number(own.has(a.udid))
+    );
+    const outcome = claimSimulator({ candidates, occupied: foreign, dir });
+    if (outcome.kind === "exhausted") {
+      throw new DeviceSelectionRefusedError(describeExhaustedClaims(outcome));
+    }
+    releaseClaimsOnExit(dir);
+    logger.info("Claimed iOS simulator for this MCP process", {
+      udid: outcome.udid,
+      tookOverFrom: outcome.tookOverFrom,
+    });
+    return outcome.udid;
+  }
+
+  /**
+   * Which booted simulators carry a `flutter run` from this process, and which
+   * carry one from somebody else (another agent, or the developer's own
+   * `flutter run`), described for the refusal message. An unreadable process table
+   * reports neither: claims between MCP processes still hold without it.
+   */
+  private async launchSessionsOn(
+    booted: IosDevice[],
+    physical: IosDevice[],
+    simulators: IosDevice[]
+  ): Promise<{ own: Set<string>; foreign: Map<string, string> }> {
+    const own = new Set<string>();
+    const foreign = new Map<string, string>();
+    const processes = await readProcessTable();
+    if (!processes) return { own, foreign };
+    const devices: EnumeratedDevice[] = [...physical, ...simulators].map((d) => ({
+      id: d.udid,
+      aliases: [d.devicectlId, d.name],
+      available: d.available,
+    }));
+    for (const sim of booted) {
+      const identity = buildDeviceIdentity({ target: sim.udid, devices });
+      const drivers = launchDriversOn({ processes, identity, ownPid: process.pid });
+      if (drivers.own.length > 0) own.add(sim.udid);
+      if (drivers.foreign.length > 0) {
+        foreign.set(
+          sim.udid,
+          `another session's flutter run is attached (pid ${drivers.foreign
+            .map((p) => p.pid)
+            .join(", ")})`
+        );
+      }
+    }
+    return { own, foreign };
+  }
+
+  deviceClaim(): DeviceClaim | undefined {
+    const [current] = claimsHeldBy({ dir: this.config.simulatorClaimDir });
+    if (!current) return undefined;
+    return {
+      device: current.udid,
+      name: current.name,
+      note:
+        "This MCP process claimed this simulator for every call that names no device. " +
+        "Pass it as device_udid to be explicit, and connect Marionette only to the " +
+        "vmServiceUriWs this process's own flutter_deploy returned.",
+    };
+  }
+
+  /**
    * Resolve the iOS target across physical devices (devicectl) and simulators
    * (simctl). A named target that is not available is refused, never replaced,
    * and a requested `kind` is never served by the other class. Throws an
@@ -593,12 +732,7 @@ export class IosAdapter implements PlatformAdapter {
     preference: DeviceTargetPreference = {}
   ): Promise<DeviceResolution> {
     const { physical, simulators } = await this.listTargets();
-    const resolution = resolveIosTarget(
-      this.config.device,
-      physical,
-      simulators,
-      { kind: preference.kind, udid: preference.udid }
-    );
+    const resolution = await this.resolveTarget(preference, physical, simulators);
     if (!resolution) {
       throw new McpError(
         ErrorCode.InvalidParams,
@@ -677,7 +811,7 @@ export class IosAdapter implements PlatformAdapter {
     // another valid destination here would send the deploy, its uninstall and
     // any space recovery to a simulator nobody asked for.
     if (
-      resolution.source === "pin" &&
+      (resolution.source === "pin" || resolution.source === "claimed") &&
       picked.udid.toLowerCase() !== resolution.target.toLowerCase()
     ) {
       const valid = destinations
@@ -1316,6 +1450,12 @@ export class IosAdapter implements PlatformAdapter {
       return { udid: explicitUdid.trim() };
     }
     const { physical, simulators } = await this.listTargets();
+    const claimed = await this.claimForUnnamedCall(
+      { kind: "simulator" },
+      physical,
+      simulators
+    );
+    if (claimed) return { udid: claimed };
     const booted = simulators.find((s) => s.available);
     const anySim = booted ?? simulators[0];
     if (anySim) return { udid: anySim.udid };
@@ -1512,10 +1652,7 @@ export class IosAdapter implements PlatformAdapter {
     preference: DeviceTargetPreference = {}
   ): Promise<IosDeviceResolution | null> {
     const { physical, simulators } = await this.listTargets();
-    return resolveIosTarget(this.config.device, physical, simulators, {
-      kind: preference.kind,
-      udid: preference.udid,
-    });
+    return this.resolveTarget(preference, physical, simulators);
   }
 
   /** The shared "nothing to capture" result for an unpopulated host. */

@@ -250,8 +250,21 @@ export interface SystemPromptController {
   ): Promise<SystemPromptResult>;
 }
 
+/** A device this MCP process holds for itself (see simulatorClaim). */
+export interface DeviceClaim {
+  device: string;
+  name?: string;
+  note: string;
+}
+
 export interface PlatformAdapter {
   readonly platform: Platform;
+
+  /**
+   * The device this process claimed for calls that name none, when it holds one.
+   * Absent on platforms that do not claim.
+   */
+  deviceClaim?(): DeviceClaim | undefined;
 
   /** Device + environment status (never via `sdb shell` on Tizen). */
   info(): Promise<CommandResult>;

@@ -177,6 +177,7 @@ export class CommandCore {
         config: this.configProvenance(),
         ...this.summarizeCli(result, 200),
         environmentDiagnostic,
+        deviceClaim: adapter.deviceClaim?.(),
       };
     });
   }
@@ -419,6 +420,8 @@ export class CommandCore {
         pid: outcome.pid,
         logPath: outcome.logPath,
         device,
+        deviceSource: core.resolution.source,
+        deviceClaim: adapter.deviceClaim?.(),
         launchMode: outcome.launchMode,
         launchModeCaveat: outcome.launchModeCaveat,
         noVmServiceReason: outcome.noVmServiceReason,
@@ -582,7 +585,10 @@ export class CommandCore {
    * was deployed most recently, which reads as a reload that did nothing.
    */
   private findLaunchRecord(adapter: PlatformAdapter, device: string | undefined) {
-    const lookup = resolveLaunch(adapter.platform, device);
+    const lookup = resolveLaunch(
+      adapter.platform,
+      device ?? adapter.deviceClaim?.()?.device
+    );
     if (lookup.kind === "found") return { record: lookup.record };
     return {
       miss: {
