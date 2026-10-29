@@ -3,7 +3,9 @@ import {
   normalizeDeviceTarget,
   parseDeviceTarget,
   parseSdbDevices,
+  parseTizenTargetFile,
   resolveDeviceTarget,
+  tpkPackageId,
 } from "../src/deviceTarget.js";
 
 const SAMPLE = `List of devices attached
@@ -100,39 +102,43 @@ describe("resolveDeviceTarget", () => {
     });
   });
 
-  it("falls back to the first online device when the pin is stale", () => {
-    const resolution = resolveDeviceTarget("192.0.2.6:26101", SAMPLE_MOVED);
-    expect(resolution?.target).toBe("192.0.2.7:26101");
-    expect(resolution?.source).toBe("discovered");
-    expect(resolution?.warning).toContain("192.0.2.6:26101");
-    expect(resolution?.warning).toContain("192.0.2.7:26101");
-    // The warning tells the reader which variable to go and fix, so the name has
-    // to be the one the config layer actually reads.
-    expect(resolution?.warning).toContain("FLUTTER_DEVICE_TIZEN_DEVICE");
-    expect(resolution?.warning).not.toContain("FLUTTER_DEVICE_FLUTTER_DEVICE");
+  it("refuses a stale pin, naming it and the device now online, rather than switching to it", () => {
+    expect(() => resolveDeviceTarget("192.0.2.6:26101", SAMPLE_MOVED)).toThrow(
+      /"192\.0\.2\.6:26101" \(from the configured Tizen device \(FLUTTER_DEVICE_TIZEN_DEVICE\)\) is not online\. Online Tizen devices: 192\.0\.2\.7:26101/
+    );
   });
 
-  it("treats a pinned device that is listed but offline as stale", () => {
-    const resolution = resolveDeviceTarget(
-      "192.0.2.6:26101",
-      SAMPLE_OFFLINE + "192.0.2.7:26101\tdevice\tExampleTV\n"
-    );
-    expect(resolution?.target).toBe("192.0.2.7:26101");
-    expect(resolution?.source).toBe("discovered");
+  it("refuses a pinned device that is listed but offline, naming its state", () => {
+    expect(() =>
+      resolveDeviceTarget(
+        "192.0.2.6:26101",
+        SAMPLE_OFFLINE + "192.0.2.7:26101\tdevice\tExampleTV\n"
+      )
+    ).toThrow(/is not online \(it is listed, in state "offline"\)/);
   });
 
-  it("keeps a stale pin (with a warning) when nothing is online", () => {
-    const resolution = resolveDeviceTarget(
-      "192.0.2.6",
-      "List of devices attached\n"
-    );
-    expect(resolution).toEqual({
-      target: "192.0.2.6:26101",
-      source: "stale-pin",
-      warning: expect.stringContaining("no online device"),
-    });
-    expect(resolution?.warning).toContain("FLUTTER_DEVICE_TIZEN_DEVICE");
-    expect(resolution?.warning).not.toContain("FLUTTER_DEVICE_FLUTTER_DEVICE");
+  it("refuses a pin when nothing is online, and names the pin's source", () => {
+    expect(() =>
+      resolveDeviceTarget(
+        "192.0.2.6",
+        "List of devices attached\n",
+        "/repo/app/.tizen-target"
+      )
+    ).toThrow(/"192\.0\.2\.6:26101" \(from \/repo\/app\/\.tizen-target\).*Online Tizen devices: none/);
+  });
+
+  it("reads the device out of a .tizen-target file, bare or as a DEVICE_IP line", () => {
+    expect(parseTizenTargetFile("192.0.2.6:26101\n")).toBe("192.0.2.6:26101");
+    expect(
+      parseTizenTargetFile("DEVICE_ARCH=arm\nDEVICE_IP=192.0.2.6\nRUST_TARGET=x\n")
+    ).toBe("192.0.2.6");
+    expect(parseTizenTargetFile("DEVICE_ARCH=arm\n")).toBeUndefined();
+  });
+
+  it("reads the package id out of a flutter-tizen tpk file name", () => {
+    expect(tpkPackageId("com.example.app-1.0.4.tpk")).toBe("com.example.app");
+    expect(tpkPackageId("com.example.app-1.0.4-arm.tpk")).toBe("com.example.app");
+    expect(tpkPackageId("notes.txt")).toBeUndefined();
   });
 
   it("falls back to the first online device from sdb output", () => {

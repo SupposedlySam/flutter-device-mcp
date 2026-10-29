@@ -1,5 +1,5 @@
 /**
- * Shared, platform-neutral types used across the frontend MCP.
+ * Shared, platform-neutral types used across this server.
  *
  * These describe the shapes exchanged between the neutral server, the platform
  * adapters, and the neutral shell/launch cores. Nothing here is Tizen- or
@@ -116,11 +116,13 @@ export interface BuildResult {
 export interface DeviceResolution {
   target: string;
   /**
-   * `pin` — the explicit device pin (env var), confirmed online.
+   * `pin` — a device the call named (per-call id, env pin or target file),
+   * confirmed online. A named device that is not online is refused, never
+   * resolved to something else, so this is the only source a named device has.
    * `discovered` — the first online device from platform device discovery.
    * `discovered-offline` — a listed-but-offline device (best effort, no pin set).
-   * `stale-pin` — the pin was kept despite not being seen online (no online
-   * device existed to fall back to).
+   * `stale-pin` — macOS only: a process-name pin kept although no such process
+   * is running (it names an app, not a device, so nothing is substituted).
    *
    * These names are platform-neutral by design; how a platform discovers
    * devices (sdb, ssap, etc.) is an adapter detail and is not leaked here.
@@ -133,8 +135,15 @@ export interface DeviceResolution {
    * dial it directly. Undefined when the target is itself the host (Tizen sdb).
    */
   host?: string;
-  /** Human-readable note when the pin was stale, for surfacing to callers. */
+  /** Human-readable note about the resolution, for surfacing to callers. */
   warning?: string;
+  /**
+   * Set when nothing was named and this was chosen from several online targets
+   * (webOS, whose ares list always carries its own emulator entry, so refusing
+   * every such choice would refuse every call). A caller that removes things
+   * refuses on it; see runUninstallCore.
+   */
+  unnamedAmong?: { id: string; detail?: string }[];
 }
 
 // =========== LAUNCH / URI CAPTURE ==========

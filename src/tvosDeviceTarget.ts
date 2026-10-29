@@ -2,7 +2,7 @@
  * Resolution of the Apple TV (tvOS) device/simulator target used for
  * build/install/launch.
  *
- * tvOS is the sibling of {@link ./iosDeviceTarget}: the frontend MCP drives two
+ * tvOS is the sibling of {@link ./iosDeviceTarget}: this server drives two
  * kinds behind one neutral {@link DeviceResolution} shape —
  *  - a PHYSICAL Apple TV (over CoreDevice / `xcrun devicectl`), and
  *  - a tvOS SIMULATOR (over `xcrun simctl`).
@@ -35,15 +35,19 @@
  * simulator carries its simctl UUID.
  *
  * This module is pure parsing/selection over the raw command output the adapter
- * captures — it never spawns anything. The stale-pin fallback mirrors the
- * Tizen/iOS/Android paths: a pin (id or name) that is not currently
- * connected/booted self-heals to the first available target with a warning.
+ * captures — it never spawns anything. A pinned target (id or name) that is not
+ * connected/booted is refused, never replaced (see deviceRequest.ts).
  *
- * The pin env vars are `APPLE_TV_DEVICE` (the name the `flutter-tvos` CLI + the
- * `appletv-integration` runner already use — see `.ai/docs/tvos/…`) and
- * `FLUTTER_DEVICE_TVOS_DEVICE` (the frontend-MCP convention, mirroring
+ * The pin env vars are `APPLE_TV_DEVICE` (the name the `flutter-tvos` CLI already uses) and
+ * `FLUTTER_DEVICE_TVOS_DEVICE` (this server's convention, mirroring
  * `FLUTTER_DEVICE_IOS_DEVICE`). The adapter checks both.
  */
+import {
+  ambiguousNameRefused,
+  pickNamedMatch,
+  RequestedDeviceUnavailableError,
+  targetClassUnavailable,
+} from "./deviceRequest.js";
 import { DeviceResolution } from "./types.js";
 
 export type { DeviceResolution } from "./types.js";
@@ -281,68 +285,86 @@ function toResolution(
  * `physical` must already be filtered to Apple TV / tvOS (see {@link
  * parseFlutterTvosDevices}); an iPhone/iPad can therefore never appear here.
  *
- * A pin (id or name, via `APPLE_TV_DEVICE`/`FLUTTER_DEVICE_TVOS_DEVICE`) is
- * authoritative while it matches an AVAILABLE device; otherwise it self-heals to
- * the first available device (with a warning), then any listed device. Physical
- * Apple TVs are preferred over simulators when both are available and no pin is
- * set, matching the "real device first" bias of the iOS/Tizen adapters (and the
- * `flutter-tvos run` auto-target behavior). Returns null when nothing usable is
+ * A named target — the per-call `udid`, else the pin (`APPLE_TV_DEVICE`/
+ * `FLUTTER_DEVICE_TVOS_DEVICE`), as an id or name — is used only while it is
+ * AVAILABLE; otherwise this throws {@link RequestedDeviceUnavailableError}. A
+ * `kind` restricts the choice to that class and is never served by the other.
+ * With neither, physical Apple TVs are preferred over simulators, matching the
+ * `flutter-tvos run` auto-target behavior. Returns null when nothing usable is
  * listed.
  */
 export function resolveTvosTarget(
   pinned: string | undefined,
   physical: TvosDevice[],
   simulators: TvosDevice[],
-  preference?: { kind?: "device" | "simulator"; udid?: string }
+  preference: { udid?: string; kind?: TvosDeviceKind } = {}
 ): TvosDeviceResolution | null {
-  // Per-call kind bias restricts the candidate pool (mirrors the iOS adapter):
-  // `--target simulator` considers ONLY simulators, `--target device` ONLY
-  // physical Apple TVs. With no bias, physical is still preferred over a
-  // simulator (the pool lists physical first). A per-call `udid` is an
-  // authoritative pin for THIS call, overriding any env pin.
-  const pool =
-    preference?.kind === "simulator"
-      ? simulators
-      : preference?.kind === "device"
-        ? physical
-        : [...physical, ...simulators];
-  const effectivePin = preference?.udid ?? pinned;
-  const firstAvailable = pool.find((d) => d.available);
+  const fromCall = !!preference.udid && preference.udid.trim().length > 0;
+  const pin = fromCall ? preference.udid?.trim() : pinned?.trim();
+  const all = [...physical, ...simulators];
+  const available = all
+    .filter((d) => d.available)
+    .map((d) => ({ id: d.id, detail: [d.kind, d.name].filter(Boolean).join(", ") }));
 
-  if (effectivePin && effectivePin.trim().length > 0) {
-    const pin = effectivePin.trim();
-    const all = pool;
-    const matched = all.find((d) => pinMatches(pin, d));
-    if (matched && matched.available) {
-      return toResolution(matched, "pin");
+  if (pin) {
+    const origin = fromCall
+      ? "the device_udid argument"
+      : "the APPLE_TV_DEVICE/FLUTTER_DEVICE_TVOS_DEVICE env var";
+    const picked = pickNamedMatch(
+      all.filter((d) => pinMatches(pin, d)),
+      (d) => d.available
+    );
+    if (picked.kind === "several") {
+      throw ambiguousNameRefused({
+        platform: "tvOS",
+        requested: pin,
+        origin,
+        matches: picked.devices.map((d) => ({
+          id: d.id,
+          detail: [d.kind, d.name].filter(Boolean).join(", "),
+        })),
+      });
     }
-    if (firstAvailable) {
-      return toResolution(
-        firstAvailable,
-        "discovered",
-        `APPLE_TV_DEVICE/FLUTTER_DEVICE_TVOS_DEVICE is pinned to ${pin}, but that target ` +
-          `is not an available Apple TV/simulator (stale pin — it may be off the ` +
-          `network, unpaired, or shut down). Using ${firstAvailable.id} ` +
-          `(${firstAvailable.kind}) instead.`
-      );
+    if (picked.kind === "none") {
+      throw new RequestedDeviceUnavailableError({
+        platform: "tvOS",
+        requested: pin,
+        origin,
+        state: picked.listed ? "not connected/booted" : undefined,
+        listedAs: picked.listed?.id,
+        online: available,
+        hint: "An Apple TV that is asleep or off the network is not available.",
+      });
     }
-    if (matched) {
-      // Listed but offline — keep the pin, best effort.
-      return toResolution(matched, "discovered-offline");
+    const matched = picked.device;
+    if (preference.kind && matched.kind !== preference.kind) {
+      throw targetClassUnavailable({
+        platform: "tvOS",
+        wanted: preference.kind,
+        requested: pin,
+        resolvedClass: matched.kind,
+        online: available,
+      });
     }
-    return {
-      target: pin,
-      source: "stale-pin",
-      kind: "device",
-      warning:
-        `APPLE_TV_DEVICE/FLUTTER_DEVICE_TVOS_DEVICE is pinned to ${pin}, but that target ` +
-        `is not an available Apple TV/simulator and none was found to fall back ` +
-        `to. Proceeding with the pin; expect failures if it is not connected.`,
-    };
+    return toResolution(matched, "pin");
   }
 
+  const pool =
+    preference.kind === "simulator"
+      ? simulators
+      : preference.kind === "device"
+        ? physical
+        : all;
+  const firstAvailable = pool.find((d) => d.available);
   if (firstAvailable) {
     return toResolution(firstAvailable, "discovered");
+  }
+  if (preference.kind) {
+    throw targetClassUnavailable({
+      platform: "tvOS",
+      wanted: preference.kind,
+      online: available,
+    });
   }
 
   // No available device. Fall back to the first listed-but-offline one so the

@@ -453,15 +453,15 @@ export class TvosAdapter implements PlatformAdapter {
   }
 
   /**
-   * Resolve the tvOS target across physical Apple TVs and simulators. A pin
-   * (APPLE_TV_DEVICE/FLUTTER_DEVICE_TVOS_DEVICE) self-heals to the first available
-   * target with a warning, mirroring the iOS/Tizen stale-pin fallback. Only
-   * Apple TV / tvOS targets are ever considered (iPhones/iPads are excluded by
-   * the parser). Throws an McpError when nothing is usable. Records the resolved
-   * kind for later devicectl/simctl selection.
+   * Resolve the tvOS target across physical Apple TVs and simulators. A named
+   * target (per-call `udid`, else APPLE_TV_DEVICE/FLUTTER_DEVICE_TVOS_DEVICE) that is
+   * not available is refused, never replaced, and a requested `kind` is never
+   * served by the other class. Only Apple TV / tvOS targets are ever considered
+   * (iPhones/iPads are excluded by the parser). Throws an McpError when nothing
+   * is usable. Records the resolved kind for later devicectl/simctl selection.
    */
   async discoverDevice(
-    preference?: DeviceTargetPreference
+    preference: DeviceTargetPreference = {}
   ): Promise<DeviceResolution> {
     const { physical, simulators } = await this.listTargets();
     // Make the resolution order explicit and logged: a PHYSICAL paired Apple TV
@@ -483,12 +483,10 @@ export class TvosAdapter implements PlatformAdapter {
       })),
       pinned: this.config.device,
     });
-    const resolution = resolveTvosTarget(
-      this.config.device,
-      physical,
-      simulators,
-      preference
-    );
+    const resolution = resolveTvosTarget(this.config.device, physical, simulators, {
+      udid: preference.udid,
+      kind: preference.kind,
+    });
     if (!resolution) {
       throw new McpError(
         ErrorCode.InvalidParams,
@@ -703,10 +701,6 @@ export class TvosAdapter implements PlatformAdapter {
   }
 
   /**
-   * Uninstall the app to free space / reset state. devicectl for a physical
-   * Apple TV, simctl for a simulator — chosen from the last resolved kind.
-   */
-  /**
    * Open a URL on the resolved target — supported on a SIMULATOR only.
    *
    * `simctl openurl` drives the real URL-handling path (custom scheme or
@@ -768,13 +762,19 @@ export class TvosAdapter implements PlatformAdapter {
    * iOS simulator). PHYSICAL Apple TV: no CLI capture path — devicectl has no
    * screenshot subcommand and there is no idevicescreenshot equivalent — so it
    * returns `{ supported: false }`. Discovers the target first to know which kind
-   * is active.
+   * is active — the same resolution a deploy uses, `device_udid` and `target`
+   * included.
    */
   async screenshot(opts: {
     outPath?: string;
     includeBase64?: boolean;
+    deviceUdid?: string;
+    target?: "device" | "simulator";
   }): Promise<ScreenshotResult> {
-    const resolution = await this.discoverDevice();
+    const resolution = await this.discoverDevice({
+      udid: opts.deviceUdid,
+      kind: opts.target,
+    });
     if (this.lastKind !== "simulator") {
       return {
         captured: false,

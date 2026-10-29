@@ -61,19 +61,16 @@ describe("resolveWebosDeviceTarget", () => {
     });
   });
 
-  it("falls back to the first listed device for a stale pin (self-heal)", () => {
-    const resolution = resolveWebosDeviceTarget("moved-away", LIST);
-    expect(resolution?.target).toBe("tv-26");
-    expect(resolution?.source).toBe("discovered");
-    expect(resolution?.warning).toMatch(/stale pin/i);
+  it("refuses a stale pin, naming the registered devices, rather than switching to one", () => {
+    expect(() => resolveWebosDeviceTarget("moved-away", LIST)).toThrow(
+      /"moved-away" \(from the FLUTTER_DEVICE_WEBOS_DEVICE env var\) is not online\. Online webOS devices: tv-26 \(192\.168\.1\.50\), emulator \(127\.0\.0\.1\)/
+    );
   });
 
-  it("keeps a stale pin when nothing else is listed", () => {
-    const resolution = resolveWebosDeviceTarget("moved-away", "");
-    expect(resolution).toEqual(
-      expect.objectContaining({ target: "moved-away", source: "stale-pin" })
+  it("refuses a stale pin when nothing is registered either", () => {
+    expect(() => resolveWebosDeviceTarget("moved-away", "")).toThrow(
+      /Online webOS devices: none/
     );
-    expect(resolution?.warning).toMatch(/no other device/i);
   });
 
   it("discovers the first device with no pin (and carries its host)", () => {
@@ -82,6 +79,10 @@ describe("resolveWebosDeviceTarget", () => {
       target: "tv-26",
       source: "discovered",
       host: "192.168.1.50",
+      unnamedAmong: [
+        { id: "tv-26", detail: "192.168.1.50" },
+        { id: "emulator", detail: "127.0.0.1" },
+      ],
     });
   });
 
@@ -114,5 +115,14 @@ describe("resolveWebosDeviceTarget", () => {
 
   it("returns null when no device is configured at all", () => {
     expect(resolveWebosDeviceTarget(undefined, "")).toBeNull();
+  });
+});
+
+describe("resolveWebosDeviceTarget: a registered device with no connection", () => {
+  it("refuses the pin rather than acting on a device it cannot reach", () => {
+    const withPlaceholder = LIST + "\nbedroom";
+    expect(() => resolveWebosDeviceTarget("bedroom", withPlaceholder)).toThrow(
+      /"bedroom" \(from the FLUTTER_DEVICE_WEBOS_DEVICE env var\) is not online \(it is listed, in state "registered without a connection"\)/
+    );
   });
 });

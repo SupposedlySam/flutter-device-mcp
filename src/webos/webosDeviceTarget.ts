@@ -6,16 +6,17 @@
  * here is that device name, and discovery parses `ares-setup-device --list
  * --full` rather than `sdb devices`.
  *
- * This mirrors the Tizen `deviceTarget.ts` contract — a pin (env var) is
- * authoritative only while it is present in the live device list, otherwise it
- * falls back to the first listed device with a warning (stale-pin self-heal) —
- * and returns the same neutral {@link DeviceResolution} shape from `types.ts`.
+ * This mirrors the Tizen `deviceTarget.ts` contract — a pin (env var) is used
+ * only while it is present with a connection in the live device list, and is
+ * refused otherwise, never replaced — and returns the same neutral
+ * {@link DeviceResolution} shape from `types.ts`.
  *
  * SCAFFOLD NOTE: parsing is written against the documented `--full` table
  * columns; there is no webOS-26 device to confirm the exact spacing on, so the
  * parser is intentionally tolerant (header/blank-line skipping, whitespace
  * splitting) the way the sdb parser is.
  */
+import { RequestedDeviceUnavailableError } from "../deviceRequest.js";
 import { DeviceResolution } from "../types.js";
 
 export type { DeviceResolution } from "../types.js";
@@ -88,10 +89,10 @@ export function parseAresDevices(output: string): AresDevice[] {
 /**
  * Pick the webOS device target to operate on.
  *
- * An explicit pin (device name) is authoritative only while it appears in the
- * live `ares-setup-device --list` output; a stale pin falls back to the first
- * listed device with a warning (the same self-heal Tizen does for a moved DHCP
- * address). Without a pin the first listed device is used. Returns null when no
+ * An explicit pin (device name) is used only while it appears, with a
+ * connection, in the live `ares-setup-device --list` output; otherwise this
+ * throws RequestedDeviceUnavailableError. Without a pin the first listed device
+ * is used. Returns null when no
  * device is configured at all.
  */
 export function resolveWebosDeviceTarget(
@@ -104,35 +105,25 @@ export function resolveWebosDeviceTarget(
   if (explicitDevice && explicitDevice.trim().length > 0) {
     const pin = explicitDevice.trim();
     const pinned = devices.find((d) => d.name === pin);
-    if (pinned) return { target: pin, source: "pin", host: pinned.host };
-
-    if (first) {
-      return {
-        target: first.name,
-        source: "discovered",
-        host: first.host,
-        warning:
-          `FLUTTER_DEVICE_WEBOS_DEVICE is pinned to "${pin}", but that name is not a ` +
-          `registered ares device (stale pin). Using the first listed webOS ` +
-          `device "${first.name}" instead. Register the device with ` +
-          `ares-setup-device or update the pin.`,
-      };
-    }
-
-    return {
-      target: pin,
-      source: "stale-pin",
-      warning:
-        `FLUTTER_DEVICE_WEBOS_DEVICE is pinned to "${pin}", but that name is not a ` +
-        `registered ares device and no other device was found to fall back ` +
-        `to. Proceeding with the pin; expect failures if it is not registered.`,
-    };
+    if (pinned?.online) return { target: pin, source: "pin", host: pinned.host };
+    throw new RequestedDeviceUnavailableError({
+      platform: "webOS",
+      requested: pin,
+      origin: "the FLUTTER_DEVICE_WEBOS_DEVICE env var",
+      state: pinned ? "registered without a connection" : undefined,
+      online: devices.filter((d) => d.online).map((d) => ({ id: d.name, detail: d.host })),
+      hint: "Register it with `ares-setup-device`, or update the pin.",
+    });
   }
 
   if (!first) return null;
+  const online = devices.filter((d) => d.online);
   return {
     target: first.name,
     source: first.online ? "discovered" : "discovered-offline",
     host: first.host,
+    ...(online.length > 1
+      ? { unnamedAmong: online.map((d) => ({ id: d.name, detail: d.host })) }
+      : {}),
   };
 }

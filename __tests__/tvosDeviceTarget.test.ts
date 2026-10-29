@@ -284,18 +284,33 @@ describe("resolveTvosTarget", () => {
     expect(r?.target).toBe(physConnected.id);
   });
 
-  it("self-heals a stale pin to the first available device (with warning)", () => {
-    const r = resolveTvosTarget("NOT-CONNECTED", [physConnected], []);
-    expect(r?.target).toBe(physConnected.id);
-    expect(r?.source).toBe("discovered");
-    expect(r?.warning).toMatch(/stale pin/i);
+  it("refuses a stale pin, naming it and the available Apple TV, rather than switching to it", () => {
+    expect(() => resolveTvosTarget("NOT-CONNECTED", [physConnected], [])).toThrow(
+      /"NOT-CONNECTED" \(from the APPLE_TV_DEVICE\/FLUTTER_DEVICE_TVOS_DEVICE env var\) is not online\. Online tvOS devices: A1B2C3D4-5E6F-7A8B-9C0D-1E2F3A4B5C6D \(device, Example Apple TV\)/
+    );
   });
 
-  it("keeps a stale pin when nothing is available to fall back to", () => {
-    const r = resolveTvosTarget("NOT-CONNECTED", [], []);
-    expect(r?.target).toBe("NOT-CONNECTED");
-    expect(r?.source).toBe("stale-pin");
-    expect(r?.warning).toMatch(/fall back/i);
+  it("refuses a stale pin when nothing is available either", () => {
+    expect(() => resolveTvosTarget("NOT-CONNECTED", [], [])).toThrow(
+      /Online tvOS devices: none/
+    );
+  });
+
+  it("treats a per-call udid as the pin, and refuses it by that name when it is gone", () => {
+    const r = resolveTvosTarget(physConnected.id, [physConnected], [simBooted], {
+      udid: simBooted.id,
+    });
+    expect(r?.target).toBe(simBooted.id);
+    expect(r?.source).toBe("pin");
+    expect(() =>
+      resolveTvosTarget(undefined, [physConnected], [], { udid: simBooted.id })
+    ).toThrow(/"TV-SIM-BOOTED" \(from the device_udid argument\)/);
+  });
+
+  it("refuses kind:'simulator' when no simulator is booted, rather than using the Apple TV", () => {
+    expect(() =>
+      resolveTvosTarget(undefined, [physConnected], [], { kind: "simulator" })
+    ).toThrow(/a simulator was requested and none is online/);
   });
 
   it("returns a listed-but-offline device as discovered-offline", () => {
@@ -358,5 +373,23 @@ describe("regression: tvOS resolver picks Apple TV, never iPhone/iPad", () => {
     const physical = parseFlutterTvosDevices(iphoneOnly);
     expect(physical).toHaveLength(0);
     expect(resolveTvosTarget(undefined, physical, [])).toBeNull();
+  });
+});
+
+describe("resolveTvosTarget: class and name checks on a named target", () => {
+  const atv: TvosDevice = { id: "ATV-1", name: "Living Room", kind: "device", available: true };
+  const sim: TvosDevice = { id: "SIM-1", name: "Apple TV 4K", kind: "simulator", available: true };
+
+  it("refuses a named target whose class contradicts kind", () => {
+    expect(() => resolveTvosTarget(undefined, [atv], [sim], { udid: "ATV-1", kind: "simulator" })).toThrow(
+      /"ATV-1" is a device target, but a simulator was requested/
+    );
+  });
+
+  it("refuses a name pin that matches two available Apple TVs", () => {
+    const twin: TvosDevice = { ...atv, id: "ATV-2" };
+    expect(() => resolveTvosTarget("Living Room", [atv, twin], [])).toThrow(
+      /matches 2 online tvOS devices: ATV-1 \(device, Living Room\), ATV-2 \(device, Living Room\)/
+    );
   });
 });

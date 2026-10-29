@@ -536,7 +536,7 @@ export class MacosAdapter implements PlatformAdapter {
    * every other verb acts on. Precedence: the app staged by install() THIS
    * SESSION, else the FLUTTER_DEVICE_MACOS_PROCESS_NAME pin (for an
    * already-running app never deployed by this session).
-   * Mirrors the other adapters' pin/discover/self-heal shape: a candidate that
+   * A candidate that
    * isn't found running (see {@link isProcessRunning}) is still returned (not
    * fatal), carrying a warning, so the caller sees exactly why a subsequent
    * call fails rather than a silent substitution.

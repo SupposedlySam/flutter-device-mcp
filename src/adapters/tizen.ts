@@ -22,8 +22,12 @@ import path from "path";
 import { CommandResult, quote, runShell } from "../cli.js";
 import {
   DEFAULT_SDB_PORT,
+  normalizeDeviceTarget,
   parseDeviceTarget,
+  parseSdbDevices,
+  parseTizenTargetFile,
   resolveDeviceTarget,
+  tpkPackageId,
 } from "../deviceTarget.js";
 import {
   buildPtyCaptureCommand,
@@ -50,10 +54,13 @@ import {
 } from "../types.js";
 import { dartDefineArgs } from "../dartDefine.js";
 import {
+  DeviceTargetPreference,
   InstallOptions,
   KillStaleScope,
   KillStaleScopeKind,
   PlatformAdapter,
+  UninstallCheck,
+  UninstallVerdict,
 } from "./platformAdapter.js";
 import { ScreenshotResult } from "../screenshot.js";
 import { RecordResult } from "../recording.js";
@@ -87,6 +94,10 @@ export const TIZEN_FAILURE_SIGNATURES: RegExp[] = [
 
 /** flutter-tizen device profile used when the config leaves it unset. */
 const DEFAULT_DEVICE_PROFILE = "tv";
+
+/** A Tizen install that failed because the device is out of space. */
+export const TIZEN_STORAGE_FAILURE_SIGNATURE =
+  /No space left on device|not enough (?:space|storage|memory)|out of (?:space|storage)|insufficient (?:space|storage)|ENOSPC/i;
 
 /**
  * Compose the flutter-tizen launch and delegate the pty wrapping to
@@ -147,6 +158,11 @@ export interface TizenAdapterConfig {
    * without a real Tizen SDK on disk.
    */
   checkRootstrap?: () => RootstrapCheck;
+  /**
+   * The `.tizen-target` file `setup` writes, the lowest-precedence device pin.
+   * Defaults to `<appDir>/.tizen-target`.
+   */
+  targetFile?: string;
 }
 
 export class TizenAdapter implements PlatformAdapter {
@@ -282,7 +298,8 @@ export class TizenAdapter implements PlatformAdapter {
       resolvedTarget = resolution?.target ?? this.config.device ?? "";
     }
 
-    const targetFile = path.join(this.config.appDir, ".tizen-target");
+    const targetFile =
+      this.config.targetFile ?? path.join(this.config.appDir, ".tizen-target");
     try {
       fs.writeFileSync(targetFile, `${resolvedTarget}\n`, "utf8");
     } catch (error) {
@@ -395,35 +412,65 @@ export class TizenAdapter implements PlatformAdapter {
   }
 
   /**
-   * Resolve the sdb device target: the device pin while it is confirmed online,
-   * else the first online device from `sdb devices`. `sdb devices` is always
-   * consulted — a stale pin (device moved DHCP address) would otherwise route
-   * deploys to a dead address. Throws an McpError when nothing is usable.
+   * The device this call is pinned to, and where the pin came from: the call's
+   * `device_udid`, else the configured device (FLUTTER_DEVICE_TIZEN_DEVICE /
+   * config), else the `.tizen-target` file `setup` writes. Install, launch and
+   * uninstall all act on the one resolved device (`-d` / `-s`), so a per-call
+   * pin is honoured rather than contradicted.
    */
-  async discoverDevice(): Promise<DeviceResolution> {
-    let result = await runShell("sdb devices", { timeoutMs: 15000 });
-    let resolution = resolveDeviceTarget(this.config.device, result.stdout);
-
-    // Auto-connect a CONFIGURED device that is not attached yet. Unlike USB
-    // platforms, a Tizen TV is reached over the network and `sdb devices` lists
-    // NOTHING until an explicit `sdb connect <ip>:26101`. When a device is
-    // configured (FLUTTER_DEVICE_TIZEN_DEVICE / config) but absent from the list,
-    // connect it once and re-list — the convenience the standalone `setup` step
-    // otherwise provides, so a configured TV "just works" without a manual setup.
-    if (!resolution && this.config.device) {
-      const { host } = parseDeviceTarget(this.config.device);
-      const target = `${host}:${DEFAULT_SDB_PORT}`;
-      const connect = await runShell(`sdb connect ${quote(target)}`, {
-        timeoutMs: 30000,
-      });
-      logger.info("Tizen auto-connect attempt", {
-        target,
-        output: connect.combined,
-      });
-      result = await runShell("sdb devices", { timeoutMs: 15000 });
-      resolution = resolveDeviceTarget(this.config.device, result.stdout);
+  private devicePin(
+    preference: DeviceTargetPreference
+  ): { value: string; origin: string } | undefined {
+    const callPin = preference.udid?.trim();
+    if (callPin) return { value: callPin, origin: "the device_udid argument" };
+    if (this.config.device) {
+      return {
+        value: this.config.device,
+        origin: "the configured Tizen device (FLUTTER_DEVICE_TIZEN_DEVICE)",
+      };
     }
+    const targetFile =
+      this.config.targetFile ?? path.join(this.config.appDir, ".tizen-target");
+    try {
+      const fromFile = parseTizenTargetFile(fs.readFileSync(targetFile, "utf8"));
+      if (fromFile) return { value: fromFile, origin: targetFile };
+    } catch {
+      // No target file: nothing is pinned.
+    }
+    return undefined;
+  }
 
+  /**
+   * Resolve the sdb device target: the pin while it is online, else the only
+   * online device from `sdb devices`. A Tizen TV is reached over the network and
+   * `sdb devices` lists nothing until `sdb connect <ip>:26101`, so a pin that is
+   * not listed is connected once first (skipped for a read-only call); a pin
+   * that is still not online is refused, never replaced by another device.
+   */
+  async discoverDevice(
+    preference: DeviceTargetPreference = {}
+  ): Promise<DeviceResolution> {
+    const pin = this.devicePin(preference);
+    let result = await runShell("sdb devices", { timeoutMs: 15000 });
+    if (pin && !preference.readOnly) {
+      const wanted = normalizeDeviceTarget(pin.value);
+      const online = parseSdbDevices(result.stdout).some(
+        (d) => d.state === "device" && normalizeDeviceTarget(d.serial) === wanted
+      );
+      if (!online) {
+        const { host } = parseDeviceTarget(pin.value);
+        const target = `${host}:${DEFAULT_SDB_PORT}`;
+        const connect = await runShell(`sdb connect ${quote(target)}`, {
+          timeoutMs: 30000,
+        });
+        logger.info("Tizen auto-connect attempt", {
+          target,
+          output: connect.combined,
+        });
+        result = await runShell("sdb devices", { timeoutMs: 15000 });
+      }
+    }
+    const resolution = resolveDeviceTarget(pin?.value, result.stdout, pin?.origin);
     if (!resolution) {
       throw new McpError(
         ErrorCode.InvalidParams,
@@ -432,9 +479,6 @@ export class TizenAdapter implements PlatformAdapter {
           "setup --platform tizen --device-ip <ip>`, or `sdb connect <ip>:26101` yourself. " +
           `sdb devices output:\n${result.stdout || result.stderr}`
       );
-    }
-    if (resolution.warning) {
-      logger.warn("Stale FLUTTER_DEVICE_TIZEN_DEVICE pin", resolution);
     }
     return resolution;
   }
@@ -479,6 +523,50 @@ export class TizenAdapter implements PlatformAdapter {
     );
   }
 
+  /**
+   * For space recovery, confirm the TPK `flutter-tizen install` installs
+   * carries this adapter's package id. Every `.tpk` under build/tizen/tpk must
+   * carry it, since any of them may be the one installed.
+   */
+  async verifyUninstallTarget(
+    _device: string,
+    check: UninstallCheck
+  ): Promise<UninstallVerdict> {
+    if (check.purpose !== "space-recovery") return { ok: true };
+    const tpkDir = path.join(this.config.appDir, "build", "tizen", "tpk");
+    let tpks: string[];
+    try {
+      tpks = fs.readdirSync(tpkDir).filter((f) => f.endsWith(".tpk"));
+    } catch {
+      tpks = [];
+    }
+    if (tpks.length === 0) {
+      return {
+        ok: false,
+        reason: `No .tpk under ${tpkDir}, so the package being installed cannot be confirmed.`,
+      };
+    }
+    const other = tpks.find((f) => tpkPackageId(f) !== this.appId);
+    if (other) {
+      return {
+        ok: false,
+        reason:
+          `${other} under ${tpkDir} does not carry ${this.appId}, so uninstalling ` +
+          `${this.appId} could free space by removing a different app.`,
+      };
+    }
+    return { ok: true };
+  }
+
+  /**
+   * True only when an install failed for lack of space. The toolchain prints
+   * "Install failed" for every failure (a certificate mismatch too), and uninstalling to
+   * make room fixes only this one.
+   */
+  isInstallFailure(combined: string): boolean {
+    return TIZEN_STORAGE_FAILURE_SIGNATURE.test(combined);
+  }
+
   async uninstall(device: string, appId: string): Promise<CommandResult> {
     return runShell(
       `sdb -s ${quote(device)} uninstall ${quote(appId)}`,
@@ -521,7 +609,7 @@ export class TizenAdapter implements PlatformAdapter {
     try {
       // Reuse the caller's already-resolved device (deploy path) to avoid a
       // redundant `sdb devices` + REST round-trip; self-discover otherwise.
-      const resolution = resolved ?? (await this.discoverDevice());
+      const resolution = resolved ?? (await this.discoverDevice({ readOnly: true }));
       const host = hostFromSdbTarget(resolution.target);
       const facts = await fetchDeveloperModeFacts(host);
       // With no facts at all the REST probe didn't answer — stay silent rather
@@ -591,13 +679,17 @@ export class TizenAdapter implements PlatformAdapter {
    * tool calls. The device host is resolved LAZILY on each send via live device
    * discovery (the bare IP, sdb :26101 stripped) — never a hardcoded address.
    */
-  input(): InputController {
+  input(preference: DeviceTargetPreference = {}): InputController {
+    this.inputDevicePin = preference.udid;
     if (!this.inputController) {
       this.inputController = new TizenInputController(async () => {
-        const resolution = await this.discoverDevice();
+        const resolution = await this.discoverDevice({ udid: this.inputDevicePin });
         return hostFromSdbTarget(resolution.target);
       });
     }
     return this.inputController;
   }
+
+  /** The device_udid the current input call named; read by the cached controller. */
+  private inputDevicePin: string | undefined;
 }

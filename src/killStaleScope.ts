@@ -5,7 +5,7 @@
  * whole command line, so on a host with two attached targets it cannot tell a
  * wedged session on the device being deployed to from a healthy session someone
  * is actively using on the OTHER device — both match identically. The device
- * selection layer (`device_udid`, env pins, self-heal) is device-aware, so a
+ * selection layer (`device_udid`, env pins) is device-aware, so a
  * teardown that is not makes `flutter_deploy` unusable on a multi-target host:
  * choosing the emulator with `device_udid` still killed the phone's session.
  *

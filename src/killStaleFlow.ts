@@ -11,22 +11,24 @@
  * exactly that reason — a fake adapter can record that the teardown was NOT
  * called.
  */
+import {
+  DeviceSelectionRefusedError,
+  RequestedDeviceUnavailableError,
+} from "./deviceRequest.js";
 import { summarizeKillStale } from "./handlerLogic.js";
 import { LaunchRecord } from "./launchRegistry.js";
 import { CommandResult, DeviceResolution } from "./types.js";
 import type {
   DeviceTargetPreference,
-  KillStaleScope,
   KillStaleScopeKind,
+  PlatformAdapter,
 } from "./adapters/platformAdapter.js";
 
 /** The slice of a {@link PlatformAdapter} a teardown needs. */
-export interface TeardownAdapter {
-  readonly platform: string;
-  readonly killStaleScope: KillStaleScopeKind;
-  killStale(scope: KillStaleScope): Promise<Record<string, CommandResult>>;
-  discoverDevice(preference?: DeviceTargetPreference): Promise<DeviceResolution>;
-}
+export type TeardownAdapter = Pick<
+  PlatformAdapter,
+  "platform" | "killStaleScope" | "killStale" | "discoverDevice"
+>;
 
 /** The launch-record side effects a teardown performs. */
 export interface LaunchRecordStore {
@@ -62,6 +64,8 @@ export function decideKillStaleScope(opts: {
   allDevices?: boolean;
   deviceUdid?: string;
   resolution?: { target: string; warning?: string };
+  /** A named device that is not online: its host processes may still be torn down. */
+  offlineNamed?: { id: string; warning: string };
   resolutionError?: string;
 }): KillStaleScopeDecision {
   if (opts.scopeKind === "platform") {
@@ -91,6 +95,9 @@ export function decideKillStaleScope(opts: {
       warning: opts.resolution.warning,
     };
   }
+  if (opts.offlineNamed) {
+    return { kind: "device", device: opts.offlineNamed.id, warning: opts.offlineNamed.warning };
+  }
   return {
     kind: "refuse",
     reason:
@@ -118,6 +125,7 @@ export async function runKillStale(deps: {
   const { adapter, args, store } = deps;
 
   let resolution: DeviceResolution | undefined;
+  let offlineNamed: { id: string; warning: string } | undefined;
   let resolutionError: string | undefined;
   // A platform-scoped teardown needs no device, so it does not ask for one:
   // discovery can fail precisely BECAUSE a wedged driver holds the lock, and
@@ -126,7 +134,21 @@ export async function runKillStale(deps: {
     try {
       resolution = await adapter.discoverDevice({ udid: args.device_udid });
     } catch (error) {
-      resolutionError = error instanceof Error ? error.message : String(error);
+      if (error instanceof RequestedDeviceUnavailableError) {
+        // A teardown touches host processes, not the device, so a named device
+        // that is gone can still have its orphaned session killed, and nothing
+        // attributed to another device is. A model name is scoped by the serial
+        // it is listed under, since that is what a session's `-d` carries.
+        const id = error.listedAs ?? error.requested;
+        offlineNamed = {
+          id,
+          warning:
+            `${id} is not online; the teardown was confined to host processes ` +
+            `attributed to it.`,
+        };
+      } else {
+        resolutionError = error instanceof Error ? error.message : String(error);
+      }
     }
   }
 
@@ -135,6 +157,7 @@ export async function runKillStale(deps: {
     allDevices: args.all_devices,
     deviceUdid: args.device_udid,
     resolution,
+    offlineNamed,
     resolutionError,
   });
 
@@ -194,9 +217,11 @@ export async function runKillStale(deps: {
  * the device survives a failed deploy and `flutter_kill_stale` has to be aimed
  * at it deliberately.
  *
- * A PLATFORM-scoped platform has the opposite order available and takes it:
- * its teardown needs no device, so it runs BEFORE discovery — where a wedged
- * `flutter-tizen` may be the reason `sdb devices` answers wrongly at all.
+ * A PLATFORM-scoped platform's teardown needs no device, but it still resolves
+ * first: a deploy refused for a named device that is not online must not have
+ * killed anything on the way. If discovery fails outright, the teardown runs and
+ * discovery is tried again, since a wedged `flutter-tizen` may be why `sdb
+ * devices` answered wrongly at all.
  */
 export async function tearDownForDeploy(deps: {
   adapter: TeardownAdapter;
@@ -207,9 +232,19 @@ export async function tearDownForDeploy(deps: {
 }> {
   const { adapter, preference } = deps;
   if (adapter.killStaleScope === "platform") {
-    const killed = await adapter.killStale({ kind: "all-devices" });
-    const resolution = await adapter.discoverDevice(preference);
-    return { resolution, killed };
+    // Resolve first, so a refusal (a named device that is not online) leaves
+    // every running session alone. Only when discovery itself fails — which a
+    // wedged driver can cause — is the teardown run first and discovery retried.
+    try {
+      const resolution = await adapter.discoverDevice(preference);
+      const killed = await adapter.killStale({ kind: "all-devices" });
+      return { resolution, killed };
+    } catch (error) {
+      if (error instanceof DeviceSelectionRefusedError) throw error;
+      const killed = await adapter.killStale({ kind: "all-devices" });
+      const resolution = await adapter.discoverDevice(preference);
+      return { resolution, killed };
+    }
   }
   const resolution = await adapter.discoverDevice(preference);
   const killed = await adapter.killStale({

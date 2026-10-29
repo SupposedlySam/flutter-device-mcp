@@ -97,8 +97,10 @@ const {
   buildAndroidPtyLaunchCommand,
   ANDROID_FAILURE_SIGNATURES,
   ANDROID_KEYCODE_HOME,
+  androidBuildPackageId,
 } = await import("../src/adapters/android.js");
 const { UnsupportedInputError } = await import("../src/types.js");
+const { runKillStale } = await import("../src/killStaleFlow.js");
 
 const SERIAL = "39121FDJH003AB";
 const ANDROID_APP_DIR = "/repo/app";
@@ -112,6 +114,7 @@ function android(device?: string) {
     appId: ANDROID_APP_ID,
     device,
     flutterCommand: "flutter",
+    aaptCommand: "aapt2",
   });
 }
 
@@ -405,12 +408,75 @@ describe("AndroidAdapter.launchAndCaptureUri (deploy = flutter run)", () => {
   });
 });
 
+/**
+ * An app tree whose Android build produces com.example.app, so install() and
+ * space recovery can read the package id the way they do in a real checkout.
+ */
+const ANDROID_TREE = fs.mkdtempSync(path.join(os.tmpdir(), "android-adapter-tree-"));
+fs.mkdirSync(path.join(ANDROID_TREE, "android", "app"), { recursive: true });
+fs.writeFileSync(
+  path.join(ANDROID_TREE, "android", "app", "build.gradle"),
+  'android {\n  defaultConfig {\n    applicationId "com.example.app"\n  }\n  buildTypes {\n    debug {\n    }\n  }\n}\n'
+);
+afterAll(() => fs.rmSync(ANDROID_TREE, { recursive: true, force: true }));
+
+function androidInTree() {
+  return new AndroidAdapter(
+    { appDir: ANDROID_TREE, appId: ANDROID_APP_ID, flutterCommand: "flutter", aaptCommand: "aapt2" }
+  );
+}
+
+const PM_QUERY = `adb -s '${SERIAL}' shell 'pm list packages -i com.example.app; echo __pm_exit=$?'`;
+
 describe("AndroidAdapter.install / uninstall", () => {
-  it("install is a no-op success (flutter run installs the apk at launch)", async () => {
-    const result = await android().install(SERIAL, { noLaunch: true });
-    expect(runShell).not.toHaveBeenCalled();
+  it("install checks who installed the build's package, then is a no-op success (flutter run installs at launch)", async () => {
+    runShell.mockResolvedValue({
+      ...okResult,
+      stdout: "package:com.example.app  installer=null\n__pm_exit=0\n",
+    });
+    const result = await androidInTree().install(SERIAL, { noLaunch: true });
+    expect(runShell.mock.calls.map(([c]) => c)).toEqual([PM_QUERY]);
     expect(result.success).toBe(true);
     expect(result.combined).toMatch(/flutter run/i);
+  });
+
+  it("install refuses over a Play Store copy, because flutter run would uninstall it", async () => {
+    runShell.mockResolvedValue({
+      ...okResult,
+      stdout: "package:com.example.app  installer=com.android.vending\n__pm_exit=0\n",
+    });
+    const result = await androidInTree().install(SERIAL, { noLaunch: true });
+    expect(result.success).toBe(false);
+    expect(result.combined).toMatch(/installed by com\.android\.vending, not by adb/);
+    expect(result.combined).toMatch(/allow_store_app_removal/);
+  });
+
+  it("install refuses when it cannot tell who installed the app", async () => {
+    runShell.mockResolvedValue({
+      ...okResult,
+      success: false,
+      code: 1,
+      combined: "error: closed",
+    });
+    const result = await androidInTree().install(SERIAL, { noLaunch: true });
+    expect(result.success).toBe(false);
+    expect(result.combined).toMatch(/Could not tell who installed/);
+  });
+
+  it("install refuses when the tree does not say which package the build produces", async () => {
+    const result = await android().install(SERIAL, { noLaunch: true });
+    expect(result.success).toBe(false);
+    expect(result.combined).toMatch(/No build\.gradle under/);
+    expect(runShell).not.toHaveBeenCalled();
+  });
+
+  it("install proceeds over a Play Store copy when allowStoreAppRemoval is set, without asking", async () => {
+    const result = await androidInTree().install(SERIAL, {
+      noLaunch: true,
+      allowStoreAppRemoval: true,
+    });
+    expect(runShell).not.toHaveBeenCalled();
+    expect(result.success).toBe(true);
   });
 
   it("uninstall shells out to `adb -s <serial> uninstall <appId>`", async () => {
@@ -420,74 +486,146 @@ describe("AndroidAdapter.install / uninstall", () => {
   });
 });
 
-describe("AndroidAdapter out-of-storage recovery (fires at LAUNCH, not install)", () => {
-  it("the deploy's install-side ENOSPC retry can never fire on Android", async () => {
-    // This is WHY the recovery has to live on the launch seam: the deploy
-    // retries the INSTALL when install output looks like ENOSPC, but Android's
-    // install step never runs an install at all -- `flutter run` does, at launch.
-    // A storage-starved device therefore produces a SUCCESSFUL install step.
-    const install = await android().install(SERIAL, { noLaunch: true });
-    expect(install.success).toBe(true);
-    expect(runShell).not.toHaveBeenCalled();
-  });
-
-  it("uninstalls to free space and asks for a retry on a storage launch failure", async () => {
-    const adapter = android();
-    runShell.mockClear();
-    runShell.mockResolvedValue(okResult);
-    const rec = await adapter.recoverLaunchFailure!(
-      SERIAL,
-      "adb: failed to install app.apk: Failure [INSTALL_FAILED_INSUFFICIENT_STORAGE]"
-    );
-    expect(rec.recovered).toBe(true);
-    expect(rec.note).toMatch(/out of storage/i);
-    expect(runShell.mock.calls[0][0]).toBe(
-      `adb -s '${SERIAL}' uninstall '${ANDROID_APP_ID}'`
-    );
-  });
-
-  it("recognizes the other two storage wordings adb/the filesystem emit", async () => {
-    for (const logTail of [
-      "Failure [INSUFFICIENT_STORAGE]",
-      "Error: No space left on device",
-    ]) {
-      const adapter = android();
-      runShell.mockClear();
-      runShell.mockResolvedValue(okResult);
-      const rec = await adapter.recoverLaunchFailure!(SERIAL, logTail);
-      expect(rec.recovered).toBe(true);
+describe("androidBuildPackageId", () => {
+  it("adds the build type's applicationIdSuffix to the applicationId", () => {
+    const tree = fs.mkdtempSync(path.join(os.tmpdir(), "android-suffix-"));
+    try {
+      const dir = path.join(tree, "android");
+      fs.mkdirSync(path.join(dir, "app"), { recursive: true });
+      fs.writeFileSync(path.join(dir, "gradle.properties"), "appPackage=com.example.app\n");
+      fs.writeFileSync(
+        path.join(dir, "app", "build.gradle"),
+        'android {\n  defaultConfig {\n    applicationId project.appPackage\n  }\n  buildTypes {\n    debug {\n      applicationIdSuffix ".dev"\n    }\n    release {\n    }\n  }\n}\n'
+      );
+      expect(androidBuildPackageId(tree, "debug")).toEqual({ ok: true, packageId: "com.example.app.dev" });
+      expect(androidBuildPackageId(tree, "release")).toEqual({ ok: true, packageId: "com.example.app" });
+    } finally {
+      fs.rmSync(tree, { recursive: true, force: true });
     }
   });
 
-  it("does NOT retry when the space-freeing uninstall itself fails", async () => {
-    // Nothing was freed, so a retry would hit the same wall -- report the real
-    // blocker instead of burning the one retry.
+  it("refuses to guess when a suffix is declared outside the build type", () => {
+    const tree = fs.mkdtempSync(path.join(os.tmpdir(), "android-suffix-"));
+    try {
+      const dir = path.join(tree, "android");
+      fs.mkdirSync(path.join(dir, "app"), { recursive: true });
+      fs.writeFileSync(path.join(dir, "gradle.properties"), "appPackage=com.example.app\n");
+      fs.writeFileSync(
+        path.join(dir, "app", "build.gradle"),
+        'android {\n  defaultConfig {\n    applicationId "com.example.app"\n  }\n  productFlavors {\n    staging {\n      applicationIdSuffix ".staging"\n    }\n  }\n  buildTypes {\n    debug {\n    }\n  }\n}\n'
+      );
+      expect(androidBuildPackageId(tree, "debug")).toMatchObject({ ok: false });
+    } finally {
+      fs.rmSync(tree, { recursive: true, force: true });
+    }
+  });
+});
+
+/** A host where the built apk is com.example.app and the installed copy came from adb. */
+function mockRecoverableHost() {
+  runShell.mockImplementation(async (cmd: string) => {
+    if (/aapt2'? dump packagename/.test(cmd)) {
+      return { ...okResult, stdout: "com.example.app\n" };
+    }
+    if (cmd.includes("pm list packages -i")) {
+      return { ...okResult, stdout: "package:com.example.app  installer=null\n__pm_exit=0\n" };
+    }
+    return okResult;
+  });
+}
+
+const SPACE_RECOVERY = {
+  purpose: "space-recovery" as const,
+  packageId: "com.example.app",
+  allowStoreAppRemoval: false,
+};
+
+describe("AndroidAdapter ENOSPC recovery (install happens at launch)", () => {
+  it("isInstallFailure recognizes the Android storage wordings", () => {
     const adapter = android();
-    runShell.mockClear();
-    runShell.mockResolvedValue({
-      ...okResult,
-      success: false,
-      code: 1,
-      combined: "adb: device offline",
-    });
-    const rec = await adapter.recoverLaunchFailure!(
-      SERIAL,
-      "INSTALL_FAILED_INSUFFICIENT_STORAGE"
-    );
-    expect(rec.recovered).toBe(false);
-    expect(rec.note).toMatch(/device offline/);
+    expect(
+      adapter.isInstallFailure!(
+        "adb: failed to install app.apk: Failure [INSTALL_FAILED_INSUFFICIENT_STORAGE]"
+      )
+    ).toBe(true);
+    expect(
+      adapter.isInstallFailure!("write failed: No space left on device")
+    ).toBe(true);
   });
 
-  it("is a no-op for a launch failure that is not about storage", async () => {
-    const adapter = android();
-    runShell.mockClear();
-    const rec = await adapter.recoverLaunchFailure!(
+  it("isInstallFailure does not match a benign progress line", () => {
+    expect(
+      android().isInstallFailure!(
+        "Installing build/app/outputs/flutter-apk/app.apk..."
+      )
+    ).toBe(false);
+  });
+
+  it("recoverLaunchFailure asks for the build's package to be uninstalled on a storage failure, doing nothing itself", async () => {
+    const rec = await androidInTree().recoverLaunchFailure(
+      SERIAL,
+      "adb: failed to install app.apk: Failure [INSTALL_FAILED_INSUFFICIENT_STORAGE]"
+    );
+    expect(rec).toEqual({
+      action: "uninstall-and-retry",
+      packageId: "com.example.app",
+      note: expect.stringMatching(/out of storage/),
+    });
+    expect(runShell).not.toHaveBeenCalled();
+  });
+
+  it("recoverLaunchFailure asks for nothing when the tree does not say which package the build produces", async () => {
+    const rec = await android().recoverLaunchFailure(SERIAL, "INSTALL_FAILED_INSUFFICIENT_STORAGE");
+    expect(rec.action).toBe("none");
+  });
+
+  it("recoverLaunchFailure is a no-op for a non-storage launch failure", async () => {
+    const rec = await androidInTree().recoverLaunchFailure(
       SERIAL,
       "Gradle task assembleDebug failed with exit code 1"
     );
-    expect(rec.recovered).toBe(false);
-    // No uninstall on an unrelated failure -- that would destroy app state.
+    expect(rec).toEqual({ action: "none" });
     expect(runShell).not.toHaveBeenCalled();
+  });
+
+  it("verifyUninstallTarget refuses when aapt2 cannot be found to confirm the package", async () => {
+    const adapter = new AndroidAdapter(
+      { appDir: ANDROID_TREE, appId: ANDROID_APP_ID, flutterCommand: "flutter" }
+    );
+    const env = { ...process.env };
+    process.env = { PATH: env.PATH };
+    try {
+      mockRecoverableHost();
+      const verdict = await adapter.verifyUninstallTarget(SERIAL, {
+        ...SPACE_RECOVERY,
+        buildLog: "INSTALL_FAILED_INSUFFICIENT_STORAGE",
+      });
+      expect(verdict).toEqual({ ok: false, reason: expect.stringMatching(/aapt2 was not found/) });
+    } finally {
+      process.env = env;
+    }
+  });
+
+  it("verifyUninstallTarget reads the apk path to check from the failed launch's own output", async () => {
+    mockRecoverableHost();
+    const verdict = await androidInTree().verifyUninstallTarget(SERIAL, {
+      ...SPACE_RECOVERY,
+      buildLog:
+        "Installing build/app/outputs/flutter-apk/app-profile.apk...\nINSTALL_FAILED_INSUFFICIENT_STORAGE",
+    });
+    expect(verdict).toEqual({ ok: true });
+    expect(runShell).toHaveBeenCalledWith(
+      `'aapt2' dump packagename '${ANDROID_TREE}/build/app/outputs/flutter-apk/app-profile.apk'`,
+      { timeoutMs: 30000 }
+    );
+  });
+
+  it("the storage signature stays terminal for the launch poll (fails fast so recovery fires)", () => {
+    expect(
+      ANDROID_FAILURE_SIGNATURES.some((re) =>
+        re.test("Failure [INSTALL_FAILED_INSUFFICIENT_STORAGE]")
+      )
+    ).toBe(true);
   });
 
   it("classifies storage wordings through the install-failure seam too", () => {
@@ -560,6 +698,27 @@ describe("AndroidAdapter.killStale (device-scoped teardown)", () => {
       .map(Number)
       .sort((a, b) => a - b);
   }
+
+  it("flutter_kill_stale naming an offline emulator by model kills only that emulator's session", async () => {
+    mockHost({
+      adb:
+        "List of devices attached\n" +
+        `${PHONE}  device product:panther model:Pixel_7 transport_id:3\n` +
+        `${EMULATOR}  offline product:sdk_gphone64 model:sdk_gphone64_arm64 transport_id:4\n`,
+    });
+    const result = await runKillStale({
+      adapter: android(),
+      args: { device_udid: "sdk_gphone64_arm64" },
+      store: {
+        readRecords: () => [],
+        removeControlFifo: () => undefined,
+        clearLaunch: () => undefined,
+        clearLaunches: () => undefined,
+      },
+    });
+    expect(killedPids()).toEqual([90010, 90011, 90013, 90080]);
+    expect(result.scope).toBe(EMULATOR);
+  });
 
   it("kills the EMULATOR's session and leaves the phone's running", async () => {
     mockHost();
@@ -1041,21 +1200,26 @@ describe("AndroidAdapter per-call device pin (device_udid)", () => {
     });
   }
 
-  /** The physical device online, the emulator listed but OFFLINE. */
-  function mockEmulatorOffline() {
-    runShell.mockImplementation(async (cmd: string) => {
-      if (cmd.includes("adb devices")) {
-        return {
-          ...okResult,
-          stdout:
-            "List of devices attached\n" +
-            `${SERIAL}  device product:panther model:Pixel_7\n` +
-            `${EMULATOR}  offline product:sdk_gphone64 model:sdk_gphone64_arm64\n`,
-        };
-      }
-      return okResult;
-    });
-  }
+  it("honours the env pin on the input path when device_udid is passed blank", async () => {
+    mockTwoOnlineDevices();
+    await android(EMULATOR).input({ udid: "" }).key("HOME");
+    expect(runShell).toHaveBeenCalledWith(
+      `adb -s '${EMULATOR}' shell input keyevent ${ANDROID_KEYCODE_HOME}`,
+      { timeoutMs: 15000 }
+    );
+  });
+
+  it("records the class of device target asks for, as a deploy would resolve it", async () => {
+    mockTwoOnlineDevices();
+    await android().record({
+      durationSeconds: 1,
+      fps: 10,
+      format: "mp4",
+      target: "simulator",
+    } as Parameters<InstanceType<typeof AndroidAdapter>["record"]>[0]);
+    const [call] = runTimedRecorder.mock.calls as unknown as [{ command: string }][];
+    expect(call[0].command).toContain(`adb -s '${EMULATOR}'`);
+  });
 
   it("selects the named target over the online-first default", async () => {
     mockTwoOnlineDevices();
@@ -1083,14 +1247,22 @@ describe("AndroidAdapter per-call device pin (device_udid)", () => {
     expect(r.target).toBe(EMULATOR);
   });
 
-  it("self-heals a pin whose target went offline instead of failing the call", async () => {
-    mockEmulatorOffline();
-    const r = await android().discoverDevice({ udid: EMULATOR });
-    // Same fallback a stale env pin gets — with the warning naming the argument,
-    // which is the knob this caller can actually change.
-    expect(r.target).toBe(SERIAL);
-    expect(r.source).toBe("discovered");
-    expect(r.warning).toMatch(/device_udid/);
+  it("refuses a pin whose target went offline rather than using the online device", async () => {
+    runShell.mockImplementation(async (cmd: string) => {
+      if (cmd.includes("adb devices")) {
+        return {
+          ...okResult,
+          stdout:
+            "List of devices attached\n" +
+            `${SERIAL}  device product:panther model:Pixel_7\n` +
+            `${EMULATOR}  offline product:sdk_gphone64 model:sdk_gphone64_arm64\n`,
+        };
+      }
+      return okResult;
+    });
+    await expect(android().discoverDevice({ udid: EMULATOR })).rejects.toThrow(
+      /from the device_udid argument/
+    );
   });
 
   it("screenshot captures the pinned device, not the first online one", async () => {
@@ -1140,21 +1312,22 @@ describe("AndroidAdapter per-call device pin (device_udid)", () => {
       { timeoutMs: 15000 }
     );
 
-    // The pin lasts exactly one call: the next unpinned send resolves normally.
-    await adapter.input().key("HOME");
-    expect(runShell).toHaveBeenCalledWith(
-      `adb -s '${SERIAL}' shell input keyevent ${ANDROID_KEYCODE_HOME}`,
-      { timeoutMs: 15000 }
+    // The pin lasts exactly one call: the next unpinned send has two online
+    // devices to choose from and refuses rather than picking one.
+    await expect(adapter.input().key("HOME")).rejects.toThrow(/none was named/);
+    expect(runShell).not.toHaveBeenCalledWith(
+      expect.stringContaining("keyevent"),
+      expect.anything()
     );
   });
 
   it("does NOT tap one device at a position staged for another", async () => {
     mockTwoOnlineDevices();
     const adapter = android();
-    // Staged against the default target, then clicked with a pin to the other
-    // one. The two screens have different coordinate spaces, so carrying the
-    // position across would tap a blind, wrong point — refuse and say so.
-    await adapter.input().pointerMove(120, 340);
+    // Staged against one target, then clicked with a pin to the other. The two
+    // screens have different coordinate spaces, so carrying the position across
+    // would tap a blind, wrong point — refuse and say so.
+    await adapter.input({ udid: SERIAL }).pointerMove(120, 340);
     await expect(
       adapter.input({ udid: EMULATOR }).pointerClick()
     ).rejects.toThrow(/No pointer position staged for emulator-5554/);
@@ -1188,42 +1361,47 @@ describe("AndroidAdapter per-call device pin (device_udid)", () => {
       expect(adapter.inputDeviceWarning()).toBeUndefined();
     });
 
-    it("via flutter_key: pinned device OFFLINE, another online -> self-heals AND names both devices", async () => {
-      mockEmulatorOffline();
+    it("via flutter_key: pinned device OFFLINE, another online -> refused, naming both, and no key is sent anywhere", async () => {
+      mockPinnedEmulatorOffline();
       const adapter = android();
-      await adapter.input({ udid: EMULATOR }).key("HOME");
-      // Still sent — to the device it healed to, not the one asked for.
-      expect(runShell).toHaveBeenCalledWith(
-        `adb -s '${SERIAL}' shell input keyevent ${ANDROID_KEYCODE_HOME}`,
-        { timeoutMs: 15000 }
+      await expect(adapter.input({ udid: EMULATOR }).key("HOME")).rejects.toThrow(
+        new RegExp(`${EMULATOR}.*device_udid.*${SERIAL}`)
       );
-      expect(adapter.inputDeviceWarning()).toMatch(/device_udid/);
-      expect(adapter.inputDeviceWarning()).toContain(EMULATOR);
-      expect(adapter.inputDeviceWarning()).toContain(SERIAL);
-    });
-
-    it("via flutter_pointer move: the pin's warning surfaces even though move sends no adb event", async () => {
-      mockEmulatorOffline();
-      const adapter = android();
-      await adapter.input({ udid: EMULATOR }).pointerMove(10, 20);
-      // move stages only — no `input` adb command, but the resolver still ran.
       expect(runShell).not.toHaveBeenCalledWith(
         expect.stringContaining("shell input"),
         expect.anything()
       );
-      expect(adapter.inputDeviceWarning()).toContain(EMULATOR);
-      expect(adapter.inputDeviceWarning()).toContain(SERIAL);
     });
 
-    it("no per-call pin, stale env pin -> the existing env-pin warning still surfaces unchanged", async () => {
-      mockDiscovery();
+    it("via flutter_pointer move: a staged move to an offline pin is refused too", async () => {
+      mockPinnedEmulatorOffline();
+      const adapter = android();
+      await expect(
+        adapter.input({ udid: EMULATOR }).pointerMove(10, 20)
+      ).rejects.toThrow(new RegExp(EMULATOR));
+    });
+
+    it("no per-call pin, stale env pin -> refused, naming the env var", async () => {
+      runShell.mockImplementation(async (cmd: string) => {
+        if (cmd.includes("adb devices")) {
+          return {
+            ...okResult,
+            stdout:
+              "List of devices attached\n" +
+              `${SERIAL}  device product:panther model:Pixel_7\n`,
+          };
+        }
+        return okResult;
+      });
       // The env pin (constructor `device`) names a serial that never shows up.
       const adapter = android(EMULATOR);
-      await adapter.input().key("HOME");
-      expect(adapter.inputDeviceWarning()).toMatch(
+      await expect(adapter.input().key("HOME")).rejects.toThrow(
         /FLUTTER_DEVICE_ANDROID_DEVICE/
       );
-      expect(adapter.inputDeviceWarning()).not.toMatch(/device_udid/);
+      expect(runShell).not.toHaveBeenCalledWith(
+        expect.stringContaining("shell input"),
+        expect.anything()
+      );
     });
 
     it("no per-call pin, no env pin, one device -> no warning", async () => {
@@ -1233,36 +1411,36 @@ describe("AndroidAdapter per-call device pin (device_udid)", () => {
       expect(adapter.inputDeviceWarning()).toBeUndefined();
     });
 
-    it("clears a previous call's warning even when the new call resolves nothing", async () => {
-      // The reset happens in input() itself, not only as a side effect of the
-      // next resolve. A verb that returns or throws BEFORE resolving a serial
-      // (an unsupported key, a click with nothing staged) would otherwise report
-      // the previous call's warning as if it belonged to this one.
-      mockEmulatorOffline();
+    it("a refused call leaves nothing staged, and the next call targets its own pin", async () => {
+      mockPinnedEmulatorOffline();
       const adapter = android();
-      await adapter.input({ udid: EMULATOR }).key("HOME");
-      expect(adapter.inputDeviceWarning()).toContain(EMULATOR);
+      await expect(
+        adapter.input({ udid: EMULATOR }).pointerMove(120, 340)
+      ).rejects.toThrow();
 
-      adapter.input();
-      expect(adapter.inputDeviceWarning()).toBeUndefined();
-    });
-
-    it("the pin and the warning reset between calls, but the staged position survives", async () => {
-      mockEmulatorOffline();
-      const adapter = android();
-      // Call 1: pin names the offline emulator — self-heals, warns.
-      await adapter.input({ udid: EMULATOR }).pointerMove(120, 340);
-      expect(adapter.inputDeviceWarning()).toContain(EMULATOR);
-
-      // Call 2: pin names the online device directly — no reason to warn, and
-      // the OLD warning from call 1 must not leak into this clean call.
+      await adapter.input({ udid: SERIAL }).pointerMove(30, 40);
       await adapter.input({ udid: SERIAL }).pointerClick();
       expect(adapter.inputDeviceWarning()).toBeUndefined();
-      // The staged position from call 1 still lands — same cached controller.
       expect(runShell).toHaveBeenCalledWith(
-        `adb -s '${SERIAL}' shell input tap 120 340`,
+        `adb -s '${SERIAL}' shell input tap 30 40`,
         { timeoutMs: 15000 }
       );
     });
   });
 });
+
+/** The pinned emulator is listed but offline; the Pixel is online. */
+function mockPinnedEmulatorOffline() {
+  runShell.mockImplementation(async (cmd: string) => {
+    if (cmd.includes("adb devices")) {
+      return {
+        ...okResult,
+        stdout:
+          "List of devices attached\n" +
+          `${SERIAL}  device product:panther model:Pixel_7\n` +
+          `emulator-5554  offline product:sdk_gphone64 model:sdk_gphone64_arm64\n`,
+      };
+    }
+    return okResult;
+  });
+}

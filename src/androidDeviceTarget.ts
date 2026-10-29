@@ -9,11 +9,17 @@
  * consumer — deploy/launch, install, uninstall, and lifecycle alike.
  *
  * This module is pure parsing/selection over the raw `adb devices -l` output the
- * adapter captures — it never spawns anything. The stale-pin fallback mirrors the
- * Tizen/iOS path: a pin (serial or name) that is not currently an online device
- * self-heals to the first online device with a warning, so a reconnected/renamed
- * target does not strand every deploy.
+ * adapter captures — it never spawns anything. A named device that is not
+ * online is refused, never replaced (see deviceRequest.ts).
  */
+import {
+  ambiguousNameRefused,
+  OnlineDevice,
+  pickNamedMatch,
+  RequestedDeviceUnavailableError,
+  targetClassUnavailable,
+  unnamedChoiceRefused,
+} from "./deviceRequest.js";
 import { DeviceResolution } from "./types.js";
 
 export type { DeviceResolution } from "./types.js";
@@ -24,14 +30,15 @@ export type { DeviceResolution } from "./types.js";
  * `serial` is the single id every consumer uses (adb `-s <serial>` AND
  * `flutter run -d <serial>`). `state` is adb's connection state — only `device`
  * is usable; `offline`/`unauthorized`/`no permissions` are surfaced but never
- * auto-selected. `model`/`product` are the display-only descriptors adb prints
- * in the `-l` (long) form (e.g. `model:Pixel_7 product:panther`).
+ * selected. `model`/`product`/`device` are the descriptors adb prints in the
+ * `-l` (long) form (e.g. `model:Pixel_7 product:panther device:panther`).
  */
 export interface AdbDevice {
   serial: string;
   state: string;
   model?: string;
   product?: string;
+  device?: string;
 }
 
 /**
@@ -66,13 +73,15 @@ export function parseAdbDevices(output: string): AdbDevice[] {
 
     let model: string | undefined;
     let product: string | undefined;
+    let device: string | undefined;
     for (const token of rest) {
       const [key, value] = token.split(":");
       if (!value) continue;
       if (key === "model") model = value;
       else if (key === "product") product = value;
+      else if (key === "device") device = value;
     }
-    devices.push({ serial, state, model, product });
+    devices.push({ serial, state, model, product, device });
   }
   return devices;
 }
@@ -82,21 +91,54 @@ export function isOnline(d: AdbDevice): boolean {
   return d.state === "device";
 }
 
+/** Whether an adb target is an emulator or real hardware. */
+export type AndroidTargetClass = "emulator" | "physical";
+
+// Emulator system images report sdk_*/generic*/emu* descriptors (ranchu and
+// goldfish are the emulator kernels); a phone reports its own codename.
+const EMULATOR_DESCRIPTOR =
+  /^(sdk_|sdk$|generic|emu|ranchu|goldfish|vbox86)|Android_SDK_built_for/i;
+const EMULATOR_SERIAL = /^emulator-\d+$/;
+
 /**
- * Where a pin came from, so a self-heal warning names the knob the caller can
- * actually turn: the `FLUTTER_DEVICE_ANDROID_DEVICE` env var (which only a host
- * reload can change) or the per-call `device_udid` argument (which needs no
- * reload). An unattended run that asked for the emulator and silently landed on
- * the physical phone cannot tell those apart from a message that always blames
- * the env var.
+ * Classify a listed device, or a bare name that is not listed at all (an
+ * `emulator-<port>` serial is an emulator whether or not it is running). An
+ * unrecognised device counts as physical, so an emulator request can never
+ * select it.
+ */
+export function androidTargetClass(d: AdbDevice | string): AndroidTargetClass {
+  if (typeof d === "string") {
+    const name = d.trim();
+    return EMULATOR_SERIAL.test(name) || EMULATOR_DESCRIPTOR.test(name)
+      ? "emulator"
+      : "physical";
+  }
+  if (EMULATOR_SERIAL.test(d.serial)) return "emulator";
+  return [d.product, d.model, d.device].some(
+    (v) => !!v && EMULATOR_DESCRIPTOR.test(v)
+  )
+    ? "emulator"
+    : "physical";
+}
+
+function describeDevice(d: AdbDevice): OnlineDevice {
+  return {
+    id: d.serial,
+    detail: [androidTargetClass(d), d.model].filter(Boolean).join(", "),
+  };
+}
+
+/**
+ * Where a pin came from, so a refusal names the knob the caller can actually
+ * turn: the `FLUTTER_DEVICE_ANDROID_DEVICE` env var (which only a host reload can
+ * change) or the per-call `device_udid` argument (which needs no reload).
  */
 export type AndroidPinOrigin = "env" | "call";
 
-/** Name a pin and where it came from, for a warning message. */
-function describePin(pin: string, origin: AndroidPinOrigin): string {
+function describeOrigin(origin: AndroidPinOrigin): string {
   return origin === "call"
-    ? `The per-call device pin (device_udid) names ${pin}`
-    : `FLUTTER_DEVICE_ANDROID_DEVICE is pinned to ${pin}`;
+    ? "the device_udid argument"
+    : "the FLUTTER_DEVICE_ANDROID_DEVICE env var";
 }
 
 /** True when a pin string matches a device by serial or (case-insensitive) model. */
@@ -108,7 +150,6 @@ function pinMatches(pin: string, d: AdbDevice): boolean {
   );
 }
 
-/** Build a resolution payload from a chosen device. */
 function toResolution(
   d: AdbDevice,
   source: DeviceResolution["source"],
@@ -121,82 +162,112 @@ function toResolution(
   };
 }
 
+const UNAUTHORIZED_HINT =
+  "An 'unauthorized' device needs the 'Allow USB debugging' RSA prompt accepted " +
+  "ON THE DEVICE (with USB debugging enabled in Developer options).";
+
 /**
  * Pick the Android device to operate on.
  *
- * A pin (serial or model name — a per-call `device_udid` argument or the
- * `FLUTTER_DEVICE_ANDROID_DEVICE` env var) is authoritative while it matches an
- * ONLINE device; otherwise it self-heals to the first online device (with a
- * warning), then any listed device, mirroring the Tizen/iOS pattern.
- * Offline/unauthorized devices are never auto-selected — when no online device
- * is usable, resolution still returns the best-effort first listed device as
- * `discovered-offline` with a warning. If ANY connected device is unauthorized
- * (even in a mixed offline+unauthorized state), the warning carries the exact
- * "accept the RSA prompt on the device" guidance rather than a bare "no
- * devices". Returns null when nothing is listed at all.
+ * A named device — a per-call `device_udid` or the `FLUTTER_DEVICE_ANDROID_DEVICE` env
+ * pin, matched by serial or model — is used only while exactly one match is
+ * ONLINE. No online match throws {@link RequestedDeviceUnavailableError} naming it
+ * and the online devices; several (two emulators booted from one image report
+ * the same model) is refused as ambiguous. It never substitutes another device.
+ * A blank pin counts as no pin.
  *
- * `pinOrigin` only shapes the warning wording — selection is identical either
- * way, so a per-call pin self-heals exactly as an env pin does rather than
- * hard-failing a caller who named a device that just went offline.
+ * `kind` ("simulator" meaning an emulator, "device" meaning real hardware)
+ * restricts the choice to that class: a named device of the other class is
+ * refused, and so is a request for a class with no online member.
+ *
+ * With nothing named, the single online device of the requested class (any
+ * class when none was requested) is used; several online are refused rather
+ * than taking the first, because the first is how a personal phone gets picked
+ * over the emulator beside it. With none online, the first listed one comes back
+ * as `discovered-offline` so the caller can surface a specific reason. Returns
+ * null when nothing is listed at all.
  */
 export function resolveAndroidTarget(
   pinned: string | undefined,
   adbDevicesOutput: string | undefined,
-  pinOrigin: AndroidPinOrigin = "env"
+  pinOrigin: AndroidPinOrigin = "env",
+  kind?: "device" | "simulator"
 ): DeviceResolution | null {
   const devices = parseAdbDevices(adbDevicesOutput ?? "");
+  const wanted: AndroidTargetClass | undefined =
+    kind === "simulator" ? "emulator" : kind === "device" ? "physical" : undefined;
+  const onlineDevices = devices.filter(isOnline).map(describeDevice);
+  const pin = pinned?.trim();
+
+  if (pin) {
+    const picked = pickNamedMatch(
+      devices.filter((d) => pinMatches(pin, d)),
+      isOnline
+    );
+    if (picked.kind === "several") {
+      throw ambiguousNameRefused({
+        platform: "Android",
+        requested: pin,
+        origin: describeOrigin(pinOrigin),
+        matches: picked.devices.map(describeDevice),
+      });
+    }
+    if (picked.kind === "none") {
+      throw new RequestedDeviceUnavailableError({
+        platform: "Android",
+        requested: pin,
+        origin: describeOrigin(pinOrigin),
+        state: picked.listed?.state,
+        listedAs: picked.listed?.serial,
+        online: onlineDevices,
+        hint:
+          picked.listed && /unauthorized/i.test(picked.listed.state)
+            ? UNAUTHORIZED_HINT
+            : undefined,
+      });
+    }
+    const matched = picked.device;
+    const matchedClass = androidTargetClass(matched);
+    if (wanted && matchedClass !== wanted) {
+      throw targetClassUnavailable({
+        platform: "Android",
+        wanted,
+        requested: pin,
+        resolvedClass: matchedClass,
+        online: onlineDevices,
+      });
+    }
+    return toResolution(matched, "pin");
+  }
+
+  const pool = wanted
+    ? devices.filter((d) => androidTargetClass(d) === wanted)
+    : devices;
+  const online = pool.filter(isOnline);
+  if (online.length > 1) {
+    throw unnamedChoiceRefused({
+      platform: "Android",
+      online: online.map(describeDevice),
+      hint:
+        "Name one with device_udid (a serial or model name), or pass target: " +
+        "\"simulator\" / \"device\" when only one of that class is online.",
+    });
+  }
+  if (online.length === 1) return toResolution(online[0], "discovered");
+  if (wanted) {
+    throw targetClassUnavailable({
+      platform: "Android",
+      wanted,
+      online: onlineDevices,
+    });
+  }
   if (devices.length === 0) return null;
-
-  const online = devices.find(isOnline);
-  // Surface the RSA-prompt hint whenever ANY device is unauthorized — not only
-  // when unauthorized is the sole state. A mixed offline+unauthorized set would
-  // otherwise suppress the actionable guidance the user needs.
   const anyUnauthorized = devices.some((d) => /unauthorized/i.test(d.state));
-
-  const unauthorizedWarning = anyUnauthorized
-    ? "A connected Android device is 'unauthorized' — accept the 'Allow " +
-      "USB debugging' RSA prompt ON THE DEVICE (and enable USB debugging in " +
-      "Developer options), then retry."
-    : undefined;
-
-  if (pinned && pinned.trim().length > 0) {
-    const pin = pinned.trim();
-    const matched = devices.find((d) => pinMatches(pin, d));
-    if (matched && isOnline(matched)) {
-      return toResolution(matched, "pin");
-    }
-    if (online) {
-      return toResolution(
-        online,
-        "discovered",
-        `${describePin(pin, pinOrigin)}, but that target is not an online adb ` +
-          `device (stale pin — it may be unplugged, offline, or unauthorized). ` +
-          `Using the first online device ${online.serial} instead.`
-      );
-    }
-    if (matched) {
-      // Listed but offline/unauthorized — keep the pin, best effort.
-      return toResolution(
-        matched,
-        "discovered-offline",
-        unauthorizedWarning
-      );
-    }
-    return {
-      target: pin,
-      source: "stale-pin",
-      warning:
-        `${describePin(pin, pinOrigin)}, but that target is not a connected adb ` +
-        `device and none was found to fall back to. Proceeding with the pin; ` +
-        `expect failures if it is not connected.`,
-    };
-  }
-
-  if (online) {
-    return toResolution(online, "discovered");
-  }
-
-  // No online device. Fall back to the first listed (offline/unauthorized) one
-  // so the caller can surface a specific reason.
-  return toResolution(devices[0], "discovered-offline", unauthorizedWarning);
+  return toResolution(
+    devices[0],
+    "discovered-offline",
+    anyUnauthorized
+      ? `A connected Android device is 'unauthorized'. ${UNAUTHORIZED_HINT} Then retry.`
+      : undefined
+  );
 }

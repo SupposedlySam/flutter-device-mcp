@@ -25,9 +25,10 @@ import { RecordFormat, RecordResult } from "../recording.js";
  * Per-call device-selection preference (see {@link PlatformAdapter.discoverDevice}).
  *
  * Both fields are optional and additive; an adapter that does not model the
- * concept ignores them. On iOS: `kind` biases physical-vs-simulator (the primary
- * gap — a simulator UI walkthrough on a host with a paired iPhone), and `udid`
- * pins a specific target for this call only (no env pin, no host reload).
+ * concept ignores them. `kind` restricts the class — simulator/emulator vs
+ * physical — and is never served by the other one; `udid` pins a specific
+ * target for this call only (no env pin, no host reload). Either request that
+ * cannot be met exactly fails rather than resolving somewhere else.
  *
  * `udid` is deliberately ONE field across platforms rather than a per-platform
  * name: each adapter reads it in its own id space (iOS/tvOS a flutter id,
@@ -38,10 +39,16 @@ import { RecordFormat, RecordResult } from "../recording.js";
  * way and only a host reload could change it.
  */
 export interface DeviceTargetPreference {
-  /** Bias selection toward a device or a simulator (iOS today). */
+  /** Restrict selection to real hardware or a simulator/emulator (iOS, tvOS, Android). */
   kind?: "device" | "simulator";
   /** Select a specific target by id (any id space the adapter understands). */
   udid?: string;
+  /**
+   * The call only reads (a local-backend host lookup, a diagnostic). Resolution
+   * then does nothing to the device or the connection to it — on Tizen, no
+   * `sdb connect` of a pinned device.
+   */
+  readOnly?: boolean;
 }
 
 /**
@@ -115,7 +122,52 @@ export interface InstallOptions {
   appPath?: string;
   /** macOS ONLY: see {@link appPath}; the URL form. Ignored elsewhere. */
   appUrl?: string;
+  /**
+   * Android: proceed even though the installed copy of the app came from the
+   * Play Store. `flutter run` replaces an install signed by another key by
+   * uninstalling it first, so installing a debug build over a store build
+   * deletes the store build and its data. Refused unless this is set.
+   */
+  allowStoreAppRemoval?: boolean;
 }
+
+/** What the deploy knows when it authorizes a space-recovery uninstall. */
+export interface RecoveryContext {
+  /** The call named this device itself (a per-call id or a pin), confirmed online. */
+  explicitDevice: boolean;
+  /** The caller accepted removing a copy of the app installed from an app store. */
+  allowStoreAppRemoval: boolean;
+}
+
+/**
+ * What an adapter wants done about a failed launch. An adapter never uninstalls
+ * here itself: it asks, and runDeployCore authorizes the uninstall (named
+ * device, confirmed package, installed copy safe to remove) and performs it, so
+ * an adapter cannot skip those checks by forgetting to call them.
+ */
+export type LaunchRecovery =
+  | { action: "none"; note?: string }
+  /** The adapter already fixed the cause (iOS provisioning); retry the launch. */
+  | { action: "retry"; note: string }
+  /** Free space by uninstalling `packageId`, then retry — if authorized. */
+  | { action: "uninstall-and-retry"; packageId: string; note: string };
+
+/** A request to confirm an uninstall is safe before it runs. */
+export interface UninstallCheck {
+  /**
+   * `space-recovery`: the deploy wants to free space, so the build being
+   * installed must carry the package id that would be removed. `requested`: the
+   * caller asked for the uninstall (flutter_uninstall).
+   */
+  purpose: "space-recovery" | "requested";
+  /** The package that would be uninstalled. */
+  packageId: string;
+  allowStoreAppRemoval: boolean;
+  /** The failed install/launch output, used to locate the build being installed. */
+  buildLog?: string;
+}
+
+export type UninstallVerdict = { ok: true } | { ok: false; reason: string };
 
 /**
  * OS-level app-lifecycle control for a resolved device.
@@ -214,13 +266,15 @@ export interface PlatformAdapter {
   build(opts: BuildOptions): Promise<BuildResult>;
 
   /**
-   * Resolve the device to operate on (pin/discovery, stale-pin fallback).
+   * Resolve the device to operate on. A named device (per-call `udid`, env
+   * pin, target file) that is not online throws a RequestedDeviceUnavailableError
+   * rather than resolving to another device.
    *
    * OPTIONAL `preference` lets a caller steer selection PER-CALL, without a
    * server-env pin or host reload — the iOS need surfaced live: with a paired
    * iPhone present, discovery is physical-first, so a simulator UI walkthrough
    * had no way to pick the booted simulator. `kind: "simulator" | "device"`
-   * biases the class; `udid` selects a specific target (any id space the adapter
+   * restricts the class; `udid` selects a specific target (any id space the adapter
    * understands). Adapters that don't distinguish device kinds (Tizen/webOS)
    * ignore it; passing nothing preserves the prior behavior exactly.
    */
@@ -274,24 +328,31 @@ export interface PlatformAdapter {
   ): Promise<LaunchOutcome>;
 
   /**
-   * OPTIONAL reactive recovery for a FAILED launch. The deploy handler calls this
-   * once when {@link launchAndCaptureUri} fails; if it returns `true`, the deploy
-   * retries the launch exactly once. Returns `false` when it recognized nothing
-   * to recover (the launch failure is then reported as-is).
+   * OPTIONAL reactive recovery for a FAILED launch. The deploy calls this once
+   * when {@link launchAndCaptureUri} fails and acts on the answer: `retry`
+   * relaunches once, `uninstall-and-retry` relaunches once after runDeployCore
+   * has authorized and performed the uninstall, `none` reports the failure.
    *
-   * Implemented by iOS: a launch that failed on a provisioning/device-registration
-   * signature triggers a one-shot provisioning-updating `xcodebuild` build (which
-   * registers the device + mints the profile), enabling a first-time-device deploy
-   * to succeed on retry. Other platforms don't implement it — absence means "no
-   * launch-failure recovery" and the failure is reported directly.
+   * iOS answers `retry` after a one-shot provisioning-updating `xcodebuild`
+   * (registering a first-time device), and iOS/Android ask for an uninstall when
+   * the device rejected the install for space. Absence means "no launch-failure
+   * recovery".
    *
    * `logTail` is the captured launch output that failed (so the implementation
-   * can classify WHY it failed); `device` is the resolved target.
+   * can classify WHY it failed); `device` is the resolved target. An uninstall is
+   * requested, never performed, here; see {@link LaunchRecovery}.
    */
-  recoverLaunchFailure?(
+  recoverLaunchFailure?(device: string, logTail: string): Promise<LaunchRecovery>;
+
+  /**
+   * OPTIONAL check that uninstalling `check.packageId` from `device` is safe.
+   * Space recovery is refused on a platform without it, because a package id
+   * that cannot be confirmed is never uninstalled.
+   */
+  verifyUninstallTarget?(
     device: string,
-    logTail: string
-  ): Promise<{ recovered: boolean; note?: string }>;
+    check: UninstallCheck
+  ): Promise<UninstallVerdict>;
 
   /** Uninstall the app to free device space / reset state. */
   uninstall(device: string, appId: string): Promise<CommandResult>;
@@ -492,10 +553,9 @@ export interface PlatformAdapter {
 
   /**
    * The device-resolution warning produced by the most recent `input()`-scoped
-   * send (key/pointerMove/pointerClick/pointerScroll/text), when the pin
-   * {@link input}'s `preference` named self-healed to a different device —
-   * mirroring the `deviceWarning` {@link discoverDevice} callers already get
-   * from deploy/screenshot/geometry. Reset to `undefined` by every {@link input}
+   * send (key/pointerMove/pointerClick/pointerScroll/text) — mirroring the
+   * `deviceWarning` {@link discoverDevice} callers already get from
+   * deploy/screenshot/geometry. Reset to `undefined` by every {@link input}
    * call, so a warning from one call is never reported against a later one.
    * Optional: only an adapter whose controller resolves the device lazily
    * per-send (Android) implements it — adapters with no per-call device concept

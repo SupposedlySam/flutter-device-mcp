@@ -1,8 +1,10 @@
 import {
+  androidTargetClass,
   parseAdbDevices,
   resolveAndroidTarget,
   isOnline,
 } from "../src/androidDeviceTarget.js";
+import { RequestedDeviceUnavailableError } from "../src/deviceRequest.js";
 
 // Realistic `adb devices -l` output: an online device, an offline device, and
 // an unauthorized device — plus the header and daemon chatter that adb prints.
@@ -113,29 +115,35 @@ describe("resolveAndroidTarget (single-id: serial === flutter id)", () => {
     expect(r.source).toBe("pin");
   });
 
-  it("self-heals a stale pin to the first online device with a warning", () => {
-    // Pin points at the offline emulator; the online Pixel should win.
-    const r = resolveAndroidTarget("emulator-5554", ADB_DEVICES_L)!;
-    expect(r.target).toBe("39121FDJH003AB");
-    expect(r.source).toBe("discovered");
-    expect(r.warning).toMatch(/stale pin/i);
-    expect(r.warning).toMatch(/emulator-5554/);
+  it("refuses a pin whose device is offline, naming it, its state and the online device", () => {
+    expect(() => resolveAndroidTarget("emulator-5554", ADB_DEVICES_L)).toThrow(
+      /"emulator-5554" \(from the FLUTTER_DEVICE_ANDROID_DEVICE env var\) is not online \(it is listed, in state "offline"\)\. Online Android devices: 39121FDJH003AB \(physical, Pixel_7\)/
+    );
   });
 
-  it("names the PER-CALL pin, not the env var, when a call-supplied pin self-heals", () => {
-    // The two pins fail identically but are fixed differently: the env var needs
-    // a host reload, the argument does not. A warning that always blames
-    // FLUTTER_DEVICE_ANDROID_DEVICE sends an unattended caller to the wrong knob.
-    const r = resolveAndroidTarget("emulator-5554", ADB_DEVICES_L, "call")!;
-    expect(r.target).toBe("39121FDJH003AB");
-    expect(r.warning).toMatch(/device_udid/);
-    expect(r.warning).not.toMatch(/FLUTTER_DEVICE_ANDROID_DEVICE/);
+  it("names the per-call argument, not the env var, when the pin came from the call", () => {
+    // The two pins are fixed differently: the env var needs a host reload, the
+    // argument does not.
+    expect(() =>
+      resolveAndroidTarget("emulator-5554", ADB_DEVICES_L, "call")
+    ).toThrow(/from the device_udid argument/);
   });
 
-  it("defaults to the env wording when no origin is given (existing callers)", () => {
-    const r = resolveAndroidTarget("emulator-5554", ADB_DEVICES_L)!;
-    expect(r.warning).toMatch(/FLUTTER_DEVICE_ANDROID_DEVICE/);
-    expect(r.warning).not.toMatch(/device_udid/);
+  it("carries the requested id on the error, for a host-side teardown scoped to it", () => {
+    let caught: unknown;
+    try {
+      resolveAndroidTarget("emulator-5554", ADB_DEVICES_L, "call");
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(RequestedDeviceUnavailableError);
+    expect((caught as RequestedDeviceUnavailableError).requested).toBe("emulator-5554");
+  });
+
+  it("adds the RSA-prompt hint when the named device is unauthorized", () => {
+    expect(() => resolveAndroidTarget("R5CT10ABCDE", ADB_DEVICES_L)).toThrow(
+      /RSA prompt/
+    );
   });
 
   it("honors a per-call pin over the online-first default with no warning", () => {
@@ -151,20 +159,83 @@ describe("resolveAndroidTarget (single-id: serial === flutter id)", () => {
     expect(r.warning).toBeUndefined();
   });
 
-  it("keeps a pin that names no listed device when nothing online exists", () => {
+  it("refuses a pin that names no listed device, even with nothing online to confuse it with", () => {
     const offlineOnly =
       "List of devices attached\nemulator-5554  offline product:x model:y\n";
-    const r = resolveAndroidTarget("39121FDJH003AB", offlineOnly)!;
-    expect(r.target).toBe("39121FDJH003AB");
-    expect(r.source).toBe("stale-pin");
-    expect(r.warning).toMatch(/Proceeding with the pin/i);
-    expect(r.warning).toMatch(/FLUTTER_DEVICE_ANDROID_DEVICE/);
+    expect(() => resolveAndroidTarget("39121FDJH003AB", offlineOnly)).toThrow(
+      /"39121FDJH003AB".*is not online\. Online Android devices: none/
+    );
+  });
+});
 
-    // Same selection from a per-call pin — only the wording changes, so a caller
-    // who names a device that just went offline is never hard-failed.
-    const call = resolveAndroidTarget("39121FDJH003AB", offlineOnly, "call")!;
-    expect(call.target).toBe("39121FDJH003AB");
-    expect(call.source).toBe("stale-pin");
-    expect(call.warning).toMatch(/device_udid/);
+describe("resolveAndroidTarget target class (kind)", () => {
+  const PHONE_ONLY =
+    "List of devices attached\n" +
+    "RFCR902W0TT  device usb:1-1 product:q2qsqw model:SM_F926U1 device:q2q transport_id:2\n";
+  const BOTH =
+    PHONE_ONLY +
+    "emulator-5556  device product:sdk_gphone64_arm64 model:sdk_gphone64_arm64 device:emu64a\n";
+
+  it("refuses an emulator request when only a physical phone is online", () => {
+    expect(() =>
+      resolveAndroidTarget(undefined, PHONE_ONLY, "env", "simulator")
+    ).toThrow(/an emulator was requested and none is online.*RFCR902W0TT \(physical, SM_F926U1\)/);
+  });
+
+  it("serves an emulator request with the emulator even when the phone is listed first", () => {
+    const r = resolveAndroidTarget(undefined, BOTH, "env", "simulator")!;
+    expect(r.target).toBe("emulator-5556");
+  });
+
+  it("serves a physical request with the phone even when an emulator is online", () => {
+    const emulatorFirst =
+      "List of devices attached\n" +
+      "emulator-5556  device product:sdk_gphone64_arm64 model:sdk_gphone64_arm64\n" +
+      "RFCR902W0TT  device usb:1-1 product:q2qsqw model:SM_F926U1\n";
+    const r = resolveAndroidTarget(undefined, emulatorFirst, "env", "device")!;
+    expect(r.target).toBe("RFCR902W0TT");
+  });
+
+  it("refuses a named device whose class contradicts the requested one", () => {
+    expect(() =>
+      resolveAndroidTarget("RFCR902W0TT", BOTH, "call", "simulator")
+    ).toThrow(/"RFCR902W0TT" is a physical target, but an emulator was requested/);
+  });
+
+  it("classifies emulators by serial or system-image descriptor, and anything else as physical", () => {
+    expect(androidTargetClass("emulator-5554")).toBe("emulator");
+    expect(androidTargetClass({ serial: "localhost:5555", state: "device", product: "sdk_gphone64_arm64" })).toBe("emulator");
+    expect(androidTargetClass({ serial: "RFCR902W0TT", state: "device", product: "q2qsqw", model: "SM_F926U1" })).toBe("physical");
+    expect(androidTargetClass("RFCR902W0TT")).toBe("physical");
+  });
+});
+
+describe("resolveAndroidTarget: names that match more than one device", () => {
+  const TWO_SAME_MODEL =
+    "List of devices attached\n" +
+    "emulator-5554  device product:sdk_gphone64_arm64 model:sdk_gphone64_arm64\n" +
+    "emulator-5556  device product:sdk_gphone64_arm64 model:sdk_gphone64_arm64\n";
+
+  it("refuses a model pin that matches two online devices, listing both", () => {
+    expect(() => resolveAndroidTarget("sdk_gphone64_arm64", TWO_SAME_MODEL, "call")).toThrow(
+      /"sdk_gphone64_arm64" \(from the device_udid argument\) matches 2 online Android devices: emulator-5554 \(emulator, sdk_gphone64_arm64\), emulator-5556 \(emulator, sdk_gphone64_arm64\)/
+    );
+  });
+
+  it("takes the online one when the model also matches an offline device listed first", () => {
+    const oneOffline = TWO_SAME_MODEL.replace("emulator-5554  device", "emulator-5554  offline");
+    expect(resolveAndroidTarget("sdk_gphone64_arm64", oneOffline, "call")?.target).toBe("emulator-5556");
+  });
+
+  it("names the listed serial on the refusal when a model pin's only match is offline", () => {
+    const offline =
+      "List of devices attached\nemulator-5554  offline product:sdk_gphone64_arm64 model:sdk_gphone64_arm64\n";
+    let caught: unknown;
+    try {
+      resolveAndroidTarget("sdk_gphone64_arm64", offline, "call");
+    } catch (error) {
+      caught = error;
+    }
+    expect((caught as RequestedDeviceUnavailableError).listedAs).toBe("emulator-5554");
   });
 });

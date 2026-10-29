@@ -322,8 +322,8 @@ describe("resolveIosTarget", () => {
     available: true,
   };
 
-  it("prefers an available physical device over a simulator with no pin", () => {
-    const r = resolveIosTarget(undefined, [physConnected], [simBooted]);
+  it("uses the physical device when it is the only available target", () => {
+    const r = resolveIosTarget(undefined, [physConnected], []);
     expect(r?.target).toBe(physConnected.udid);
     expect(r?.kind).toBe("device");
     expect(r?.source).toBe("discovered");
@@ -360,18 +360,18 @@ describe("resolveIosTarget", () => {
     expect(r?.target).toBe(physConnected.udid);
   });
 
-  it("self-heals a stale pin to the first available device (with warning)", () => {
-    const r = resolveIosTarget("DEADBEEF-not-connected", [physConnected], []);
-    expect(r?.target).toBe(physConnected.udid);
-    expect(r?.source).toBe("discovered");
-    expect(r?.warning).toMatch(/stale pin/i);
+  it("refuses a stale pin, naming it and the available device, rather than switching to it", () => {
+    expect(() =>
+      resolveIosTarget("DEADBEEF-not-connected", [physConnected], [])
+    ).toThrow(
+      /"DEADBEEF-not-connected" \(from the FLUTTER_DEVICE_IOS_DEVICE env var\) is not online\. Online iOS devices: 00008020-000000000000AAAA \(device, My iPhone\)/
+    );
   });
 
-  it("keeps a stale pin when nothing is available to fall back to", () => {
-    const r = resolveIosTarget("DEADBEEF-not-connected", [], []);
-    expect(r?.target).toBe("DEADBEEF-not-connected");
-    expect(r?.source).toBe("stale-pin");
-    expect(r?.warning).toMatch(/no.*fall back/i);
+  it("refuses a pinned device that is listed but not connected", () => {
+    expect(() =>
+      resolveIosTarget(physOffline.udid, [physOffline], [simBooted])
+    ).toThrow(/"00008030-000000000000000A".*not connected\/booted/);
   });
 
   it("falls back to a booted simulator when no physical device is available", () => {
@@ -416,12 +416,36 @@ describe("resolveIosTarget", () => {
       expect(r?.kind).toBe("simulator");
     });
 
-    it("a per-call udid self-heals when its target is not available", () => {
-      const r = resolveIosTarget(undefined, [physConnected], [simBooted], {
-        udid: "NOT-CONNECTED",
-      });
-      expect(r?.source).toBe("discovered");
-      expect(r?.warning).toMatch(/stale pin/i);
+    it("refuses a per-call udid whose target is not available, naming the argument", () => {
+      expect(() =>
+        resolveIosTarget(undefined, [physConnected], [simBooted], {
+          udid: "NOT-CONNECTED",
+        })
+      ).toThrow(/"NOT-CONNECTED" \(from the device_udid argument\) is not online/);
+    });
+
+    it("refuses kind:'simulator' when no simulator is booted, rather than using the phone", () => {
+      const simShutdown: IosDevice = { ...simBooted, available: false };
+      expect(() =>
+        resolveIosTarget(undefined, [physConnected], [simShutdown], {
+          kind: "simulator",
+        })
+      ).toThrow(/a simulator was requested and none is online/);
+    });
+
+    it("refuses kind:'device' when no physical device is connected, rather than using a simulator", () => {
+      expect(() =>
+        resolveIosTarget(undefined, [physOffline], [simBooted], { kind: "device" })
+      ).toThrow(/a device was requested and none is online/);
+    });
+
+    it("refuses a named target whose class contradicts kind", () => {
+      expect(() =>
+        resolveIosTarget(undefined, [physConnected], [simBooted], {
+          udid: physConnected.udid,
+          kind: "simulator",
+        })
+      ).toThrow(/is a device target, but a simulator was requested/);
     });
   });
 });
@@ -622,5 +646,36 @@ describe("flutter-only device (not listed by devicectl)", () => {
     const r = resolveIosTarget("my iphone", physical, []);
     expect(r?.source).toBe("pin");
     expect(r?.target).toBe("ECID-ONLY-FLUTTER");
+  });
+});
+
+describe("resolveIosTarget: names that match more than one target", () => {
+  const phoneA: IosDevice = { udid: "ECID-A", devicectlId: "CTL-A", name: "iPhone", kind: "device", available: true };
+  const phoneB: IosDevice = { udid: "ECID-B", devicectlId: "CTL-B", name: "iPhone", kind: "device", available: true };
+
+  it("refuses a name pin that matches two available devices, listing both", () => {
+    expect(() => resolveIosTarget("iPhone", [phoneA, phoneB], [])).toThrow(
+      /"iPhone" \(from the FLUTTER_DEVICE_IOS_DEVICE env var\) matches 2 online iOS devices: ECID-A \(device, iPhone\), ECID-B \(device, iPhone\)/
+    );
+  });
+
+  it("takes the available one when a name also matches an unavailable device listed first", () => {
+    const r = resolveIosTarget("iPhone", [{ ...phoneA, available: false }, phoneB], []);
+    expect(r?.target).toBe("ECID-B");
+  });
+});
+
+describe("resolveIosTarget: nothing named, several targets available", () => {
+  const phone: IosDevice = { udid: "ECID-A", devicectlId: "CTL-A", name: "My iPhone", kind: "device", available: true };
+  const sim: IosDevice = { udid: "SIM-1", name: "iPhone 15", kind: "simulator", available: true };
+
+  it("refuses rather than preferring the phone", () => {
+    expect(() => resolveIosTarget(undefined, [phone], [sim])).toThrow(
+      /2 iOS devices are online and none was named: ECID-A \(device, My iPhone\), SIM-1 \(simulator, iPhone 15\)/
+    );
+  });
+
+  it("uses the one target of the requested class", () => {
+    expect(resolveIosTarget(undefined, [phone], [sim], { kind: "simulator" })?.target).toBe("SIM-1");
   });
 });

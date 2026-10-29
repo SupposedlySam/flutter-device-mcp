@@ -25,6 +25,7 @@
  * ssap interfaces so they are correct once a device lands.
  * ============================================================================
  */
+import path from "path";
 import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import { CommandResult, quote, runShell } from "../cli.js";
 import {
@@ -42,11 +43,15 @@ import {
 } from "../types.js";
 import { WebosInputController } from "../input/webosInputController.js";
 import {
+  DeviceTargetPreference,
   InstallOptions,
   KillStaleScope,
   KillStaleScopeKind,
   PlatformAdapter,
+  UninstallCheck,
+  UninstallVerdict,
 } from "./platformAdapter.js";
+import { callPinNotHonoured } from "../deviceRequest.js";
 import { ScreenshotResult } from "../screenshot.js";
 import { RecordResult } from "../recording.js";
 import { resolveWebosDeviceTarget } from "../webos/webosDeviceTarget.js";
@@ -273,14 +278,23 @@ export class WebOSAdapter implements PlatformAdapter {
 
   /**
    * Resolve the ares device target: the pin while it is registered, else the
-   * first listed device (stale-pin self-heal). Always consults
-   * `ares-setup-device --list` so a stale pin can't route to a dead name.
+   * first listed device; a pin that is not registered is refused, never
+   * replaced. Always consults `ares-setup-device --list`.
    * Throws an McpError when nothing is usable.
    *
    * DEVICE-BLOCKED: returns the parsed live list; with no registered device it
    * throws the actionable "register with ares-setup-device" error.
    */
-  async discoverDevice(): Promise<DeviceResolution> {
+  async discoverDevice(
+    preference: DeviceTargetPreference = {}
+  ): Promise<DeviceResolution> {
+    if (preference.udid?.trim()) {
+      throw callPinNotHonoured(
+        `webOS does not take device_udid (got "${preference.udid.trim()}"): devices ` +
+          `are addressed by their ares-setup-device name. Set FLUTTER_DEVICE_WEBOS_DEVICE to ` +
+          `that name instead.`
+      );
+    }
     const result = await runShell(withWebosPathGuard(buildAresDeviceListCommand()), {
       timeoutMs: 15000,
     });
@@ -346,6 +360,31 @@ export class WebOSAdapter implements PlatformAdapter {
       WEBOS_FAILURE_SIGNATURES
     );
   }
+
+  /**
+   * For space recovery, confirm the `.ipk` being installed carries this
+   * adapter's app id (ares-package names it `<id>_<version>_<arch>.ipk`).
+   */
+  async verifyUninstallTarget(
+    _device: string,
+    check: UninstallCheck
+  ): Promise<UninstallVerdict> {
+    if (check.purpose !== "space-recovery") return { ok: true };
+    const ipk = this.lastArtifactPath ? path.basename(this.lastArtifactPath) : undefined;
+    const id = ipk?.split("_")[0];
+    if (!ipk || id !== this.config.appId) {
+      return {
+        ok: false,
+        reason:
+          `The .ipk being installed (${ipk ?? "none recorded"}) is not confirmed to ` +
+          `carry ${this.config.appId}, so it is not uninstalled to free space.`,
+      };
+    }
+    return { ok: true };
+  }
+
+  /** The device_udid the current input call named; read by the cached controller. */
+  private inputDevicePin: string | undefined;
 
   /** Uninstall via `ares-install --remove <appId>`. */
   async uninstall(device: string, appId: string): Promise<CommandResult> {
@@ -425,10 +464,11 @@ export class WebOSAdapter implements PlatformAdapter {
    * IP; the ssap channel needs the bare host. The resolver maps the resolved
    * device to its parsed connection host. See {@link hostFromWebosResolution}.
    */
-  input(): InputController {
+  input(preference: DeviceTargetPreference = {}): InputController {
+    this.inputDevicePin = preference.udid;
     if (!this.inputController) {
       this.inputController = new WebosInputController(async () => {
-        const resolution = await this.discoverDevice();
+        const resolution = await this.discoverDevice({ udid: this.inputDevicePin });
         return hostFromWebosResolution(resolution);
       });
     }

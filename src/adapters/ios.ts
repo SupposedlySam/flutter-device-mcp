@@ -101,15 +101,19 @@ import {
   KillStaleScope,
   KillStaleScopeKind,
   PlatformAdapter,
+  LaunchRecovery,
   SystemPromptAction,
   SystemPromptController,
   SystemPromptResult,
+  UninstallCheck,
+  UninstallVerdict,
 } from "./platformAdapter.js";
 import {
   chooseButton,
   detectSystemPrompt,
   parseAxElements,
 } from "../iosSystemPrompt.js";
+import { DeviceSelectionRefusedError } from "../deviceRequest.js";
 import { locateIdb } from "../idbLocate.js";
 import {
   Pymobiledevice3Resolution,
@@ -580,9 +584,10 @@ export class IosAdapter implements PlatformAdapter {
 
   /**
    * Resolve the iOS target across physical devices (devicectl) and simulators
-   * (simctl). A pin self-heals to the first available target with a warning,
-   * mirroring the Tizen stale-pin fallback. Throws an McpError when nothing is
-   * usable. Records the resolved kind for later devicectl/simctl selection.
+   * (simctl). A named target that is not available is refused, never replaced,
+   * and a requested `kind` is never served by the other class. Throws an
+   * McpError when nothing is usable. Records the resolved kind for later
+   * devicectl/simctl selection.
    */
   async discoverDevice(
     preference: DeviceTargetPreference = {}
@@ -667,6 +672,24 @@ export class IosAdapter implements PlatformAdapter {
       resolution.target
     );
     if (!picked) return resolution;
+
+    // A simulator the caller named is the one the call acts on. Swapping in
+    // another valid destination here would send the deploy, its uninstall and
+    // any space recovery to a simulator nobody asked for.
+    if (
+      resolution.source === "pin" &&
+      picked.udid.toLowerCase() !== resolution.target.toLowerCase()
+    ) {
+      const valid = destinations
+        .map((d) => (d.name ? `${d.id} (${d.name})` : d.id))
+        .join(", ");
+      throw new DeviceSelectionRefusedError(
+        `The requested iOS simulator ${resolution.target} is not a valid Runner-scheme ` +
+          `destination (xcodebuild would fail with "Unable to find a destination ` +
+          `matching id:${resolution.target}"). Nothing was done: a named simulator is ` +
+          `never replaced by another. Valid simulator destinations: ${valid}.`
+      );
+    }
 
     if (picked.needsBoot) {
       logger.warn("Booting valid iOS simulator destination", {
@@ -844,38 +867,38 @@ export class IosAdapter implements PlatformAdapter {
    * pipeline), the two recoverable install-time failures are handled here rather
    * than at the install stage:
    *
-   *   - ENOSPC ("No space left on device"): uninstall the app to free space, then
-   *     retry the launch once — the mobile equivalent of the Tizen ENOSPC guard.
+   *   - The DEVICE rejecting the install for space: ask for the app to be
+   *     uninstalled and the launch retried; runDeployCore decides whether that is
+   *     allowed. A full disk on the Mac during the build is not this — the same
+   *     "No space left on device" appears in the log, and uninstalling from the
+   *     phone frees nothing on the Mac — so only a device-side install error
+   *     counts ({@link isDeviceInstallStorageFailure}).
    *   - PROVISIONING/device-registration: run the one-shot provisioning
    *     `xcodebuild` to register the device + mint the profile, then retry.
    *
    * A simulator never hits provisioning; any other failure is not recovered.
    */
-  async recoverLaunchFailure(
-    device: string,
-    logTail: string
-  ): Promise<{ recovered: boolean; note?: string }> {
-    // ENOSPC: free space by uninstalling, then retry (both device kinds).
-    if (/No space left on device/i.test(logTail)) {
-      await this.uninstall(device, this.appId);
+  async recoverLaunchFailure(device: string, logTail: string): Promise<LaunchRecovery> {
+    if (this.lastKind === "device" && isDeviceInstallStorageFailure(logTail)) {
       return {
-        recovered: true,
-        note: "Device was out of space — uninstalled the app to free space; retrying the launch.",
+        action: "uninstall-and-retry",
+        packageId: this.appId,
+        note: "The device rejected the install for lack of space.",
       };
     }
 
-    if (this.lastKind === "simulator") return { recovered: false };
-    if (!this.isProvisioningFailure(logTail)) return { recovered: false };
+    if (this.lastKind === "simulator") return { action: "none" };
+    if (!this.isProvisioningFailure(logTail)) return { action: "none" };
     const build = await this.provisioningFallback(device);
     return build.success
       ? {
-          recovered: true,
+          action: "retry",
           note:
             "Registered the device + minted a provisioning profile via a " +
             "one-shot provisioning xcodebuild; retrying the launch.",
         }
       : {
-          recovered: false,
+          action: "none",
           note:
             "Provisioning xcodebuild fallback failed. Open ios/Runner.xcworkspace " +
             "in Xcode, select your team + this device, and run Product▸Run once to " +
@@ -1038,6 +1061,100 @@ export class IosAdapter implements PlatformAdapter {
     return { opened: true, url, device: resolution.target, command };
   }
 
+  /**
+   * Confirm uninstalling `check.packageId` is safe. For space recovery, the app
+   * bundle `flutter run` just built must carry that bundle id. On a physical
+   * device, the installed copy must have been built by a developer: an App Store
+   * or TestFlight copy (and its data) is left alone unless the caller allowed
+   * its removal, and not being able to tell counts as such a copy.
+   */
+  async verifyUninstallTarget(
+    device: string,
+    check: UninstallCheck
+  ): Promise<UninstallVerdict> {
+    if (check.purpose === "space-recovery") {
+      const built = await this.builtBundleId();
+      if (!built.ok) return built;
+      if (built.bundleId !== check.packageId) {
+        return {
+          ok: false,
+          reason:
+            `The app being installed is ${built.bundleId}, not ${check.packageId}, so ` +
+            `uninstalling ${check.packageId} would free space by removing a different app.`,
+        };
+      }
+    }
+    if (this.lastKind === "simulator" || check.allowStoreAppRemoval) return { ok: true };
+    return this.checkDeveloperBuilt(device, check.packageId);
+  }
+
+  /** The bundle id of the app bundle this deploy built. */
+  private async builtBundleId(): Promise<
+    { ok: true; bundleId: string } | { ok: false; reason: string }
+  > {
+    const plist = newestBuiltInfoPlist(this.config.appDir, this.lastKind);
+    if (!plist) {
+      return {
+        ok: false,
+        reason:
+          `Could not find the ${this.lastKind} app bundle this deploy built under ` +
+          `build/ios, so its bundle id cannot be confirmed; an unconfirmed id is ` +
+          `never uninstalled.`,
+      };
+    }
+    const read = await runShell(
+      `plutil -extract CFBundleIdentifier raw -o - ${quote(plist)}`,
+      { timeoutMs: 15000 }
+    );
+    const bundleId = read.stdout.trim();
+    if (!read.success || !bundleId) {
+      return {
+        ok: false,
+        reason: `Could not read CFBundleIdentifier from ${plist}: ${tail(read.combined, 5)}`,
+      };
+    }
+    return { ok: true, bundleId };
+  }
+
+  /** Refuse unless the installed copy of `bundleId` was built by a developer. */
+  private async checkDeveloperBuilt(
+    device: string,
+    bundleId: string
+  ): Promise<UninstallVerdict> {
+    const ctlId = this.devicectlIdFor(device);
+    const listed = await runShell(
+      `xcrun devicectl device info apps --device ${quote(ctlId)} ` +
+        `--bundle-id ${quote(bundleId)} --json-output -`,
+      { timeoutMs: 60000 }
+    );
+    const apps = listed.success ? parseDevicectlApps(listed.stdout) : undefined;
+    if (!apps) {
+      return {
+        ok: false,
+        reason:
+          `Could not tell whether ${bundleId} on ${device} was built by a developer ` +
+          `(devicectl device info apps: ${tail(listed.combined, 5)}), so it is treated ` +
+          `as an App Store copy and left alone. Pass allow_store_app_removal: true to ` +
+          `proceed anyway.`,
+      };
+    }
+    const app = apps.find((a) => a.bundleIdentifier === bundleId);
+    if (app && app.builtByDeveloper !== true) {
+      return {
+        ok: false,
+        reason:
+          `${bundleId} on ${device} was not built by a developer (an App Store or ` +
+          `TestFlight install). Removing it deletes its data, so nothing was done. Pass ` +
+          `allow_store_app_removal: true only if that device's owner has agreed.`,
+      };
+    }
+    return { ok: true };
+  }
+
+  /**
+   * Uninstall the app to free space / reset state. devicectl for a physical
+   * device, simctl for a simulator — chosen from the last resolved kind.
+   */
   async uninstall(device: string, appId: string): Promise<CommandResult> {
     // `device` is the flutter id; devicectl needs its own id (simctl reuses the
     // same UUID, so the translation is a no-op there).
@@ -1888,4 +2005,62 @@ class IosInputStub implements InputController {
         "over the VM service."
     );
   }
+}
+
+/**
+ * True when a launch log shows the DEVICE rejecting the install for space: a
+ * storage error on, or within a few lines after, a device-install error line
+ * (devicectl/CoreDevice/MobileInstallation, or flutter's "Could not install …
+ * on"). A storage error from the Mac's own build — which says the same "No
+ * space left on device" — has no such line before it.
+ */
+export function isDeviceInstallStorageFailure(log: string): boolean {
+  const lines = log.split("\n");
+  const installError =
+    /Could not install .+ on |Failed to install the app on the device|MIInstallerErrorDomain|com\.apple\.dt\.MobileInstallation|CoreDeviceError|devicectl/i;
+  const storage = /No space left on device|NSPOSIXErrorDomain Code=28|insufficient (?:storage|space)/i;
+  const window = 3;
+  return lines.some(
+    (line, i) =>
+      installError.test(line) &&
+      lines.slice(i, i + window + 1).some((l) => storage.test(l))
+  );
+}
+
+/** Parse `devicectl device info apps --json-output -`; undefined when unreadable. */
+export function parseDevicectlApps(
+  json: string
+): { bundleIdentifier?: string; builtByDeveloper?: boolean }[] | undefined {
+  try {
+    const parsed = JSON.parse(json) as {
+      result?: { apps?: { bundleIdentifier?: string; builtByDeveloper?: boolean }[] };
+    };
+    return Array.isArray(parsed.result?.apps) ? parsed.result?.apps : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The Info.plist of the most recently built Runner.app for a device class.
+ * `flutter run` leaves the bundle in `build/ios/<sdk>` and Xcode in
+ * `build/ios/<Config>-<sdk>`.
+ */
+export function newestBuiltInfoPlist(
+  appDir: string,
+  kind: IosDeviceKind
+): string | undefined {
+  const sdk = kind === "simulator" ? "iphonesimulator" : "iphoneos";
+  const dirs = [sdk, `Debug-${sdk}`, `Profile-${sdk}`, `Release-${sdk}`];
+  let newest: { plist: string; mtime: number } | undefined;
+  for (const dir of dirs) {
+    const plist = path.join(appDir, "build", "ios", dir, "Runner.app", "Info.plist");
+    try {
+      const mtime = fs.statSync(plist).mtimeMs;
+      if (!newest || mtime > newest.mtime) newest = { plist, mtime };
+    } catch {
+      continue;
+    }
+  }
+  return newest?.plist;
 }

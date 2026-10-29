@@ -58,12 +58,24 @@ function deviceUdidProp(extra = "") {
     device_udid: {
       type: "string",
       description:
-        "Pin the device this call targets, for THIS CALL ONLY — precedence: this arg > the platform's env pin > auto-resolution — needing no MCP host reload. ANDROID: an adb serial (e.g. '39121FDJH003AB' or 'emulator-5554') or the model name adb reports in `adb devices -l` (e.g. 'Pixel_7', 'sdk_gphone64_arm64'), overriding the FLUTTER_DEVICE_ANDROID_DEVICE env pin. On a host with two attached targets this is the ONLY way to choose between them: discovery takes the first ONLINE device, so a phone that is attached but unusable (PIN-locked — Flutter stops building while the app is not visible, so nothing can be driven on it) otherwise wins every call. iOS/tvOS: a flutter id, a devicectl id, or a device/simulator name (for a simulator the flutter id IS the simctl UUID), overriding FLUTTER_DEVICE_IOS_DEVICE." +
+        "Pin the device this call targets, for THIS CALL ONLY — precedence: this arg > the platform's env pin > auto-resolution — needing no MCP host reload. ANDROID: an adb serial (e.g. '39121FDJH003AB' or 'emulator-5554') or the model name adb reports in `adb devices -l` (e.g. 'Pixel_7', 'sdk_gphone64_arm64'), overriding the FLUTTER_DEVICE_ANDROID_DEVICE env pin. On a host with two attached targets this is how to choose between them: an unnamed call with more than one online target is refused. iOS/tvOS: a flutter id, a devicectl id, or a device/simulator name (for a simulator the flutter id IS the simctl UUID), overriding FLUTTER_DEVICE_IOS_DEVICE. TIZEN: an sdb target (`host` or `host:26101`), overriding FLUTTER_DEVICE_TIZEN_DEVICE and `.tizen-target`; a target not yet listed is `sdb connect`ed first." +
         extra +
-        " A pin naming a target that is not currently online SELF-HEALS to the first online device and says so in `deviceWarning`, exactly like a stale env pin — it never hard-fails silently. Ignored on Tizen/webOS/macOS, which resolve their single target another way.",
+        " A named device that is not online FAILS the call with an error naming it and the devices that are online — it is NEVER replaced by another device, and the same holds for an env pin. Ignored on webOS/macOS, which resolve their single target another way.",
     },
   };
 }
+
+/**
+ * The override for the one uninstall this server otherwise never performs: a
+ * copy of the app a person installed from an app store, with their data.
+ */
+const allowStoreAppRemovalProp = {
+  allow_store_app_removal: {
+    type: "boolean",
+    description:
+      "Allow removing a copy of the app somebody else installed: on Android one adb did not install (the Play Store, a tester distribution, a sideloaded build), on a physical iOS device one not built by a developer (App Store, TestFlight). Without it, an Android deploy will not launch over such a copy (flutter run would uninstall it) and no uninstall or space recovery touches it. Removing it deletes that install's data; set this only when the device's owner has agreed. Ignored on other platforms.",
+  },
+};
 
 /**
  * The per-call capture-target CLASS, advertised on the capture tools
@@ -168,7 +180,7 @@ function buildFlutterTools(): ToolDefinition[] {
     {
       name: "flutter_deploy",
       description:
-        "THE KEY TOOL. Installs the already-built package and launches the app in DEBUG, then returns the Dart VM Service `ws://…/ws` URI for Marionette to connect to. Kills the stale launch/build drivers HOLDING THE DEVICE IT IS DEPLOYING TO first (one deploy at a time — concurrent installs wedge the device lock): Tizen's `flutter-tizen`, or on iOS/Android the `flutter run` driver attributed to that device and its children. A session on ANOTHER device is left running, so deploying to an emulator no longer kills the `flutter run` on a phone attached beside it; a `flutter run` that names no device anywhere in its process tree is reported (with its pid) rather than killed. The teardown detail is in `detail.<key>Note` in the response. Recovers from a full device (No space left on device / Install failed) by uninstalling and retrying the install once. The launch runs through a pty (so flutter line-flushes the URI), backgrounded, and is LEFT RUNNING to hold the VM service open. A device pin that is not currently an online device (stale — e.g. the device moved DHCP address) is ignored in favor of the first online device, noted via `deviceWarning` in the response. MULTI-TARGET HOSTS: discovery takes the first ONLINE device, which on Android means an attached physical phone beats a running emulator every time — pass `device_udid` (an adb serial or model name) to deploy to the other one for this call, without touching FLUTTER_DEVICE_ANDROID_DEVICE or reloading the host. WARNING: launching SEIZES the physical TV/monitor display. NOTE: Marionette coordinates are LOGICAL (e.g. 1200x675), not screenshot pixels. MACOS: a different shape entirely — stages `app_path`/`app_url` (or FLUTTER_DEVICE_MACOS_APP_PATH/FLUTTER_DEVICE_MACOS_APP_URL) into a SCRATCH DIR (never /Applications) and launches it with `open -n`, returning its pid; the bundle runs directly rather than under `flutter run`, so there is no Dart VM service (`vmServiceUriWs` is empty) and no display seizure — drive it with flutter_pointer/flutter_key/flutter_screenshot instead.",
+        "THE KEY TOOL. Installs the already-built package and launches the app in DEBUG, then returns the Dart VM Service `ws://…/ws` URI for Marionette to connect to. Kills the stale launch/build drivers HOLDING THE DEVICE IT IS DEPLOYING TO first (one deploy at a time — concurrent installs wedge the device lock): Tizen's `flutter-tizen`, or on iOS/Android the `flutter run` driver attributed to that device and its children. A session on ANOTHER device is left running, so deploying to an emulator no longer kills the `flutter run` on a phone attached beside it; a `flutter run` that names no device anywhere in its process tree is reported (with its pid) rather than killed. The teardown detail is in `detail.<key>Note` in the response. Recovers from a full device (No space left on device) by uninstalling and retrying once, but ONLY on a device the call named (`device_udid` or a pin), ONLY after confirming the build being installed carries the same package id, and never over a copy somebody else installed (Android: one adb did not install; physical iOS: one not built by a developer) unless `allow_store_app_removal` is set; otherwise the response says why recovery was not attempted (`enospcRecoveryRefused`, or `launchRecovery.note`). The launch runs through a pty (so flutter line-flushes the URI), backgrounded, and is LEFT RUNNING to hold the VM service open. A named device (`device_udid`, an env pin, or `.tizen-target`) that is not online FAILS the deploy before anything is installed, naming it and the online devices; it is never replaced by another device (a TV that moved DHCP address needs flutter_setup with its new address). ANDROID: refuses to launch over a copy of the app that adb did not install (the Play Store, a tester distribution, a sideloaded build), because `flutter run` uninstalls an install signed by another key before it installs — pass `allow_store_app_removal: true` only with the device owner's agreement. MULTI-TARGET HOSTS: an unnamed call with more than one online target is refused and lists them — pass `device_udid` (on Android an adb serial or model name) to pick one for this call, without touching the env pin or reloading the host. WARNING: launching SEIZES the physical TV/monitor display. NOTE: Marionette coordinates are LOGICAL (e.g. 1200x675), not screenshot pixels. MACOS: a different shape entirely — stages `app_path`/`app_url` (or FLUTTER_DEVICE_MACOS_APP_PATH/FLUTTER_DEVICE_MACOS_APP_URL) into a SCRATCH DIR (never /Applications) and launches it with `open -n`, returning its pid; the bundle runs directly rather than under `flutter run`, so there is no Dart VM service (`vmServiceUriWs` is empty) and no display seizure — drive it with flutter_pointer/flutter_key/flutter_screenshot instead.",
       inputSchema: {
         type: "object",
         properties: {
@@ -205,11 +217,12 @@ function buildFlutterTools(): ToolDefinition[] {
             type: "string",
             enum: ["simulator", "device"],
             description:
-              "iOS ONLY per-call target selection: 'simulator' deploys to the booted simulator (booted-first) EVEN WHEN a physical iPhone is attached — the fix for the device-first default that made a simulator UI walkthrough impossible without a host reload; 'device' forces a physical device. Ignored on Tizen/webOS/Android, which have no device-vs-simulator id split — on Android an emulator is just another adb serial, so name it with `device_udid` instead. When omitted, iOS is physical-first.",
+              "Per-call target CLASS: 'simulator' (on Android: an emulator) or 'device' (real hardware). It is a restriction, not a preference: it is never served by the other class, so with no booted simulator/online emulator the call fails rather than landing on a phone. iOS: 'simulator' deploys to the booted simulator EVEN WHEN a physical iPhone is attached. ANDROID: an emulator is recognized by its `emulator-<port>` serial or sdk/generic system-image descriptors. Ignored on Tizen/webOS. When omitted, the one available target is used, and a choice among several is refused.",
           },
           ...deviceUdidProp(
-            " Combine with `target` (iOS) or use alone; on Android `target` has no meaning and this is the whole selection."
+            " Combine with `target` or use alone; a named device of the other class than `target` asks for is refused."
           ),
+          ...allowStoreAppRemovalProp,
           app_path: {
             type: "string",
             description:
@@ -256,10 +269,15 @@ function buildFlutterTools(): ToolDefinition[] {
     {
       name: "flutter_uninstall",
       description:
-        "Uninstall the app (`sdb -s <device> uninstall <app_id>` on Tizen; `adb -s <serial> uninstall <app_id>` on Android) to free device space or reset to a clean state. Soft-succeeds when the app is not installed. `device_udid` picks WHICH device to uninstall from on a multi-target host.",
+        "Uninstall the app (`sdb -s <device> uninstall <app_id>` on Tizen; `adb -s <serial> uninstall <app_id>` on Android) to free device space or reset to a clean state. Soft-succeeds when the app is not installed. `device_udid` picks WHICH device to uninstall from on a multi-target host; a named device that is not online fails the call rather than uninstalling somewhere else. A copy somebody else installed (Android: one adb did not install; physical iOS: one not built by a developer) is left alone, with `refused: true` and the reason, unless `allow_store_app_removal: true` is passed.",
       inputSchema: {
         type: "object",
-        properties: { ...platformProp, ...appDirProp, ...deviceUdidProp() },
+        properties: {
+          ...platformProp,
+          ...appDirProp,
+          ...deviceUdidProp(),
+          ...allowStoreAppRemovalProp,
+        },
       },
     },
     {

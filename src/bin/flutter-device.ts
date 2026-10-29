@@ -93,7 +93,8 @@ Commands:
   build               Build the app package (--mode release|profile|debug, --profile, --target, --install, --run)
   deploy              Install + launch, capture the VM Service URI (THE key command; --mode to match the built artifact)
                       macOS: stages + launches a prebuilt signed .app (--app-path <path> | --app-url <url>); no VM Service URI exists there
-  uninstall           Remove the app from the device
+  uninstall           Remove the app from the device (refuses a copy somebody else installed
+                      unless --allow-store-app-removal)
   kill-stale          Kill the stale launch/driver processes holding THIS device's lock
                       (--device-udid to aim it; --all-devices for the host-wide hammer)
   terminate           Force-quit the app (mobile)
@@ -118,7 +119,13 @@ Global flags:
                       platform's env pin (Android: an adb serial or the model name adb reports;
                       iOS/tvOS: a flutter id, a devicectl id, or a device/simulator name).
                       Accepted by deploy, uninstall, terminate, background, foreground,
-                      screenshot, record, key, pointer and geometry.
+                      screenshot, record, key, pointer and geometry. A named device that
+                      is not online is refused (never replaced), and an unnamed call with
+                      more than one target online is refused with the list.
+  --allow-store-app-removal
+                      deploy/uninstall: allow removing a copy of the app somebody else
+                      installed (Android: not installed by adb; physical iOS: not built
+                      by a developer). Only with the device owner's agreement.
   --target <kind>     iOS/tvOS: which CLASS of target to act on — device (real hardware) or
                       simulator. Accepted by build, deploy, open-url, screenshot and record.
                       Omitted, resolution is physical-first, so a capture lands on the machine
@@ -159,7 +166,11 @@ async function run(): Promise<number> {
       result = await core.deploy(merge(f));
       break;
     case "uninstall":
-      result = await core.uninstall({ ...common, device_udid: devicePin });
+      result = await core.uninstall({
+        ...common,
+        device_udid: devicePin,
+        allow_store_app_removal: f.allow_store_app_removal as boolean | undefined,
+      });
       break;
     case "kill-stale":
     case "kill_stale":

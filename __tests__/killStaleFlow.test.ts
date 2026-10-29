@@ -9,6 +9,7 @@ import {
 import type { KillStaleScope, KillStaleScopeKind } from "../src/adapters/platformAdapter.js";
 import type { CommandResult, DeviceResolution } from "../src/types.js";
 import type { LaunchRecord } from "../src/launchRegistry.js";
+import { RequestedDeviceUnavailableError } from "../src/deviceRequest.js";
 
 // These are the decisions that reach a real tool call: which scope a teardown
 // runs with, in which order, and what it reports having done. Nothing tested
@@ -98,12 +99,10 @@ describe("tearDownForDeploy", () => {
     ]);
   });
 
-  it("tears down BEFORE discovery on a platform whose teardown needs no device", async () => {
-    // A wedged `flutter-tizen` can be why `sdb devices` answers wrongly, so the
-    // order that platform can support is the one it gets.
+  it("resolves before a platform-wide teardown, so a refused deploy has killed nothing", async () => {
     const { adapter, calls, scopes } = fakeAdapter({ scopeKind: "platform" });
     await tearDownForDeploy({ adapter, preference: {} });
-    expect(calls).toEqual(["killStale", "discoverDevice"]);
+    expect(calls).toEqual(["discoverDevice", "killStale"]);
     expect(scopes).toEqual([{ kind: "all-devices" }]);
   });
 });
@@ -254,5 +253,51 @@ describe("decideKillStaleScope", () => {
         resolution: { target: "emulator-5554" },
       })
     ).toEqual({ kind: "device", device: "emulator-5554", warning: undefined });
+  });
+});
+
+describe("runKillStale with a named device that is not online", () => {
+  it("confines the teardown to the named id rather than refusing or widening it", async () => {
+    const { adapter, scopes } = fakeAdapter({
+      scopeKind: "device",
+      resolve: async () => {
+        throw new RequestedDeviceUnavailableError({
+          platform: "Android",
+          requested: "emulator-5554",
+          origin: "the device_udid argument",
+          online: [{ id: "RFCR902W0TT", detail: "physical, SM_F926U1" }],
+        });
+      },
+    });
+    const { store, cleared } = fakeStore([
+      record("emulator-5554", "/tmp/emu.fifo"),
+      record("RFCR902W0TT", "/tmp/phone.fifo"),
+    ]);
+
+    const result = await runKillStale({
+      adapter,
+      args: { device_udid: "emulator-5554" },
+      store,
+    });
+
+    expect(scopes).toEqual([{ kind: "device", device: "emulator-5554" }]);
+    expect(cleared).toEqual(["launch:android:emulator-5554"]);
+    expect(result.scope).toBe("emulator-5554");
+    expect(result.deviceWarning).toMatch(/not online/);
+  });
+
+  it("still refuses when resolution fails for any other reason", async () => {
+    const { adapter, scopes } = fakeAdapter({
+      scopeKind: "device",
+      resolve: async () => {
+        throw new Error("adb not found");
+      },
+    });
+    const { store } = fakeStore();
+
+    const result = await runKillStale({ adapter, args: {}, store });
+
+    expect(scopes).toEqual([]);
+    expect(result.killed).toBe(false);
   });
 });

@@ -849,3 +849,70 @@ describe("TvosAdapter.install resolves the bundle that is actually on disk", () 
     expect(issued("simctl install")).toContain(`'${built}'`);
   });
 });
+
+/** A paired Apple TV and, optionally, a booted tvOS simulator. */
+function mockAppleTvAndSimulator(simBooted: boolean) {
+  runShell.mockImplementation(async (cmd: string) => {
+    if (cmd.includes("devicectl list devices")) {
+      const outPath = devicectlOutputPath(cmd);
+      if (outPath) fs.writeFileSync(outPath, devicectlJson(true));
+      return { ...okResult, success: true };
+    }
+    if (cmd.includes("simctl list devices --json")) {
+      return {
+        ...okResult,
+        stdout: JSON.stringify({
+          devices: {
+            "com.apple.CoreSimulator.SimRuntime.tvOS-18-0": [
+              { udid: SIM_ID, name: "Apple TV 4K", state: simBooted ? "Booted" : "Shutdown", isAvailable: true },
+            ],
+          },
+        }),
+      };
+    }
+    return okResult;
+  });
+}
+
+describe("TvosAdapter.openUrl target selection", () => {
+  it("opens on the simulator when kind: simulator is asked for with an Apple TV paired", async () => {
+    mockAppleTvAndSimulator(true);
+    const result = await tvos().openUrl("example://home", undefined, { kind: "simulator" });
+    expect(result.opened).toBe(true);
+    expect(runShell).toHaveBeenCalledWith(
+      expect.stringContaining(`simctl openurl '${SIM_ID}'`),
+      expect.anything()
+    );
+  });
+
+  it("refuses kind: simulator when no simulator is booted, rather than using the Apple TV", async () => {
+    mockAppleTvAndSimulator(false);
+    await expect(
+      tvos().openUrl("example://home", undefined, { kind: "simulator" })
+    ).rejects.toThrow(/a simulator was requested and none is online/);
+  });
+});
+
+describe("TvosAdapter.screenshot target selection", () => {
+  it("captures the simulator a device_udid names, with an Apple TV paired", async () => {
+    mockAppleTvAndSimulator(true);
+    await tvos().screenshot({ outPath: "/tmp/never-written.png", deviceUdid: SIM_ID } as Parameters<
+      InstanceType<typeof TvosAdapter>["screenshot"]
+    >[0]);
+    expect(runShell).toHaveBeenCalledWith(
+      expect.stringContaining(`simctl io '${SIM_ID}' screenshot`),
+      expect.anything()
+    );
+  });
+
+  it("captures the simulator for target: simulator, with an Apple TV paired", async () => {
+    mockAppleTvAndSimulator(true);
+    await tvos().screenshot({ outPath: "/tmp/never-written.png", target: "simulator" } as Parameters<
+      InstanceType<typeof TvosAdapter>["screenshot"]
+    >[0]);
+    expect(runShell).toHaveBeenCalledWith(
+      expect.stringContaining(`simctl io '${SIM_ID}' screenshot`),
+      expect.anything()
+    );
+  });
+});

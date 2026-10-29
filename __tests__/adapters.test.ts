@@ -628,3 +628,50 @@ describe("WebOSAdapter delegates to ares/webos-build via the shared shell", () =
     expect(second.platform).toBe("webos");
   });
 });
+
+const { runUninstallCore: runWebosUninstall } = await import("../src/deployFlow.js");
+
+describe("WebOSAdapter device naming", () => {
+  const TWO_TVS =
+    "name       deviceinfo             connection  profile\n" +
+    "tv-26      prisoner@192.168.1.50  ssh         tv\n" +
+    "emulator   developer@127.0.0.1    ssh         tv\n";
+
+  it("refuses a device_udid, which webOS cannot honour, rather than ignoring it", async () => {
+    runShell.mockResolvedValue({ ...okResult, stdout: TWO_TVS });
+    await expect(webos().discoverDevice({ udid: "tv-26" })).rejects.toThrow(
+      /webOS does not take device_udid.*FLUTTER_DEVICE_WEBOS_DEVICE/
+    );
+  });
+
+  it("refuses flutter_uninstall with nothing named while two devices are registered", async () => {
+    runShell.mockResolvedValue({ ...okResult, stdout: TWO_TVS });
+    await expect(runWebosUninstall({ adapter: webos(), args: {} })).rejects.toThrow(
+      /2 webOS devices are online and none was named: tv-26 \(192\.168\.1\.50\), emulator \(127\.0\.0\.1\)/
+    );
+    expect(
+      runShell.mock.calls.filter(([c]) => (c as string).includes("--remove"))
+    ).toEqual([]);
+  });
+
+  it("confirms the ipk being installed carries the app id before space recovery", async () => {
+    const adapter = webos();
+    (adapter as unknown as { lastArtifactPath: string }).lastArtifactPath =
+      "/repo/build/webos/out/com.example.other_1.0.0_all.ipk";
+    const verdict = await adapter.verifyUninstallTarget("tv-26", {
+      purpose: "space-recovery",
+      allowStoreAppRemoval: false,
+      packageId: adapter.appId,
+    } as Parameters<InstanceType<typeof WebOSAdapter>["verifyUninstallTarget"]>[1]);
+    expect(verdict.ok).toBe(false);
+
+    (adapter as unknown as { lastArtifactPath: string }).lastArtifactPath =
+      `/repo/build/webos/out/${adapter.appId}_1.0.0_all.ipk`;
+    const allowed = await adapter.verifyUninstallTarget("tv-26", {
+      purpose: "space-recovery",
+      allowStoreAppRemoval: false,
+      packageId: adapter.appId,
+    } as Parameters<InstanceType<typeof WebOSAdapter>["verifyUninstallTarget"]>[1]);
+    expect(allowed).toEqual({ ok: true });
+  });
+});

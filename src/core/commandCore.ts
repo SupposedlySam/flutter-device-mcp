@@ -6,7 +6,7 @@
  * ({@link ../index}) wraps each result in a JSON content block, and the
  * `flutter-device` CLI ({@link ../bin/flutter-device}) renders it to stdout +
  * an exit code. All the guardrails (one-deploy-at-a-time, ENOSPC uninstall+retry,
- * pty VM-service-URI capture, stale-pin self-heal, Marionette drivability probe)
+ * pty VM-service-URI capture, named-device refusal, Marionette drivability probe)
  * run identically for both callers because they run HERE, not in the frontends.
  */
 import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
@@ -41,7 +41,8 @@ import {
   recordLaunch,
   resolveLaunch,
 } from "../launchRegistry.js";
-import { runKillStale, tearDownForDeploy } from "../killStaleFlow.js";
+import { runKillStale } from "../killStaleFlow.js";
+import { runDeployCore, runUninstallCore } from "../deployFlow.js";
 import { VmServiceClient } from "../vmServiceClient.js";
 import { hotReload, ReloadOutcome } from "../hotReload.js";
 import { hotControl } from "../hotControl.js";
@@ -253,133 +254,58 @@ export class CommandCore {
       device_udid?: string;
       app_path?: string;
       app_url?: string;
+      allow_store_app_removal?: boolean;
     }
   ): Promise<CommandOutput> {
     const adapter = this.adapterFor(args);
     return this.guard("flutter_deploy", { platform: adapter.platform, ...args }, async () => {
-      // 1. One deploy at a time, PER DEVICE: resolve the target and tear down
-      // only the drivers holding IT, leaving every other device's session
-      // running — a deploy to the emulator used to kill the `flutter run` on the
-      // phone attached beside it, so `device_udid` could pick a target but not
-      // spare the other one. The order (resolve-then-kill, or kill-first where
-      // the teardown needs no device) is tearDownForDeploy's decision.
-      const { resolution, killed } = await tearDownForDeploy({
-        adapter,
-        preference: { kind: args.target, udid: args.device_udid },
-      });
-      const device = resolution.target;
-      const deviceWarning = resolution.warning;
+      // One deploy at a time, PER DEVICE: tearDownForDeploy (inside
+      // runDeployCore) resolves the target and tears down only the drivers
+      // holding IT, so a deploy to the emulator leaves the `flutter run` on the
+      // phone beside it running.
+      const core = await runDeployCore({ adapter, args });
+      const device = core.resolution.target;
+      const deviceWarning = core.resolution.warning;
+      const common = {
+        platform: adapter.platform,
+        device,
+        deviceWarning,
+        environmentDiagnostic: core.environmentDiagnostic,
+        staleKilled: core.killed,
+        enospcRecoveryAttempted: core.enospcRecoveryAttempted,
+        enospcRecoveryRefused: core.enospcRecoveryRefused,
+      };
 
-      const environmentDiagnostic = adapter.environmentDiagnostic
-        ? (await adapter.environmentDiagnostic(resolution)) ?? undefined
-        : undefined;
-
-      // 2. Install the already-built package (install-only).
-      let install = await adapter.install(device, {
-        noLaunch: true,
-        mode: args.mode,
-        debug: args.debug,
-        dartDefine: args.dart_define,
-        // macOS-only (ignored by every other adapter): the .app source for this
-        // deploy, overriding the configured
-        // FLUTTER_DEVICE_MACOS_APP_PATH/FLUTTER_DEVICE_MACOS_APP_URL defaults.
-        appPath: args.app_path,
-        appUrl: args.app_url,
-      });
-
-      // 3. ENOSPC recovery: uninstall + retry the install once.
-      const isInstallFailure = (combined: string): boolean =>
-        adapter.isInstallFailure
-          ? adapter.isInstallFailure(combined)
-          : /No space left on device/i.test(combined) ||
-            /Install failed/i.test(combined);
-      let recovered = false;
-      if (!install.success && isInstallFailure(install.combined)) {
-        await adapter.uninstall(device, adapter.appId);
-        recovered = true;
-        install = await adapter.install(device, {
-          noLaunch: true,
-          mode: args.mode,
-          debug: args.debug,
-          dartDefine: args.dart_define,
-          appPath: args.app_path,
-          appUrl: args.app_url,
-        });
-      }
-
-      if (!install.success) {
+      if (core.stage === "install-failed") {
         const installDiagnostic = adapter.installFailureDiagnostic
-          ? (adapter.installFailureDiagnostic(install.combined) ?? undefined)
+          ? (adapter.installFailureDiagnostic(core.install.combined) ?? undefined)
           : undefined;
         return {
-          platform: adapter.platform,
+          ...common,
           stage: "install",
           success: false,
-          device,
-          deviceWarning,
-          environmentDiagnostic,
           installDiagnostic,
-          staleKilled: killed,
-          enospcRecoveryAttempted: recovered,
-          install: this.summarizeCli(install, 120),
+          install: this.summarizeCli(core.install, 120),
         };
       }
 
-      if (args.no_launch) {
+      if (core.stage === "installed") {
         return {
-          platform: adapter.platform,
+          ...common,
           stage: "install",
           success: true,
           launched: false,
-          device,
-          deviceWarning,
-          environmentDiagnostic,
-          staleKilled: killed,
-          enospcRecoveryAttempted: recovered,
-          install: this.summarizeCli(install, 60),
+          install: this.summarizeCli(core.install, 60),
         };
       }
 
-      // 4. Launch through a pty, backgrounded, and capture the VM Service URI.
-      const timeoutMs = args.timeout_ms ?? 180000;
-      // The launch must name the mode of what was just installed (Tizen's
-      // `--no-build` reuses only a TPK of the named mode).
-      const launchMode = args.mode ?? (args.debug ? "debug" : undefined);
-      let outcome = await adapter.launchAndCaptureUri(
-        device,
-        timeoutMs,
-        launchMode,
-        args.dart_define
-      );
-
-      // 4a. Reactive launch-failure recovery (iOS first-time provisioning).
-      let launchRecovery: { recovered: boolean; note?: string } | undefined;
-      if (isLaunchFailure(outcome) && adapter.recoverLaunchFailure) {
-        launchRecovery = await adapter.recoverLaunchFailure(
-          device,
-          outcome.logTail ?? outcome.reason ?? ""
-        );
-        if (launchRecovery.recovered) {
-          outcome = await adapter.launchAndCaptureUri(
-            device,
-            timeoutMs,
-            launchMode,
-            args.dart_define
-          );
-        }
-      }
-
+      const { outcome, launchRecovery } = core;
       if (isLaunchFailure(outcome)) {
         return {
-          platform: adapter.platform,
+          ...common,
           stage: "launch",
           success: false,
           launched: false,
-          device,
-          deviceWarning,
-          environmentDiagnostic,
-          staleKilled: killed,
-          enospcRecoveryAttempted: recovered,
           launchRecovery,
           reason: outcome.reason,
           pid: outcome.pid,
@@ -483,9 +409,10 @@ export class CommandCore {
           !outcome.launchModeCaveat
             ? NO_PTY_FORWARDER_REASON
             : undefined,
-        environmentDiagnostic,
-        staleKilled: killed,
-        enospcRecoveryAttempted: recovered,
+        environmentDiagnostic: core.environmentDiagnostic,
+        staleKilled: core.killed,
+        enospcRecoveryAttempted: core.enospcRecoveryAttempted,
+        enospcRecoveryRefused: core.enospcRecoveryRefused,
         launchRecovery,
         vmServiceUriWs: outcome.vmServiceUriWs,
         vmServiceUriHttp: outcome.vmServiceUriHttp,
@@ -504,7 +431,7 @@ export class CommandCore {
 
   // =========== uninstall ==========
   async uninstall(
-    args: CommonArgs & { device_udid?: string }
+    args: CommonArgs & { device_udid?: string; allow_store_app_removal?: boolean }
   ): Promise<CommandOutput> {
     const adapter = this.adapterFor(args);
     return this.guard(
@@ -512,11 +439,21 @@ export class CommandCore {
       { platform: adapter.platform, appId: adapter.appId },
       async () => {
         if (!adapter.appId) return this.missingAppId(adapter, "uninstall");
-        const resolution = await adapter.discoverDevice({
-          udid: args.device_udid,
-        });
+        const run = await runUninstallCore({ adapter, args });
+        const { resolution } = run;
         const device = resolution.target;
-        const result = await adapter.uninstall(device, adapter.appId);
+        if (run.kind === "refused") {
+          return {
+            platform: adapter.platform,
+            success: false,
+            refused: true,
+            device,
+            deviceWarning: resolution.warning,
+            appId: adapter.appId,
+            reason: run.reason,
+          };
+        }
+        const { result } = run;
         const notInstalled = /not installed|no such|does not exist/i.test(
           result.combined
         );

@@ -1,7 +1,7 @@
 /**
  * Resolution of the iOS device/simulator target used for build/install/launch.
  *
- * The frontend MCP drives two distinct iOS device kinds behind one neutral
+ * This server drives two distinct iOS device kinds behind one neutral
  * {@link DeviceResolution} shape:
  *  - a PHYSICAL device (iPhone/iPad), and
  *  - a SIMULATOR.
@@ -33,11 +33,17 @@
  * This module is pure parsing/selection over the raw command output the adapter
  * captures — it never spawns anything.
  *
- * The stale-pin fallback mirrors the Tizen path: a pin (flutter id, devicectl
- * id, or name) that is not currently connected/booted falls back to the first
- * available device with a warning, so a moved/rebooted target does not strand
- * every deploy.
+ * A named target that is not connected/booted is refused, never replaced (see
+ * deviceRequest.ts).
  */
+import {
+  ambiguousNameRefused,
+  OnlineDevice,
+  pickNamedMatch,
+  RequestedDeviceUnavailableError,
+  targetClassUnavailable,
+  unnamedChoiceRefused,
+} from "./deviceRequest.js";
 import { DeviceResolution } from "./types.js";
 
 /** Which iOS toolchain a resolved target is driven by. */
@@ -59,7 +65,7 @@ export interface IosDeviceResolution extends DeviceResolution {
   /**
    * The id to use with `xcrun devicectl`/`simctl` for lifecycle + uninstall.
    * Differs from `target` (the flutter id) for a physical device; equal for a
-   * simulator. Undefined only for a stale pin with no matched device.
+   * simulator.
    */
   devicectlId?: string;
 }
@@ -395,11 +401,16 @@ function toResolution(
  * ids (see {@link parseDevicectlDevices} + {@link mergeFlutterIds}); an Apple TV
  * can therefore never appear here.
  *
- * A pin (flutter id, devicectl id, or name) is authoritative while it matches an
- * AVAILABLE device; otherwise it self-heals to the first available device (with
- * a warning), then any listed device. Physical devices are preferred over
- * simulators when both are available and no pin is set, matching the Tizen "real
- * device first" bias.
+ * A named target — the per-call `udid`, else the FLUTTER_DEVICE_IOS_DEVICE pin, as a
+ * flutter id, devicectl id, or name — is used only while it is AVAILABLE;
+ * otherwise this throws {@link RequestedDeviceUnavailableError} naming it and the
+ * available targets. It is never replaced by another device.
+ *
+ * `kind` restricts the choice to that class: a named target of the other class
+ * is refused, and so is a request for a class with nothing available. With
+ * nothing named, exactly one available target (of the requested class, or of
+ * either class) is used; several are refused rather than preferring the phone.
+ * A name matching several available targets is refused the same way.
  *
  * Devices flagged {@link IosDevice.ambiguous} (same-named, so their flutter and
  * devicectl ids could not be matched safely) are EXCLUDED from auto-selection —
@@ -408,13 +419,17 @@ function toResolution(
  * usable is listed.
  */
 /**
- * Per-call selection preference (see {@link resolveIosTarget}). `kind` biases
- * physical-vs-simulator; a `udid` is treated exactly like a pin (authoritative
- * while it matches an available target, self-healing otherwise). Both optional.
+ * Per-call selection preference (see {@link resolveIosTarget}). `kind`
+ * restricts physical-vs-simulator; a `udid` is treated exactly like a pin. Both
+ * optional.
  */
 export interface IosTargetPreference {
   kind?: IosDeviceKind;
   udid?: string;
+}
+
+function describeIosDevice(d: IosDevice): OnlineDevice {
+  return { id: d.udid, detail: [d.kind, d.name].filter(Boolean).join(", ") };
 }
 
 export function resolveIosTarget(
@@ -423,38 +438,61 @@ export function resolveIosTarget(
   simulators: IosDevice[],
   preference: IosTargetPreference = {}
 ): IosDeviceResolution | null {
-  // A per-call `udid` overrides the server-env pin for THIS call (the caller
-  // opted into a specific target — the whole point of the per-call selector).
-  const effectivePin =
-    preference.udid && preference.udid.trim().length > 0
-      ? preference.udid.trim()
-      : pinned;
-  pinned = effectivePin;
-  // A `kind` preference reorders the auto-selection pool so the requested class
-  // wins when no pin decides it. `simulator` puts simulators first (the iOS gap:
-  // pick the booted sim even when a physical iPhone is attached); `device` keeps
-  // the physical-first default explicit.
-  const all =
-    preference.kind === "simulator"
-      ? [...simulators, ...physical]
-      : [...physical, ...simulators];
+  const fromCall = !!preference.udid && preference.udid.trim().length > 0;
+  const pin = fromCall ? preference.udid?.trim() : pinned?.trim();
+  const all = [...physical, ...simulators];
+  const available = all.filter((d) => d.available).map(describeIosDevice);
+
+  if (pin) {
+    const origin = fromCall
+      ? "the device_udid argument"
+      : "the FLUTTER_DEVICE_IOS_DEVICE env var";
+    const picked = pickNamedMatch(
+      all.filter((d) => pinMatches(pin, d)),
+      (d) => d.available
+    );
+    if (picked.kind === "several") {
+      throw ambiguousNameRefused({
+        platform: "iOS",
+        requested: pin,
+        origin,
+        matches: picked.devices.map(describeIosDevice),
+      });
+    }
+    if (picked.kind === "none") {
+      throw new RequestedDeviceUnavailableError({
+        platform: "iOS",
+        requested: pin,
+        origin,
+        state: picked.listed ? "not connected/booted" : undefined,
+        listedAs: picked.listed?.udid,
+        online: available,
+      });
+    }
+    const matched = picked.device;
+    if (preference.kind && matched.kind !== preference.kind) {
+      throw targetClassUnavailable({
+        platform: "iOS",
+        wanted: preference.kind,
+        requested: pin,
+        resolvedClass: matched.kind,
+        online: available,
+      });
+    }
+    return toResolution(matched, "pin");
+  }
+
   // Auto-selection must never land on an ambiguously-mapped device (its flutter
-  // id could belong to a different same-named phone). A pin, however, still
-  // resolves an ambiguous device — it is the explicit disambiguation.
-  const selectable = all.filter((d) => !d.ambiguous);
+  // id could belong to a different same-named phone).
   const selectablePhysical = physical.filter((d) => !d.ambiguous);
   const selectableSimulators = simulators.filter((d) => !d.ambiguous);
-  // Honor a `kind` preference for the first-available pick: requested class
-  // first, the other as fallback. Default stays physical-first.
-  const [firstClass, secondClass] =
+  const pool =
     preference.kind === "simulator"
-      ? [selectableSimulators, selectablePhysical]
-      : [selectablePhysical, selectableSimulators];
-  const firstAvailable =
-    firstClass.find((d) => d.available) ?? secondClass.find((d) => d.available);
+      ? selectableSimulators
+      : preference.kind === "device"
+        ? selectablePhysical
+        : [...selectablePhysical, ...selectableSimulators];
 
-  // Warn (via the same channel as the stale-pin self-heal) whenever an ambiguous
-  // device exists, so the caller knows to disambiguate with a pin.
   const ambiguityWarning = all.some((d) => d.ambiguous)
     ? "Two or more connected iOS devices share a name, so their flutter and " +
       "devicectl ids cannot be matched safely (pairing by order could drive the " +
@@ -463,47 +501,31 @@ export function resolveIosTarget(
       "name to select one."
     : undefined;
 
-  if (pinned && pinned.trim().length > 0) {
-    const pin = pinned.trim();
-    const matched = all.find((d) => pinMatches(pin, d));
-    if (matched && matched.available) {
-      return toResolution(matched, "pin");
-    }
-    if (firstAvailable) {
-      return toResolution(
-        firstAvailable,
-        "discovered",
-        `FLUTTER_DEVICE_IOS_DEVICE is pinned to ${pin}, but that target is not an ` +
-          `available iOS device/simulator (stale pin — it may be unplugged, ` +
-          `shut down, or reimaged). Using ${firstAvailable.udid} ` +
-          `(${firstAvailable.kind}) instead.`
-      );
-    }
-    if (matched) {
-      // Listed but offline — keep the pin, best effort.
-      return toResolution(matched, "discovered-offline");
-    }
-    return {
-      target: pin,
-      devicectlId: pin,
-      source: "stale-pin",
-      kind: "device",
-      warning:
-        `FLUTTER_DEVICE_IOS_DEVICE is pinned to ${pin}, but that target is not an ` +
-        `available iOS device/simulator and none was found to fall back to. ` +
-        `Proceeding with the pin; expect failures if it is not connected.`,
-    };
+  const availableInPool = pool.filter((d) => d.available);
+  if (availableInPool.length > 1) {
+    throw unnamedChoiceRefused({
+      platform: "iOS",
+      online: availableInPool.map(describeIosDevice),
+      hint:
+        "Name one with device_udid (or FLUTTER_DEVICE_IOS_DEVICE), or pass target: " +
+        "\"simulator\" / \"device\" when only one of that class is available.",
+    });
+  }
+  if (availableInPool.length === 1) {
+    return toResolution(availableInPool[0], "discovered", ambiguityWarning);
+  }
+  if (preference.kind) {
+    throw targetClassUnavailable({
+      platform: "iOS",
+      wanted: preference.kind,
+      online: available,
+    });
   }
 
-  if (firstAvailable) {
-    return toResolution(firstAvailable, "discovered", ambiguityWarning);
-  }
-
-  // No available selectable device. Fall back to a listed-but-offline device,
-  // still skipping ambiguous ones. If the only remaining devices are ambiguous,
-  // resolve NOTHING so the caller must disambiguate with a pin rather than have
-  // us guess a possibly-wrong flutter id.
-  const anyOffline = selectable[0];
+  // Nothing available. Fall back to a listed-but-offline device, still skipping
+  // ambiguous ones, so the caller can surface a specific reason. If only
+  // ambiguous devices remain, resolve NOTHING so the caller must name one.
+  const anyOffline = pool[0];
   if (anyOffline) {
     return toResolution(anyOffline, "discovered-offline", ambiguityWarning);
   }

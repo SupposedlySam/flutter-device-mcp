@@ -116,6 +116,9 @@ import {
   KillStaleScope,
   KillStaleScopeKind,
   PlatformAdapter,
+  LaunchRecovery,
+  UninstallCheck,
+  UninstallVerdict,
 } from "./platformAdapter.js";
 
 /** Android KEYCODE_HOME — sent via `adb shell input keyevent` to background the app. */
@@ -149,6 +152,195 @@ export const ANDROID_FAILURE_SIGNATURES: RegExp[] = [
  */
 export const ANDROID_STORAGE_FAILURE_SIGNATURE =
   /INSTALL_FAILED_INSUFFICIENT_STORAGE|INSUFFICIENT_STORAGE|No space left on device/i;
+
+/**
+ * Installers that mean "put there by adb": `null` when adb installs directly,
+ * `com.android.shell` on releases that record the shell as the installer. Only a
+ * copy with one of these may be replaced by a development build without asking.
+ * Everything else — the Play Store, the Galaxy Store, Firebase App Distribution
+ * tester builds, a sideloaded release apk — is somebody's install, with data.
+ */
+export const ADB_INSTALLERS: ReadonlySet<string> = new Set(["null", "com.android.shell"]);
+
+/** Printed by the device shell after `pm`, so `pm`'s own exit status is known. */
+export const PM_EXIT_SENTINEL = "__pm_exit=";
+
+/** Who installed the app on a device, as `pm list packages -i` reports it. */
+export type InstalledCopy =
+  | { kind: "absent" }
+  | { kind: "installed"; installer: string }
+  | { kind: "unknown"; detail: string };
+
+/**
+ * Read the installer of exactly `appId` from `pm list packages -i <appId>`
+ * followed by the exit-status sentinel. The filter is a substring match, so
+ * `com.example.app.debug` is listed for `com.example.app` and is skipped here.
+ *
+ * `absent` needs positive evidence: pm exited 0 and every line it printed was a
+ * well-formed package line. Anything else — no sentinel, a non-zero exit, a line
+ * that is not a package line — is `unknown`, which callers treat as a copy they
+ * must not replace.
+ */
+export function parseInstalledCopy(output: string, appId: string): InstalledCopy {
+  const lines = output
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+  const exit = lines.find((l) => l.startsWith(PM_EXIT_SENTINEL));
+  if (!exit) return { kind: "unknown", detail: "pm reported no exit status" };
+  if (exit !== `${PM_EXIT_SENTINEL}0`) {
+    return { kind: "unknown", detail: `pm exited ${exit.slice(PM_EXIT_SENTINEL.length)}` };
+  }
+  let found: InstalledCopy = { kind: "absent" };
+  for (const line of lines) {
+    if (line === exit) continue;
+    const m = line.match(/^package:(\S+)\s+installer=(\S+)$/);
+    if (!m) return { kind: "unknown", detail: `unexpected pm output: ${line}` };
+    if (m[1] === appId) found = { kind: "installed", installer: m[2] };
+  }
+  return found;
+}
+
+/**
+ * The package id the app's build produces in `mode`, read from the tree: the
+ * `applicationId` in android/app/build.gradle[.kts] (a literal, or a property
+ * it names, looked up in android/gradle.properties) plus the build type's
+ * `applicationIdSuffix`. This, not the configured app id, is what `flutter run`
+ * installs — and replaces. Anything that cannot be attributed from here (several
+ * `applicationId`s from flavors, a suffix outside the build type, an expression)
+ * makes the id unknown rather than guessed.
+ */
+export function androidBuildPackageId(
+  appDir: string,
+  mode: string
+): { ok: true; packageId: string } | { ok: false; reason: string } {
+  const androidDir = path.join(appDir, "android");
+  const gradleFile = ["build.gradle", "build.gradle.kts"]
+    .map((f) => path.join(androidDir, "app", f))
+    .find((f) => fs.existsSync(f));
+  if (!gradleFile) {
+    return { ok: false, reason: `No build.gradle under ${androidDir}/app.` };
+  }
+  const gradle = fs.readFileSync(gradleFile, "utf8");
+  const base = gradleApplicationId(androidDir, gradleFile, gradle);
+  if (!base.ok) return base;
+  const suffixPattern = /applicationIdSuffix\s*=?\s*["']([^"']*)["']/g;
+  const count = (text: string | undefined) =>
+    text ? [...text.matchAll(suffixPattern)].length : 0;
+  const types = braceBlock(gradle, /\bbuildTypes\s*\{/);
+  const block = types ? braceBlock(types, new RegExp(`\\b${mode}\\s*\\{`)) : undefined;
+  if (count(gradle) > count(types)) {
+    return {
+      ok: false,
+      reason:
+        `${gradleFile} declares an applicationIdSuffix outside buildTypes (a flavor ` +
+        `or defaultConfig), so the package id this build produces cannot be read ` +
+        `from the tree.`,
+    };
+  }
+  const suffix = block ? [...block.matchAll(suffixPattern)][0]?.[1] : undefined;
+  return { ok: true, packageId: base.packageId + (suffix ?? "") };
+}
+
+/**
+ * The one `applicationId` a gradle file declares. A quoted literal is used as
+ * is; `"$name"`, `"${name}"`, a bare `name` / `project.name` or
+ * `property("name")` is looked up in android/gradle.properties.
+ */
+function gradleApplicationId(
+  androidDir: string,
+  gradleFile: string,
+  gradle: string
+): { ok: true; packageId: string } | { ok: false; reason: string } {
+  const declarations = [...gradle.matchAll(/\bapplicationId\b\s*=?\s*([^\s;]+)/g)].map(
+    (m) => m[1]
+  );
+  if (declarations.length !== 1) {
+    return {
+      ok: false,
+      reason:
+        `${gradleFile} declares ${declarations.length} applicationId values, so the ` +
+        `package id this build produces cannot be read from the tree.`,
+    };
+  }
+  const value = declarations[0];
+  const literal = value.match(/^["']([^"'$]+)["']$/)?.[1];
+  if (literal) return { ok: true, packageId: literal };
+  const name =
+    value.match(/^["']\$\{?([A-Za-z_][\w.]*)\}?["']$/)?.[1] ??
+    value.match(/^(?:find)?[Pp]roperty\(["']([^"']+)["']\)$/)?.[1] ??
+    value.match(/^(?:project\.)?([A-Za-z_]\w*)$/)?.[1];
+  if (!name) {
+    return {
+      ok: false,
+      reason: `${gradleFile} sets applicationId to ${value}, which cannot be read from the tree.`,
+    };
+  }
+  let properties = "";
+  try {
+    properties = fs.readFileSync(path.join(androidDir, "gradle.properties"), "utf8");
+  } catch {
+    // No gradle.properties: the lookup below reports the property as missing.
+  }
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const resolved = properties.match(new RegExp(`^\\s*${escaped}\\s*=\\s*(\\S+)\\s*$`, "m"))?.[1];
+  if (!resolved) {
+    return {
+      ok: false,
+      reason: `${gradleFile} takes applicationId from ${name}, which ${androidDir}/gradle.properties does not set.`,
+    };
+  }
+  return { ok: true, packageId: resolved };
+}
+
+/** The first `<header> { ... }` block `opener` finds in `text`, by brace matching. */
+function braceBlock(text: string, opener: RegExp): string | undefined {
+  const open = text.search(opener);
+  if (open === -1) return undefined;
+  let depth = 0;
+  for (let i = text.indexOf("{", open); i < text.length; i++) {
+    if (text[i] === "{") depth++;
+    else if (text[i] === "}" && --depth === 0) return text.slice(open, i + 1);
+  }
+  return undefined;
+}
+
+/** The apk a failed `flutter run` was installing, relative to the app dir. */
+export function apkPathFromLaunchLog(log: string): string | undefined {
+  return log.match(/Installing\s+(\S+\.apk)/)?.[1];
+}
+
+/**
+ * Find `aapt2`, which reads the package id out of a built apk. FLUTTER_DEVICE_ANDROID_AAPT2
+ * wins; otherwise the newest build-tools under ANDROID_HOME / ANDROID_SDK_ROOT /
+ * the default macOS SDK location. Undefined when none is installed.
+ */
+export function locateAapt2(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const explicit = env.FLUTTER_DEVICE_ANDROID_AAPT2?.trim();
+  if (explicit) return explicit;
+  const roots = [
+    env.ANDROID_HOME,
+    env.ANDROID_SDK_ROOT,
+    env.HOME ? path.join(env.HOME, "Library", "Android", "sdk") : undefined,
+  ].filter((r): r is string => !!r);
+  for (const root of roots) {
+    const buildTools = path.join(root, "build-tools");
+    let versions: string[];
+    try {
+      versions = fs.readdirSync(buildTools);
+    } catch {
+      continue;
+    }
+    const sorted = versions.sort((a, b) =>
+      b.localeCompare(a, undefined, { numeric: true })
+    );
+    for (const v of sorted) {
+      const candidate = path.join(buildTools, v, "aapt2");
+      if (fs.existsSync(candidate)) return candidate;
+    }
+  }
+  return undefined;
+}
 
 /**
  * Compose the `flutter run` launch and delegate the pty wrapping to
@@ -207,6 +399,8 @@ export interface AndroidAdapterConfig {
    * Injectable so tests pin it deterministically regardless of the host's fvm.
    */
   flutterCommand?: string;
+  /** The `aapt2` to read a built apk's package id with. Defaults to {@link locateAapt2}. */
+  aaptCommand?: string;
 }
 
 export class AndroidAdapter implements PlatformAdapter {
@@ -236,8 +430,8 @@ export class AndroidAdapter implements PlatformAdapter {
    * read back by {@link inputDeviceWarning}. Reset to `undefined` on every
    * {@link input} call (same lifetime as {@link inputDevicePin}) so a warning
    * never outlives the call that produced it, and set by the resolver closure
-   * each time it actually runs (`pointerMove` included — it resolves the device
-   * purely to surface a stale-pin warning, even though it sends no adb event).
+   * each time it actually runs (`pointerMove` included, even though it sends no
+   * adb event).
    */
   private lastInputDeviceWarning: string | undefined;
 
@@ -392,19 +586,16 @@ export class AndroidAdapter implements PlatformAdapter {
   }
 
   /**
-   * Resolve the Android target from `adb devices -l`. A pin self-heals to the
-   * first online device with a warning, mirroring the Tizen/iOS stale-pin
-   * fallback. Throws an McpError when nothing is listed at all.
+   * Resolve the Android target from `adb devices -l`. A named device (the
+   * per-call `preference.udid`, else the `FLUTTER_DEVICE_ANDROID_DEVICE` pin) that is
+   * not online is refused, never replaced. Throws an McpError when nothing is
+   * listed at all.
    *
-   * `preference.udid` pins a specific target for THIS call — on Android the adb
-   * serial IS the id every consumer uses, so a serial (or model name) is matched
-   * exactly like the `FLUTTER_DEVICE_ANDROID_DEVICE` pin it overrides, self-heal
-   * and all. It is what makes a two-target host workable at all: discovery takes
+   * `preference.udid` is what makes a two-target host workable: discovery takes
    * the first ONLINE device, so a physical phone that is attached but unusable
-   * (PIN locked, where Flutter stops building and no work can be driven) wins
-   * every call, and the env pin that would redirect it cannot be changed without
-   * a host reload. `preference.kind` has no Android meaning (there is no
-   * device-vs-simulator id split here) and is ignored.
+   * (PIN locked, where Flutter stops building) wins every unnamed call.
+   * `preference.kind` restricts the choice to emulators (`simulator`) or real
+   * hardware (`device`).
    */
   async discoverDevice(
     preference: DeviceTargetPreference = {}
@@ -425,10 +616,13 @@ export class AndroidAdapter implements PlatformAdapter {
           "on your PATH, then retry. (Could not run `adb devices -l`.)"
       );
     }
+    // A blank per-call id is no id: it must not hide the env pin.
+    const callPin = preference.udid?.trim() || undefined;
     const resolution = resolveAndroidTarget(
-      preference.udid ?? this.config.device,
+      callPin ?? this.config.device,
       devicesOut.stdout,
-      preference.udid ? "call" : "env"
+      callPin ? "call" : "env",
+      preference.kind
     );
     if (!resolution) {
       throw new McpError(
@@ -454,6 +648,13 @@ export class AndroidAdapter implements PlatformAdapter {
    * only step that can honor it, and the launch receives no options, so the mode
    * is resolved here (explicit `debug` arg > env pin > default `debug`) for
    * {@link launchAndCaptureUri} to pick up.
+   *
+   * It is also the last point before `flutter run` can delete somebody's
+   * install: flutter_tools' installApp uninstalls the existing copy itself when
+   * any install attempt fails (a signature mismatch, a downgrade, a full disk),
+   * before this server sees the failure. So a copy of the package this build
+   * produces that adb did not put there is refused here unless
+   * `allowStoreAppRemoval` is set.
    */
   async install(device: string, opts: InstallOptions): Promise<CommandResult> {
     this.launchMode = resolveAndroidLaunchMode({
@@ -461,6 +662,29 @@ export class AndroidAdapter implements PlatformAdapter {
       explicitDebug: opts.debug,
       envMode: this.config.launchMode,
     });
+    const allow = opts.allowStoreAppRemoval === true;
+    const built = androidBuildPackageId(this.config.appDir, this.launchMode);
+    const check: UninstallVerdict = built.ok
+      ? await this.checkReplaceable(device, built.packageId, allow)
+      : allow
+        ? { ok: true }
+        : {
+            ok: false,
+            reason:
+              `${built.reason} Without the package id this build produces, the copy ` +
+              `flutter run might replace cannot be checked, so nothing was done. Pass ` +
+              `allow_store_app_removal: true to proceed anyway.`,
+          };
+    if (!check.ok) {
+      return {
+        code: 1,
+        stdout: "",
+        stderr: check.reason,
+        combined: check.reason,
+        success: false,
+        timedOut: false,
+      };
+    }
     const message =
       `Android install is performed by 'flutter run' at launch time (it installs ` +
       `the apk on ${device} and sets up the VM-service port-forward), so the ` +
@@ -490,35 +714,27 @@ export class AndroidAdapter implements PlatformAdapter {
   /**
    * Reactive launch-failure recovery (the {@link PlatformAdapter} seam).
    *
-   * Because the Android deploy installs at LAUNCH time (`flutter run` performs
-   * the apk install), an out-of-storage install failure surfaces as a FAILED
-   * launch, never as a failed install step — which is why the deploy's own
-   * ENOSPC retry, which only wraps the install call, can never fire here. When
-   * the captured launch output carries a storage signature, uninstall the app to
-   * free space and report `recovered: true` so the launch is retried once. If
-   * the space-freeing uninstall ITSELF fails there is nothing left to free, so
-   * the failure is reported as-is rather than burning a retry on the same wall.
-   * Any non-storage failure is not recovered.
+   * Because the Android deploy installs at LAUNCH time, an out-of-storage
+   * install failure surfaces as a FAILED launch. On a storage signature this
+   * asks for the package this build produces to be uninstalled and the launch
+   * retried; runDeployCore decides whether that is allowed. Any non-storage
+   * failure is not recovered.
    */
-  async recoverLaunchFailure(
-    device: string,
-    logTail: string
-  ): Promise<{ recovered: boolean; note?: string }> {
+  async recoverLaunchFailure(device: string, logTail: string): Promise<LaunchRecovery> {
     if (!ANDROID_STORAGE_FAILURE_SIGNATURE.test(logTail)) {
-      return { recovered: false };
+      return { action: "none" };
     }
-    const uninstall = await this.uninstall(device, this.appId);
-    if (!uninstall.success) {
+    const built = androidBuildPackageId(this.config.appDir, this.launchMode);
+    if (!built.ok) {
       return {
-        recovered: false,
-        note:
-          "Device is out of storage and the space-freeing `adb uninstall` failed, " +
-          `so a launch retry would hit the same wall: ${tail(uninstall.combined, 5)}`,
+        action: "none",
+        note: `${device} is out of storage. ${built.reason} Space recovery was not attempted.`,
       };
     }
     return {
-      recovered: true,
-      note: "Device was out of storage — uninstalled the app to free space; retrying the launch.",
+      action: "uninstall-and-retry",
+      packageId: built.packageId,
+      note: `${device} is out of storage.`,
     };
   }
 
@@ -564,7 +780,6 @@ export class AndroidAdapter implements PlatformAdapter {
     );
   }
 
-  /** Uninstall the app to free device space / reset state via `adb uninstall`. */
   /**
    * Open a URL on the device via `am start -a android.intent.action.VIEW`.
    *
@@ -615,6 +830,114 @@ export class AndroidAdapter implements PlatformAdapter {
     };
   }
 
+  /**
+   * Confirm uninstalling `check.packageId` from `device` is safe. For space
+   * recovery the apk being installed must carry that package id, read from the
+   * apk itself; for any uninstall, a copy adb did not install is kept unless the
+   * caller allowed its removal.
+   */
+  async verifyUninstallTarget(
+    device: string,
+    check: UninstallCheck
+  ): Promise<UninstallVerdict> {
+    if (check.purpose === "space-recovery") {
+      const built = await this.builtApkPackageId(check.buildLog ?? "");
+      if (!built.ok) return built;
+      if (built.packageId !== check.packageId) {
+        return {
+          ok: false,
+          reason:
+            `The apk being installed carries ${built.packageId}, not ${check.packageId}, ` +
+            `so uninstalling ${check.packageId} would free space by removing a ` +
+            `different app. Not attempted.`,
+        };
+      }
+    }
+    return this.checkReplaceable(device, check.packageId, check.allowStoreAppRemoval);
+  }
+
+  /** Read the package id of the apk a launch is installing. */
+  private async builtApkPackageId(
+    buildLog: string
+  ): Promise<{ ok: true; packageId: string } | { ok: false; reason: string }> {
+    const relative =
+      apkPathFromLaunchLog(buildLog) ??
+      path.join("build", "app", "outputs", "flutter-apk", `app-${this.launchMode}.apk`);
+    const apk = path.resolve(this.config.appDir, relative);
+    const aapt = this.config.aaptCommand ?? locateAapt2();
+    if (!aapt) {
+      return {
+        ok: false,
+        reason:
+          `Could not confirm the package id of ${apk}: aapt2 was not found (install ` +
+          `Android build-tools, or set FLUTTER_DEVICE_ANDROID_AAPT2). An unconfirmed ` +
+          `package id is never uninstalled.`,
+      };
+    }
+    const result = await runShell(
+      `${quote(aapt)} dump packagename ${quote(apk)}`,
+      { timeoutMs: 30000 }
+    );
+    const packageId = result.stdout.trim().split("\n")[0]?.trim();
+    if (!result.success || !packageId) {
+      return {
+        ok: false,
+        reason:
+          `Could not read the package id of ${apk} with aapt2: ` +
+          `${tail(result.combined, 5)}. An unconfirmed package id is never uninstalled.`,
+      };
+    }
+    return { ok: true, packageId };
+  }
+
+  /** Who installed `packageId` on `device`. */
+  async installedCopy(device: string, packageId: string): Promise<InstalledCopy> {
+    const result = await runShell(
+      `adb -s ${quote(device)} shell ${quote(
+        `pm list packages -i ${packageId}; echo ${PM_EXIT_SENTINEL}$?`
+      )}`,
+      { timeoutMs: 30000 }
+    );
+    if (!result.success) {
+      return { kind: "unknown", detail: tail(result.combined, 5) };
+    }
+    return parseInstalledCopy(result.stdout, packageId);
+  }
+
+  /**
+   * Refuse to replace or remove a copy of `packageId` that adb did not install,
+   * unless allowed. Not knowing who installed it counts as such a copy.
+   */
+  private async checkReplaceable(
+    device: string,
+    packageId: string,
+    allowStoreAppRemoval: boolean
+  ): Promise<UninstallVerdict> {
+    if (allowStoreAppRemoval) return { ok: true };
+    const copy = await this.installedCopy(device, packageId);
+    if (copy.kind === "installed" && !ADB_INSTALLERS.has(copy.installer)) {
+      return {
+        ok: false,
+        reason:
+          `${packageId} on ${device} was installed by ${copy.installer}, not by adb ` +
+          `(a store, a tester distribution, or a sideloaded build). Replacing it with ` +
+          `a development build uninstalls it and deletes its data, so nothing was ` +
+          `done. Pass allow_store_app_removal: true only if that device's owner has agreed.`,
+      };
+    }
+    if (copy.kind === "unknown") {
+      return {
+        ok: false,
+        reason:
+          `Could not tell who installed ${packageId} on ${device} ` +
+          `(${copy.detail}), so it is treated as somebody's install and left alone. ` +
+          `Pass allow_store_app_removal: true to proceed anyway.`,
+      };
+    }
+    return { ok: true };
+  }
+
+  /** Uninstall the app to free device space / reset state via `adb uninstall`. */
   async uninstall(device: string, appId: string): Promise<CommandResult> {
     return runShell(`adb -s ${quote(device)} uninstall ${quote(appId)}`, {
       timeoutMs: 120000,
@@ -625,7 +948,7 @@ export class AndroidAdapter implements PlatformAdapter {
    * Capture the current screen via `adb -s <serial> exec-out screencap -p`,
    * redirecting the raw PNG bytes to disk. `exec-out` (not `shell`) avoids the
    * CRLF byte-mangling that corrupts a `shell screencap -p` redirect. Resolves
-   * the device the normal way (per-call pin > env pin > self-heal) so the
+   * the device the normal way (per-call pin > env pin > discovery) so the
    * capture follows the same target as deploy/lifecycle — including the target a
    * caller pinned for this one call.
    */
@@ -633,8 +956,12 @@ export class AndroidAdapter implements PlatformAdapter {
     outPath?: string;
     includeBase64?: boolean;
     deviceUdid?: string;
+    target?: "device" | "simulator";
   }): Promise<ScreenshotResult> {
-    const resolution = await this.discoverDevice({ udid: opts.deviceUdid });
+    const resolution = await this.discoverDevice({
+      udid: opts.deviceUdid,
+      kind: opts.target,
+    });
     const outPath = opts.outPath ?? defaultScreenshotPath("android");
     const result = await runShell(
       buildAdbScreencapCommand(resolution.target, outPath),
@@ -676,6 +1003,7 @@ export class AndroidAdapter implements PlatformAdapter {
     fps: number;
     format: RecordFormat;
     deviceUdid?: string;
+    target?: "device" | "simulator";
   }): Promise<RecordResult> {
     const wantGif = opts.format === "gif";
     const ffmpeg = wantGif ? locateFfmpeg() : undefined;
@@ -692,7 +1020,10 @@ export class AndroidAdapter implements PlatformAdapter {
       };
     }
 
-    const resolution = await this.discoverDevice({ udid: opts.deviceUdid });
+    const resolution = await this.discoverDevice({
+      udid: opts.deviceUdid,
+      kind: opts.target,
+    });
     const duration = Math.min(
       Math.max(1, opts.durationSeconds),
       ANDROID_MAX_DURATION_SECONDS
@@ -907,8 +1238,8 @@ export class AndroidAdapter implements PlatformAdapter {
    * Flutter view, non-debug builds, and D-pad navigation (Android TV).
    *
    * The serial is resolved lazily per send through the normal device resolution
-   * (per-call pin > env pin > self-heal), so a multi-device host targets the
-   * same device as deploy/lifecycle. Cached so the selected mode survives across
+   * (per-call pin > env pin > the one online device), so a multi-device host
+   * targets the same device as deploy/lifecycle. Cached so the selected mode survives across
    * tool calls.
    *
    * The staged pointer position a `move` sets and a `click` consumes does NOT

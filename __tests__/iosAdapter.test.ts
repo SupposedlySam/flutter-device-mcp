@@ -1590,13 +1590,14 @@ describe("IosAdapter.screenshot", () => {
     }
   });
 
-  it("defaults to the PHYSICAL device with no pin, matching what a deploy would have targeted", async () => {
+  it("refuses with no pin while a phone and a simulator are both available, as a deploy would", async () => {
     const outPath = tmpPng("route-default");
     mockBothTargets(outPath);
     try {
-      const res = await iosWithPmd3(true).screenshot({ outPath });
-      expect(res.deviceKind).toBe("device");
-      expect(shotCommands()[0]).toContain("developer dvt screenshot");
+      await expect(iosWithPmd3(true).screenshot({ outPath })).rejects.toThrow(
+        /2 iOS devices are online and none was named/
+      );
+      expect(shotCommands()).toEqual([]);
     } finally {
       fs.rmSync(outPath, { force: true });
     }
@@ -2113,7 +2114,7 @@ describe("IosAdapter preflight (pod drift + provisioning)", () => {
       IPHONE_FLUTTER_ECID,
       "error: Runner requires a provisioning profile."
     );
-    expect(rec.recovered).toBe(true);
+    expect(rec.action).toBe("retry");
     const xcodebuild = runShell.mock.calls
       .map(([c]) => c as string)
       .find((c) => c.includes("xcodebuild"))!;
@@ -2131,7 +2132,7 @@ describe("IosAdapter preflight (pod drift + provisioning)", () => {
       IPHONE_FLUTTER_ECID,
       "Some unrelated build error"
     );
-    expect(rec.recovered).toBe(false);
+    expect(rec).toEqual({ action: "none" });
     expect(
       runShell.mock.calls.some(([c]) => (c as string).includes("xcodebuild"))
     ).toBe(false);
@@ -2146,28 +2147,33 @@ describe("IosAdapter preflight (pod drift + provisioning)", () => {
       "SIM-UDID-1",
       "requires a provisioning profile"
     );
-    expect(rec.recovered).toBe(false);
+    expect(rec).toEqual({ action: "none" });
   });
 
-  it("recoverLaunchFailure uninstalls + retries on ENOSPC at launch-time install", async () => {
+  it("recoverLaunchFailure asks for an uninstall when the device rejected the install for space, running nothing itself", async () => {
     const adapter = await resolvedDevice();
     runShell.mockClear();
-    runShell.mockResolvedValue(okResult);
     const rec = await adapter.recoverLaunchFailure!(
       IPHONE_FLUTTER_ECID,
-      "Could not install com.example.app on iPhone. No space left on device"
+      "Could not install build/ios/iphoneos/Runner.app on iPhone.\n" +
+        'Error Domain=MIInstallerErrorDomain Code=4 "No space left on device"'
     );
-    expect(rec.recovered).toBe(true);
-    // It uninstalled to free space (devicectl uninstall on a physical device).
-    expect(
-      runShell.mock.calls.some(([c]) =>
-        (c as string).includes("devicectl device uninstall app")
-      )
-    ).toBe(true);
-    // ENOSPC recovery must NOT run the slow provisioning xcodebuild.
-    expect(
-      runShell.mock.calls.some(([c]) => (c as string).includes("xcodebuild"))
-    ).toBe(false);
+    expect(rec).toEqual({
+      action: "uninstall-and-retry",
+      packageId: "com.example.app",
+      note: expect.stringMatching(/lack of space/),
+    });
+    expect(runShell).not.toHaveBeenCalled();
+  });
+
+  it("recoverLaunchFailure asks for nothing when the storage error came from the Mac's own build", async () => {
+    const adapter = await resolvedDevice();
+    runShell.mockClear();
+    const rec = await adapter.recoverLaunchFailure!(
+      IPHONE_FLUTTER_ECID,
+      "error: couldn't write output file: No space left on device\nCould not build the precompiled application for the device."
+    );
+    expect(rec).toEqual({ action: "none" });
   });
 });
 

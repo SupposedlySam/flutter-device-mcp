@@ -107,8 +107,8 @@ class FlutterDeviceServer {
       }
 
       const common: CommonArgs = { platform: resolvePlatform(route, args) };
-      // uninstall and the lifecycle verbs take no arguments of their own beyond
-      // the per-call device pin, so they share one pre-built args object.
+      // The lifecycle verbs take no arguments of their own beyond the per-call
+      // device pin, so they share one pre-built args object.
       const withDevicePin = {
         ...common,
         device_udid: args.device_udid as string | undefined,
@@ -157,10 +157,20 @@ class FlutterDeviceServer {
               device_udid: args.device_udid as string | undefined,
               app_path: args.app_path as string | undefined,
               app_url: args.app_url as string | undefined,
+              allow_store_app_removal: args.allow_store_app_removal as
+                | boolean
+                | undefined,
             })
           );
         case "flutter_uninstall":
-          return this.json(await core.uninstall(withDevicePin));
+          return this.json(
+            await core.uninstall({
+              ...withDevicePin,
+              allow_store_app_removal: args.allow_store_app_removal as
+                | boolean
+                | undefined,
+            })
+          );
         case "flutter_kill_stale":
           return this.json(
             await core.killStale({

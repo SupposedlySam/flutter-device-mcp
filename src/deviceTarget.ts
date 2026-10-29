@@ -1,7 +1,8 @@
 /**
  * Resolution of the sdb device target (host:port) used for install/launch.
  *
- * The target comes from a device pin (env var) when set AND currently online,
+ * The target comes from a device pin (env var or `.tizen-target`) when set AND
+ * currently online (a pin that is not online is refused, never replaced),
  * otherwise it is discovered by parsing `sdb devices` output. Devices connect
  * over TCP as `host:port`; when a bare host is supplied the default sdb port
  * 26101 is appended.
@@ -10,6 +11,10 @@
  * it. The neutral {@link DeviceResolution} shape lives in `types.ts` so other
  * platforms can return the same shape from their own discovery.
  */
+import {
+  RequestedDeviceUnavailableError,
+  unnamedChoiceRefused,
+} from "./deviceRequest.js";
 import { DeviceResolution } from "./types.js";
 
 export type { DeviceResolution } from "./types.js";
@@ -78,53 +83,53 @@ export function parseSdbDevices(output: string): SdbDevice[] {
 /**
  * Pick the device target to operate on.
  *
- * An explicit device pin (normalized to host:port) is authoritative only while
- * it appears as an ONLINE device in the `sdb devices` output. A stale pin —
- * e.g. the Smart Monitor moved DHCP address — would otherwise route every
- * deploy to a dead address, so a pin that is not online falls back to the first
- * online sdb device (with a warning). When nothing online exists the pin is
- * kept as a best effort.
+ * A pinned device (normalized to host:port) is used only while it appears as an
+ * ONLINE device in the `sdb devices` output; otherwise this throws
+ * {@link RequestedDeviceUnavailableError} naming it and the online devices. It
+ * is never replaced: a Smart Monitor that moved DHCP address is a different
+ * target until someone says so (flutter_setup with its new address).
  *
- * Without a pin, the first device in `device` state is used, then any listed
- * device (may be offline) so callers can surface a more specific error than
- * "no devices at all". Returns null when nothing is usable.
+ * Without a pin, the one device in `device` state is used (several are refused
+ * rather than taking the first), then any listed device (may be offline) so
+ * callers can surface a more specific error than "no devices at all". Returns
+ * null when nothing is usable.
  */
 export function resolveDeviceTarget(
   explicitDevice: string | undefined,
-  sdbDevicesOutput: string | undefined
+  sdbDevicesOutput: string | undefined,
+  origin = "the configured Tizen device (FLUTTER_DEVICE_TIZEN_DEVICE)"
 ): DeviceResolution | null {
   const devices = parseSdbDevices(sdbDevicesOutput ?? "");
   const online = devices.find((d) => d.state === "device");
 
   if (explicitDevice && explicitDevice.trim().length > 0) {
     const pinned = normalizeDeviceTarget(explicitDevice);
-    const pinnedOnline = devices.some(
-      (d) => d.state === "device" && normalizeDeviceTarget(d.serial) === pinned
-    );
-    if (pinnedOnline) return { target: pinned, source: "pin" };
-
-    if (online) {
-      const fallback = normalizeDeviceTarget(online.serial);
-      return {
-        target: fallback,
-        source: "discovered",
-        warning:
-          `FLUTTER_DEVICE_TIZEN_DEVICE is pinned to ${pinned}, but that target is not an ` +
-          `online sdb device (stale pin — the device may have moved DHCP ` +
-          `address). Using the first online sdb device ${fallback} instead.`,
-      };
-    }
-
-    return {
-      target: pinned,
-      source: "stale-pin",
-      warning:
-        `FLUTTER_DEVICE_TIZEN_DEVICE is pinned to ${pinned}, but that target is not an ` +
-        `online sdb device and no online device was found to fall back to. ` +
-        `Proceeding with the pin; expect failures if the device moved.`,
-    };
+    const listed = devices.find((d) => normalizeDeviceTarget(d.serial) === pinned);
+    if (listed?.state === "device") return { target: pinned, source: "pin" };
+    throw new RequestedDeviceUnavailableError({
+      platform: "Tizen",
+      requested: pinned,
+      origin,
+      state: listed?.state,
+      online: devices
+        .filter((d) => d.state === "device")
+        .map((d) => ({ id: normalizeDeviceTarget(d.serial), detail: d.name })),
+      hint:
+        "If the device moved DHCP address, run flutter_setup with its new address " +
+        "(it rewrites .tizen-target) or update FLUTTER_DEVICE_TIZEN_DEVICE.",
+    });
   }
 
+  const allOnline = devices.filter((d) => d.state === "device");
+  if (allOnline.length > 1) {
+    throw unnamedChoiceRefused({
+      platform: "Tizen",
+      online: allOnline.map((d) => ({ id: normalizeDeviceTarget(d.serial), detail: d.name })),
+      hint:
+        "Pass device_udid, run flutter_setup for the device you mean (it writes " +
+        ".tizen-target), or set FLUTTER_DEVICE_TIZEN_DEVICE.",
+    });
+  }
   if (online) {
     return { target: normalizeDeviceTarget(online.serial), source: "discovered" };
   }
@@ -136,4 +141,27 @@ export function resolveDeviceTarget(
         source: "discovered-offline",
       }
     : null;
+}
+
+/**
+ * The device a `.tizen-target` file names. `setup` writes the bare
+ * `host:port`; a `DEVICE_IP=<host>` line is read too, so a file written by
+ * another tool still pins its device.
+ */
+export function parseTizenTargetFile(content: string): string | undefined {
+  const keyed = content.match(/^\s*DEVICE_IP=(.+)$/m)?.[1]?.trim();
+  if (keyed) return keyed;
+  const first = content
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line.length > 0 && !line.startsWith("#"));
+  return first && !first.includes("=") ? first : undefined;
+}
+
+/**
+ * The package id a built `.tpk` carries, from the `<package>-<version>` file
+ * name flutter-tizen gives it.
+ */
+export function tpkPackageId(fileName: string): string | undefined {
+  return fileName.match(/^(.+?)-\d[^/]*\.tpk$/)?.[1];
 }
