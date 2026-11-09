@@ -84,6 +84,27 @@ const TVOS_APP_ID = "com.example.app";
 const ATV_OS_VERSION = "27.0";
 const ATV_OS_BUILD = "24J361";
 
+/** flutter-tvos reachable through the inherited PATH, so no command gains a prefix. */
+const FLUTTER_TVOS_ON_PATH = {
+  found: true as const,
+  source: "PATH" as const,
+  binDir: "/usr/local/bin",
+  prependDir: undefined,
+};
+const FLUTTER_TVOS_MISSING = {
+  found: false as const,
+  checked: ["/Users/dev/flutter-tvos/bin", "each directory on PATH"],
+};
+
+/** An app dir holding a tvOS simulator Runner.app, as `flutter-tvos build tvos --simulator` leaves it. */
+function appDirWithSimulatorBuild(): string {
+  const appDir = fs.mkdtempSync(path.join(os.tmpdir(), "tvos-sim-build-"));
+  fs.mkdirSync(path.join(appDir, "build", "tvos", "Debug-appletvsimulator", "Runner.app"), {
+    recursive: true,
+  });
+  return appDir;
+}
+
 type TvosConfigOverrides = Partial<ConstructorParameters<typeof TvosAdapter>[0]>;
 
 /**
@@ -95,7 +116,7 @@ function tvos(device?: string, overrides: TvosConfigOverrides = {}) {
     appDir: TVOS_APP_DIR,
     appId: TVOS_APP_ID,
     device,
-    flutterTvosBinDir: "/does/not/exist/flutter-tvos/bin",
+    locateFlutterTvos: () => FLUTTER_TVOS_ON_PATH,
     resolveAtvremote: () => undefined,
     resolvePymobiledevice3: () => ({}),
     ...overrides,
@@ -275,6 +296,73 @@ describe("TvosAdapter.build", () => {
     expect(cmd).not.toContain("--release");
   });
 
+  it("builds the simulator slice when device_udid names a booted tvOS simulator", async () => {
+    mockDiscovery("simulator");
+    const build = await tvosNoPathPrefix().build({ mode: "debug", deviceUdid: SIM_ID });
+    expect(lastRunShellContaining("flutter-tvos build tvos")).toContain(
+      "flutter-tvos build tvos --simulator --debug"
+    );
+    expect(build.result.combined).toContain(`Building for a tvOS simulator: ${SIM_ID}`);
+  });
+
+  it("builds the simulator slice for target simulator even with a paired Apple TV attached", async () => {
+    mockAppleTvAndSimulator(true);
+    await tvosNoPathPrefix().build({ target: "simulator" });
+    expect(lastRunShellContaining("flutter-tvos build tvos")).toContain("--simulator");
+  });
+
+  it("says a simulator build is debug when another mode was asked for", async () => {
+    mockDiscovery("simulator");
+    const build = await tvosNoPathPrefix().build({ mode: "profile", deviceUdid: SIM_ID });
+    const cmd = lastRunShellContaining("flutter-tvos build tvos");
+    expect(cmd).toContain("--simulator --debug");
+    expect(cmd).not.toContain("--profile");
+    expect(build.result.combined).toContain(
+      "only runs debug builds, so this is a debug build, not profile"
+    );
+  });
+
+  it("builds nothing in debug when device_udid names the physical Apple TV", async () => {
+    mockAppleTvAndSimulator(true);
+    const build = await tvosNoPathPrefix().build({ deviceUdid: ATV_ID });
+    expect(build.result.combined).toContain(`Building for a physical Apple TV: ${ATV_ID}`);
+    expect(build.result.combined).toContain("Nothing built");
+    expect(lastRunShellContaining("flutter-tvos build tvos")).toBeUndefined();
+  });
+
+  it("refuses a build for a named target that is not available rather than guessing its slice", async () => {
+    mockDiscovery("simulator");
+    await expect(tvosNoPathPrefix().build({ deviceUdid: "NOT-A-TARGET" })).rejects.toThrow(
+      /NOT-A-TARGET/
+    );
+    expect(lastRunShellContaining("flutter-tvos build tvos")).toBeUndefined();
+  });
+
+  it("refuses to spawn the build when flutter-tvos cannot be found, naming where it looked", async () => {
+    const build = await tvos(undefined, { locateFlutterTvos: () => FLUTTER_TVOS_MISSING }).build({
+      target: "simulator",
+    });
+    expect(build.result.success).toBe(false);
+    expect(build.result.combined).toContain("flutter-tvos not found");
+    expect(build.result.combined).toContain("/Users/dev/flutter-tvos/bin");
+    expect(build.result.combined).toContain("FLUTTER_TVOS_HOME");
+    expect(lastRunShellContaining("flutter-tvos build tvos")).toBeUndefined();
+  });
+
+  it("puts the located flutter-tvos bin dir on the build's PATH", async () => {
+    await tvos(undefined, {
+      locateFlutterTvos: () => ({
+        found: true,
+        source: "FLUTTER_TVOS_HOME",
+        binDir: process.cwd(),
+        prependDir: process.cwd(),
+      }),
+    }).build({ target: "simulator" });
+    expect(lastRunShellContaining("flutter-tvos build tvos")).toBe(
+      `export PATH="${process.cwd()}:$PATH"; flutter-tvos build tvos --simulator --debug`
+    );
+  });
+
   it("short-circuits skip_flutter to a no-op success without invoking the CLI", async () => {
     const build = await tvosNoPathPrefix().build({ skip_flutter: true });
     expect(build.result.success).toBe(true);
@@ -438,7 +526,7 @@ describe("TvosAdapter.install / uninstall pick the right toolchain", () => {
   });
 
   it("simulator install uses simctl with the Debug-appletvsimulator Runner.app", async () => {
-    const adapter = tvos();
+    const adapter = tvos(undefined, { appDir: appDirWithSimulatorBuild() });
     mockDiscovery("simulator");
     await adapter.discoverDevice();
     await adapter.install(SIM_ID, {});
@@ -454,7 +542,7 @@ describe("TvosAdapter.install / uninstall pick the right toolchain", () => {
     // `simctl install` → SimError 405 "Unable to lookup in current state:
     // Shutdown". install must boot the sim FIRST, and the boot must precede the
     // install in the issued command order.
-    const adapter = tvos();
+    const adapter = tvos(undefined, { appDir: appDirWithSimulatorBuild() });
     mockDiscovery("simulator");
     await adapter.discoverDevice();
     runShell.mockClear();
@@ -468,6 +556,19 @@ describe("TvosAdapter.install / uninstall pick the right toolchain", () => {
     // Boot is idempotent-safe: an already-booted sim exits non-zero, tolerated.
     expect(cmds[bootIdx]).toContain("|| true");
     expect(cmds[bootIdx]).toContain(SIM_ID);
+  });
+
+  it("refuses a simulator install when no simulator build exists, naming how to make one", async () => {
+    const adapter = tvos(undefined, { appDir: fs.mkdtempSync(path.join(os.tmpdir(), "tvos-empty-")) });
+    mockDiscovery("simulator");
+    await adapter.discoverDevice();
+    runShell.mockClear();
+    const result = await adapter.install(SIM_ID, {});
+    expect(result.success).toBe(false);
+    expect(result.combined).toContain("No tvOS simulator build at");
+    expect(result.combined).toContain(SIM_ID);
+    expect(result.combined).toContain('target "simulator"');
+    expect(runShell.mock.calls.some((c) => String(c[0]).includes("simctl install"))).toBe(false);
   });
 
   it("does NOT boot anything on a physical-device install (devicectl only)", async () => {
@@ -531,6 +632,15 @@ describe("TvosAdapter.launchAndCaptureUri — physical device (flutter-tvos run 
       reloadNeedsOwningRun: true,
     });
     expect((outcome as { launchModeCaveat?: string }).launchModeCaveat).toBeUndefined();
+  });
+
+  it("refuses the launch without spawning a pty when flutter-tvos cannot be found", async () => {
+    const adapter = await deviceAdapter({ locateFlutterTvos: () => FLUTTER_TVOS_MISSING });
+    const outcome = await adapter.launchAndCaptureUri(ATV_ID, 1000);
+    expect(neutralLaunchAndCaptureUri).not.toHaveBeenCalled();
+    expect(outcome).toMatchObject({ failed: true });
+    expect((outcome as { reason: string }).reason).toContain("flutter-tvos not found");
+    expect((outcome as { reason: string }).reason).toContain("/Users/dev/flutter-tvos/bin");
   });
 
   it("holds a debug run behind the pty control channel so hot reload reaches it", async () => {
@@ -1232,12 +1342,15 @@ describe("withFlutterTvosPath", () => {
 
 describe("TvosAdapter flutter-tvos invocations prepend flutter-tvos to PATH", () => {
   it("info prepends the bin dir to PATH when it exists", async () => {
-    // A bin dir the fs check will report as present (the repo root always
-    // exists) exercises the prefix branch without depending on ~/flutter-tvos.
     const adapter = new TvosAdapter({
       appDir: TVOS_APP_DIR,
       appId: TVOS_APP_ID,
-      flutterTvosBinDir: process.cwd(),
+      locateFlutterTvos: () => ({
+        found: true,
+        source: "FLUTTER_DEVICE_TVOS_FLUTTER_BIN",
+        binDir: process.cwd(),
+        prependDir: process.cwd(),
+      }),
     });
     await adapter.info();
     const infoCall = runShell.mock.calls

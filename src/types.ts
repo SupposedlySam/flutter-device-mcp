@@ -101,6 +101,14 @@ export interface BuildOptions {
   skip_flutter?: boolean;
   install?: boolean;
   run?: boolean;
+  /**
+   * The class of target to build for (iOS reads it as `profile: "simulator"`
+   * via the core; tvOS reads it directly). Undefined lets tvOS resolve it from
+   * `deviceUdid`, the env pin or discovery.
+   */
+  target?: "simulator" | "device";
+  /** The per-call `device_udid`, for an adapter whose build depends on the target. */
+  deviceUdid?: string;
 }
 
 /** The outcome of a build: the raw command result plus parsed signals. */

@@ -145,6 +145,7 @@ class FlutterDeviceServer {
               install: args.install as boolean | undefined,
               run: args.run as boolean | undefined,
               target: args.target as "simulator" | "device" | undefined,
+              device_udid: args.device_udid as string | undefined,
             })
           );
         case "flutter_deploy":

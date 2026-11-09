@@ -95,10 +95,6 @@ describe("buildToolList (ListTools advertisement)", () => {
     // missing from this list is a tool a caller cannot aim on a multi-target
     // host, which is exactly the gap that made a two-device Android host
     // undrivable without an env pin and a host reload.
-    //
-    // flutter_build is deliberately NOT here: this server's build never
-    // resolves a device (it shells the platform build with no target), so the
-    // pin would advertise a knob that does nothing.
     const deviceAddressing = [
       "flutter_deploy",
       "flutter_uninstall",
@@ -111,6 +107,8 @@ describe("buildToolList (ListTools advertisement)", () => {
       "flutter_key",
       "flutter_pointer",
       "flutter_geometry",
+      // A tvOS build picks the simulator or device slice from the device it names.
+      "flutter_build",
       // kill_stale addresses one device too: its teardown is SCOPED to that
       // device's launch drivers, so a session on another device survives it.
       "flutter_kill_stale",
@@ -121,13 +119,12 @@ describe("buildToolList (ListTools advertisement)", () => {
     });
 
     it("is not advertised on the tools that address no single device", () => {
-      // info/setup enumerate ALL devices, build resolves none, the hot tools
+      // info/setup enumerate ALL devices, the hot tools
       // address a recorded launch by its own `device` field, and set_input_mode
       // only records a mode.
       for (const name of [
         "flutter_info",
         "flutter_setup",
-        "flutter_build",
         "flutter_hot_reload",
         "flutter_hot_restart",
         "flutter_set_input_mode",

@@ -196,7 +196,7 @@ All variables use the `FLUTTER_DEVICE_` prefix (`<PLATFORM>` is one of
 | `FLUTTER_DEVICE_ANDROID_AAPT2` | Path to `aapt2`, used to read the package id from the apk deploy installs; else the newest Android SDK build-tools |
 | `FLUTTER_DEVICE_IOS_TEAM` | 10-character Apple team id that signs the iOS input runner; else the Runner project's `DEVELOPMENT_TEAM` |
 | `FLUTTER_DEVICE_CACHE_DIR` | Cache for built helpers, currently the iOS input runner (`ios-ui-runner/<xcodebuild>-<team>-<hash>`). Defaults to `~/.cache/flutter-device-mcp` |
-| `FLUTTER_DEVICE_TVOS_FLUTTER_BIN` | Directory holding the `flutter-tvos` bin (prepended to PATH) |
+| `FLUTTER_DEVICE_TVOS_FLUTTER_BIN` | Directory holding the `flutter-tvos` binary. Searched first, then `FLUTTER_TVOS_HOME/bin`, then `~/flutter-tvos/bin`, then PATH; the directory found is prepended to the child's PATH |
 | `FLUTTER_DEVICE_TVOS_LAUNCH_MODE` | `debug` \| `profile` \| `release` (default tvOS launch mode; see [Physical Apple TV](#physical-apple-tv)) |
 | `FLUTTER_DEVICE_TVOS_ATV_ID` | pyatv identifier `atvremote` addresses the Apple TV by; else the device's name |
 | `FLUTTER_DEVICE_ATVREMOTE` | Path to `atvremote`; else PATH, then `~/.local/bin` |
@@ -644,6 +644,21 @@ reload and restart reach it.
   `flutter_screenshot`). Release has no VM service, so the response carries
   `noVmServiceReason`. The **simulator** runs debug only, and `launchModeCaveat`
   says so when another mode was asked for.
+- **Finding flutter-tvos.** It is a git checkout, so nothing but a shell profile
+  puts it on PATH, and a server started from a GUI app has none. The adapter looks
+  in `FLUTTER_DEVICE_TVOS_FLUTTER_BIN`, then `FLUTTER_TVOS_HOME/bin`, then
+  `~/flutter-tvos/bin`, then PATH, and puts the directory it finds on the child's
+  PATH. When none has it, a build or launch is refused before anything is spawned,
+  naming every place it looked.
+- **`flutter_build` follows the target.** `target: "simulator"`, a simulator named
+  by `device_udid`, or a booted simulator with no physical box attached builds the
+  simulator slice (`flutter-tvos build tvos --simulator --debug`). A physical
+  Apple TV builds nothing in debug, because `flutter-tvos run` compiles its own
+  build. A `device_udid` that names nothing available is refused rather than
+  guessed.
+- **A simulator deploy installs an existing build.** When
+  `build/tvos/Debug-appletvsimulator/Runner.app` is missing, the install is refused
+  and says to run `flutter_build` for the simulator first.
 - **Mode precedence:** `mode` > the legacy `debug` boolean >
   `FLUTTER_DEVICE_TVOS_LAUNCH_MODE` (or `tvosLaunchMode`) > debug.
 - **A sleeping box.** Before a launch the adapter runs `atvremote turn_on` when

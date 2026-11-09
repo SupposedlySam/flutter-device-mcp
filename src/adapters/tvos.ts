@@ -133,6 +133,11 @@ import {
 } from "../pymobiledevice3Locate.js";
 import { dartDefineArgs } from "../dartDefine.js";
 import {
+  FlutterTvosLocation,
+  flutterTvosMissingMessage,
+  locateFlutterTvos,
+} from "../flutterTvosLocate.js";
+import {
   BuildMode,
   BuildOptions,
   BuildResult,
@@ -191,8 +196,15 @@ export interface TvosAdapterConfig {
   device?: string;
   /** Bundle id, for uninstall/lifecycle. */
   appId: string;
-  /** Dir holding the flutter-tvos bin, prepended to PATH (default ~/flutter-tvos/bin). */
+  /**
+   * `FLUTTER_DEVICE_TVOS_FLUTTER_BIN`: the directory holding `flutter-tvos`,
+   * searched before FLUTTER_TVOS_HOME, `~/flutter-tvos/bin` and PATH (see
+   * {@link locateFlutterTvos}). Discovery does not depend on it; it uses
+   * devicectl, which is always on PATH.
+   */
   flutterTvosBinDir?: string;
+  /** Injected for tests; defaults to {@link locateFlutterTvos} over the server's env. */
+  locateFlutterTvos?: () => FlutterTvosLocation;
   /** Shell commands run in order (cwd=appDir) before build; non-zero exit aborts. */
   preBuild?: string[];
   /** `FLUTTER_DEVICE_TVOS_LAUNCH_MODE`: the mode used when a call names none. */
@@ -256,20 +268,18 @@ export class TvosAdapter implements PlatformAdapter {
    */
   private lastKind: TvosDeviceKind = "device";
 
-  /**
-   * The effective flutter-tvos bin dir: the configured value, else the
-   * documented default (`~/flutter-tvos/bin`). Prepended to PATH for
-   * flutter-tvos invocations so the fork resolves even when it is not on the
-   * (often non-login) PATH the server inherited.
-   */
-  private readonly binDir: string;
-
   /** The full last resolution: its name addresses atvremote, its hardware UDID pymobiledevice3. */
   private lastResolution: TvosDeviceResolution | undefined;
 
-  constructor(private readonly config: TvosAdapterConfig) {
-    this.binDir =
-      config.flutterTvosBinDir ?? defaultFlutterTvosBinDir(os.homedir());
+  constructor(private readonly config: TvosAdapterConfig) {}
+
+  /** Searched per call, so a toolchain installed after the server started is found. */
+  private flutterTvos(): FlutterTvosLocation {
+    if (this.config.locateFlutterTvos) return this.config.locateFlutterTvos();
+    return locateFlutterTvos({
+      binDirOverride: this.config.flutterTvosBinDir,
+      home: os.homedir(),
+    });
   }
 
   get appId(): string {
@@ -310,12 +320,13 @@ export class TvosAdapter implements PlatformAdapter {
   private runFlutterTvos(
     subcommand: string,
     args: string[] = [],
-    options: RunOptions = {}
+    options: RunOptions = {},
+    location: FlutterTvosLocation = this.flutterTvos()
   ): Promise<CommandResult> {
     const base = ["flutter-tvos", subcommand, ...args].join(" ");
     const command = withFlutterTvosPath(
       base,
-      this.binDir,
+      location.found ? location.prependDir : undefined,
       (dir) => fs.existsSync(dir)
     );
     return runShell(command, { cwd: this.config.appDir, ...options });
@@ -378,9 +389,13 @@ export class TvosAdapter implements PlatformAdapter {
    * (in order, cwd=appDir); the first non-zero exit aborts the build and is
    * returned as the failing result.
    *
-   * A `simulator` profile builds for the tvOS simulator, always debug (JIT).
-   * Otherwise the build is for a PHYSICAL Apple TV in the resolved mode (debug by
-   * default). A device DEBUG build is not done here: a debug app only runs with
+   * The class of target comes from `target`, else the legacy `profile:
+   * "simulator"`, else the target `deviceUdid` (or the env pin, or discovery)
+   * resolves to — so a udid naming a simulator builds the simulator slice. With
+   * nothing named and nothing attached it is a physical Apple TV.
+   *
+   * A simulator build is always debug (JIT). A physical Apple TV builds in the
+   * resolved mode (debug by default). A device DEBUG build is not done here: a debug app only runs with
    * lldb attached at launch, so `flutter_deploy` builds, installs and launches it
    * in one `flutter-tvos run --debug`. Building it separately would cost a full
    * build that the deploy then repeats. `skip_flutter` short-circuits to a no-op
@@ -404,7 +419,8 @@ export class TvosAdapter implements PlatformAdapter {
       };
     }
 
-    const forSimulator = opts.profile === "simulator";
+    const { kind, note } = await this.buildTargetKind(opts);
+    const forSimulator = kind === "simulator";
     const mode = this.requestedMode(opts.mode, opts.debug);
     // flutter-tvos ships a dedicated `build tvos` subcommand (verified on-device)
     // with a `--[no-]simulator` flag — NOT the `build ios` target.
@@ -412,10 +428,11 @@ export class TvosAdapter implements PlatformAdapter {
     if (!forSimulator) {
       if (mode === "debug") {
         return succeeded(
-          "Nothing built: a physical Apple TV debug build is produced by flutter_deploy, " +
+          `${note}Nothing built: a physical Apple TV debug build is produced by flutter_deploy, ` +
             "which runs `flutter-tvos run --debug` (build, install, launch, lldb attach) in one " +
             "step, and the app cannot start in debug without the debugger that run attaches. " +
-            "Call flutter_deploy (mode debug, the default) directly."
+            "Call flutter_deploy (mode debug, the default) directly. To build for a tvOS " +
+            "simulator instead, pass `target: \"simulator\"` or the simulator's `device_udid`."
         );
       }
       // A physical build must be CODE-SIGNED (installed via devicectl), which
@@ -425,15 +442,28 @@ export class TvosAdapter implements PlatformAdapter {
     }
     for (const token of dartDefineArgs(opts.dartDefine)) flags.push(quote(token));
 
-    const result = await this.runFlutterTvos("build", flags, {
-      timeoutMs: 2400000, // 40 min — flutter-tvos engine + Rust-in-Xcode can run long.
-    });
+    const toolchain = this.flutterTvos();
+    if (!toolchain.found) {
+      return toolchainMissingBuild(toolchain.checked);
+    }
+
+    const result = await this.runFlutterTvos(
+      "build",
+      flags,
+      { timeoutMs: 2400000 }, // 40 min — flutter-tvos engine + Rust-in-Xcode can run long.
+      toolchain
+    );
 
     const combined = result.combined;
     // flutter prints the built .app path on success ("Built ... .app").
     const appMatch = combined.match(/Built\s+(\S+\.app)/);
+    const simulatorModeNote =
+      forSimulator && mode !== "debug"
+        ? `A tvOS simulator only runs debug builds, so this is a debug build, not ${mode}.\n`
+        : "";
+    const prefix = note + simulatorModeNote;
     return {
-      result,
+      result: prefix ? { ...result, combined: prefix + combined } : result,
       artifactPath: appMatch ? appMatch[1] : undefined,
       enospc: /No space left on device/i.test(combined),
       installFailed:
@@ -442,6 +472,37 @@ export class TvosAdapter implements PlatformAdapter {
         /Install failed/i.test(combined),
       launchedDisplay: false,
     };
+  }
+
+  /**
+   * Which class of Apple TV a build is for, and a line saying how that was
+   * decided when it came from resolving a device.
+   *
+   * A named target that is not available is refused by discovery, never guessed
+   * at: building the wrong slice for it costs a full build. Only an unnamed
+   * build with nothing attached falls back to a physical Apple TV, which builds
+   * nothing in debug and needs no device in profile or release.
+   */
+  private async buildTargetKind(
+    opts: BuildOptions
+  ): Promise<{ kind: TvosDeviceKind; note: string }> {
+    if (opts.target) return { kind: opts.target, note: "" };
+    if (opts.profile === "simulator") return { kind: "simulator", note: "" };
+    const named = Boolean(opts.deviceUdid || this.config.device);
+    try {
+      const resolution = await this.discoverDevice({ udid: opts.deviceUdid, readOnly: true });
+      const what = resolution.kind === "simulator" ? "a tvOS simulator" : "a physical Apple TV";
+      return {
+        kind: resolution.kind,
+        note: `Building for ${what}: ${resolution.target} (${resolution.source}).\n`,
+      };
+    } catch (error) {
+      if (named) throw error;
+      return {
+        kind: "device",
+        note: "No Apple TV or tvOS simulator is available, so this is a physical Apple TV build.\n",
+      };
+    }
   }
 
   /**
@@ -657,6 +718,13 @@ export class TvosAdapter implements PlatformAdapter {
         timedOut: false,
       };
     }
+    if (this.lastKind === "simulator" && !fs.existsSync(appPath)) {
+      return failedResult(
+        `No tvOS simulator build at ${appPath}. Run flutter_build (platform tvos) with this ` +
+          `simulator's device_udid (${device}) or target "simulator" first; deploy installs the ` +
+          "build that is already there."
+      );
+    }
     if (this.lastKind === "simulator") {
       // A `simctl install` against a SHUTDOWN simulator fails with SimError 405
       // ("Unable to lookup in current state: Shutdown"). Boot it first (idempotent
@@ -786,13 +854,23 @@ export class TvosAdapter implements PlatformAdapter {
     // A cold profile/release run has no reload or restart to drive, so only
     // debug gets a channel; one elsewhere would advertise an inner loop that
     // cannot exist.
+    const toolchain = this.flutterTvos();
+    if (!toolchain.found) {
+      return {
+        failed: true,
+        reason: flutterTvosMissingMessage(toolchain.checked),
+        logPath: "",
+        pid: undefined,
+        logTail: "",
+      };
+    }
     const controlChannel = mode === "debug" ? allocateControlChannel() : undefined;
     const command = buildTvosDeviceRunCommand({
       appDir: this.config.appDir,
       device,
       mode,
       extraArgs: dartDefineArgs(dartDefine),
-      flutterTvosBinDir: this.binDir,
+      flutterTvosBinDir: toolchain.prependDir,
       dirExists: (dir) => fs.existsSync(dir),
       controlChannel,
     });
@@ -1422,6 +1500,15 @@ function okResult(message: string): CommandResult {
   };
 }
 
+function toolchainMissingBuild(checked: string[]): BuildResult {
+  return {
+    result: failedResult(flutterTvosMissingMessage(checked)),
+    enospc: false,
+    installFailed: false,
+    launchedDisplay: false,
+  };
+}
+
 function succeeded(message: string): BuildResult {
   return {
     result: okResult(message),
@@ -1538,7 +1625,4 @@ export function tvosSettleOptionsFor(mode: TvosLaunchMode): SettleOptions | unde
   };
 }
 
-/** The documented default flutter-tvos bin dir (`~/flutter-tvos/bin`). */
-export function defaultFlutterTvosBinDir(homeDir: string): string {
-  return path.join(homeDir, "flutter-tvos", "bin");
-}
+export { defaultFlutterTvosBinDir } from "../flutterTvosLocate.js";

@@ -248,6 +248,7 @@ export class CommandCore {
       install?: boolean;
       run?: boolean;
       target?: "simulator" | "device";
+      device_udid?: string;
     }
   ): Promise<CommandOutput> {
     const adapter = this.adapterFor(args);
@@ -265,6 +266,8 @@ export class CommandCore {
         skip_flutter: args.skip_flutter,
         install: args.install,
         run: args.run,
+        target: args.target,
+        deviceUdid: args.device_udid,
       });
       return {
         platform: adapter.platform,
