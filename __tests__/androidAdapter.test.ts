@@ -102,6 +102,7 @@ const {
   AndroidAdapter,
   buildAndroidPtyLaunchCommand,
   ANDROID_FAILURE_SIGNATURES,
+  ANDROID_STORAGE_FAILURE_SIGNATURE,
   ANDROID_KEYCODE_HOME,
   androidBuildPackageId,
   DEVICE_IDENTITY_PROBE,
@@ -402,6 +403,71 @@ describe("AndroidAdapter.launchAndCaptureUri (deploy = flutter run)", () => {
     expect(command).not.toContain("--debug");
   });
 
+  describe("an install flutter run recovered from", () => {
+    let logDir: string;
+    beforeEach(() => {
+      logDir = fs.mkdtempSync(path.join(os.tmpdir(), "android-launch-log-"));
+    });
+    afterEach(() => fs.rmSync(logDir, { recursive: true, force: true }));
+
+    function launchLog(lines: string[]) {
+      const logPath = path.join(logDir, "launch.log");
+      fs.writeFileSync(logPath, lines.join("\n") + "\n");
+      return logPath;
+    }
+
+    it("is a success that carries a note saying the app's data was cleared", async () => {
+      const logPath = launchLog(RECOVERED_INSTALL_LOG);
+      neutralLaunchAndCaptureUri.mockResolvedValue({
+        failed: false,
+        vmServiceUri: "ws://127.0.0.1:56821/AbCdEf12345=/ws",
+        logPath,
+      });
+      const outcome = (await android().launchAndCaptureUri(SERIAL, 1000)) as {
+        failed: boolean;
+        recoveredInstallFailure?: string;
+      };
+      expect(outcome.failed).toBe(false);
+      expect(outcome.recoveredInstallFailure).toBe(
+        "The first install failed (INSTALL_FAILED_VERSION_DOWNGRADE: Downgrade detected: " +
+          "Update version code 1 is older than current 42); flutter run uninstalled " +
+          "the existing copy and installed again, so the app's data on the device was cleared."
+      );
+    });
+
+    it("says nothing about a failure when the first install worked", async () => {
+      const logPath = launchLog([
+        "Installing build/app/outputs/flutter-apk/app-debug.apk...           6.7s",
+        "A Dart VM Service on Example Phone is available at: http://127.0.0.1:56821/AbCdEf12345=/",
+      ]);
+      neutralLaunchAndCaptureUri.mockResolvedValue({ failed: false, logPath });
+      const outcome = (await android().launchAndCaptureUri(SERIAL, 1000)) as unknown as Record<string, unknown>;
+      expect(outcome.failed).toBe(false);
+      expect(outcome).not.toHaveProperty("recoveredInstallFailure");
+    });
+
+    it("does not claim the data was cleared when flutter never uninstalled", async () => {
+      const logPath = launchLog([
+        "adb: failed to install app-debug.apk: Failure",
+        "[INSTALL_FAILED_INSUFFICIENT_STORAGE]",
+        "A Dart VM Service on Example Phone is available at: http://127.0.0.1:56821/x=/",
+      ]);
+      neutralLaunchAndCaptureUri.mockResolvedValue({ failed: false, logPath });
+      const outcome = (await android().launchAndCaptureUri(SERIAL, 1000)) as {
+        recoveredInstallFailure?: string;
+      };
+      expect(outcome.recoveredInstallFailure).toBe(
+        "The first install failed (INSTALL_FAILED_INSUFFICIENT_STORAGE); flutter run installed again and the launch went ahead."
+      );
+    });
+
+    it("passes a launch failure through untouched", async () => {
+      const failure = { failed: true, reason: "Error: Failed to install APK again." };
+      neutralLaunchAndCaptureUri.mockResolvedValue(failure);
+      expect(await android().launchAndCaptureUri(SERIAL, 1000)).toBe(failure);
+    });
+  });
+
   it("uses the env-pinned mode even with no preceding install (seeded in the constructor)", async () => {
     const adapter = new AndroidAdapter(
       {
@@ -665,12 +731,11 @@ describe("AndroidAdapter ENOSPC recovery (install happens at launch)", () => {
     );
   });
 
-  it("the storage signature stays terminal for the launch poll (fails fast so recovery fires)", () => {
-    expect(
-      ANDROID_FAILURE_SIGNATURES.some((re) =>
-        re.test("Failure [INSTALL_FAILED_INSUFFICIENT_STORAGE]")
-      )
-    ).toBe(true);
+  it("a storage failure is not terminal for the launch poll until flutter gives up on the install", () => {
+    const firstAttempt = "Failure [INSTALL_FAILED_INSUFFICIENT_STORAGE]";
+    expect(ANDROID_FAILURE_SIGNATURES.some((re) => re.test(firstAttempt))).toBe(false);
+    expect(ANDROID_FAILURE_SIGNATURES.some((re) => re.test("Error: Failed to install APK again."))).toBe(true);
+    expect(ANDROID_STORAGE_FAILURE_SIGNATURE.test(firstAttempt)).toBe(true);
   });
 
   it("classifies storage wordings through the install-failure seam too", () => {
@@ -1681,18 +1746,38 @@ describe("buildAndroidPtyLaunchCommand", () => {
   });
 });
 
+/** The install section of a `flutter run` that recovered, in order. */
+const RECOVERED_INSTALL_LOG = [
+  "Installing build/app/outputs/flutter-apk/app-debug.apk...           6.7s",
+  "Error: ADB exited with exit code 1",
+  "Performing Streamed Install",
+  "",
+  "adb: failed to install /repo/example_app/build/app/outputs/flutter-apk/app-debug.apk: Failure",
+  "[INSTALL_FAILED_VERSION_DOWNGRADE: Downgrade detected: Update version code 1 is older than current 42]",
+  "Uninstalling old version...",
+  "Installing build/app/outputs/flutter-apk/app-debug.apk...           7.5s",
+  "D/FlutterJNI(30877): Beginning load of flutter...",
+  "Syncing files to device Example Phone...                            ",
+  "A Dart VM Service on Example Phone is available at: http://127.0.0.1:56821/AbCdEf12345=/",
+];
+
 describe("ANDROID_FAILURE_SIGNATURES", () => {
-  it("matches terminal Android launch/install failures", () => {
-    expect(
-      ANDROID_FAILURE_SIGNATURES.some((re) =>
-        re.test("adb: failed to install app.apk")
-      )
-    ).toBe(true);
-    expect(
-      ANDROID_FAILURE_SIGNATURES.some((re) =>
-        re.test("Gradle task assembleProfile failed with exit code 1")
-      )
-    ).toBe(true);
+  it("matches no line of an install that flutter run recovered from", () => {
+    const matching = RECOVERED_INSTALL_LOG.filter((line) =>
+      ANDROID_FAILURE_SIGNATURES.some((re) => re.test(line))
+    );
+    expect(matching).toEqual([]);
+  });
+
+  it.each([
+    "Error: Failed to install APK again.",
+    "Error: Uninstalling old version failed.",
+    "Error launching application on Example Phone.",
+    "Error running application on Example Phone.",
+    "Gradle task assembleProfile failed with exit code 1",
+    "Could not build the application for the simulator.",
+  ])("matches the terminal line %j", (line) => {
+    expect(ANDROID_FAILURE_SIGNATURES.some((re) => re.test(line))).toBe(true);
   });
 
   it("does not match a benign progress line", () => {

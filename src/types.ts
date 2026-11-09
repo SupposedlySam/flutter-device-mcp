@@ -210,6 +210,12 @@ export interface LaunchResult {
    * has no kernel compiler, so a VM-service reload cannot work there.
    */
   reloadNeedsOwningRun?: boolean;
+  /**
+   * A failure the runner hit on the way up and recovered from, such as an
+   * install that failed and succeeded on the second attempt. The launch still
+   * succeeded; this says what it cost.
+   */
+  recoveredInstallFailure?: string;
 }
 
 export interface LaunchFailure {

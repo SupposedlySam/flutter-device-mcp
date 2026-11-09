@@ -591,6 +591,17 @@ adb did not install (a store, a tester distribution, a sideloaded apk) is refuse
 unless `allow_store_app` (lifecycle) or `allow_store_app_removal` (deploy and
 uninstall) is passed. `flutter_background` needs no package: it sends HOME.
 
+## Android installs flutter run recovered from
+
+When an install fails and a copy is already on the device (a versionCode
+downgrade, a signature mismatch), `flutter run` uninstalls it and installs again.
+The deploy does not stop at the first `adb: failed to install` line; it fails only
+on flutter's own verdicts (`Error: Failed to install APK again`,
+`Error: Uninstalling old version failed`, `Error launching application on …`).
+When the retry worked, the deploy succeeds and the response carries
+`recoveredInstallFailure`, naming the install error and saying that the uninstall
+took the app's data with it.
+
 ## Android screenshots on a multi-display device
 
 A foldable has one display device per panel, and `screencap` with no `-d`

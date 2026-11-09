@@ -143,19 +143,50 @@ export const ANDROID_KEYCODE_HOME = 3;
  * early. These mirror the intent of the iOS/Tizen signatures but match
  * `flutter run`'s Android output. Transient "waiting"/"installing" lines must
  * NOT match — only terminal failures.
+ *
+ * A failed `adb install` is not terminal: when a copy is already on the device
+ * (a versionCode downgrade, a signature mismatch, a full disk), flutter run
+ * uninstalls it and installs again, and the run carries on to a VM service. So
+ * the install is judged by flutter's own verdict lines, which it prints only
+ * once it has given up.
  */
 export const ANDROID_FAILURE_SIGNATURES: RegExp[] = [
   /No devices found/i,
   /No supported devices connected/i,
   /Error: No connected devices/i,
   /Gradle task .* failed/i,
-  /Installation failed/i,
-  /adb: failed to install/i,
-  /INSTALL_FAILED_INSUFFICIENT_STORAGE/i,
-  /Could not (?:install|build)/i,
+  /Error: Failed to install APK again/i,
+  /Error: Uninstalling old version failed/i,
+  /Error (?:launching|running) application on/i,
+  /Could not build/i,
   /device unauthorized/i,
   /flutter: command not found/i,
 ];
+
+const ADB_INSTALL_FAILURE = /adb: failed to install/i;
+const INSTALL_FAILED_CODE = /INSTALL_FAILED_[A-Z_]+(?::[^\]\n]*)?/;
+
+/**
+ * Describe an install failure that flutter run recovered from, or undefined when
+ * the log shows none. Called only for a launch that reached its VM service, so
+ * a failure in its log was followed by a successful reinstall. flutter's
+ * recovery uninstalls the existing copy first, which takes the app's data with
+ * it, and the caller needs to know that.
+ */
+export function recoveredInstallFailureNote(log: string): string | undefined {
+  const failure = ADB_INSTALL_FAILURE.exec(log);
+  if (!failure) return undefined;
+  const afterFailure = log.slice(failure.index);
+  const code = INSTALL_FAILED_CODE.exec(afterFailure)?.[0];
+  const uninstalled = /Uninstalling old version/i.test(afterFailure);
+  return (
+    `The first install failed${code ? ` (${code.trim()})` : ""}` +
+    (uninstalled
+      ? "; flutter run uninstalled the existing copy and installed again, so the " +
+        "app's data on the device was cleared."
+      : "; flutter run installed again and the launch went ahead.")
+  );
+}
 
 /**
  * Storage-exhaustion signature across the places Android surfaces it: the
@@ -996,9 +1027,11 @@ export class AndroidAdapter implements PlatformAdapter {
       controlChannel?.fifoPath
     );
     if (isLaunchFailure(outcome)) return outcome;
+    const launchLog = readLaunchLog(outcome.logPath);
+    const recoveredInstallFailure = recoveredInstallFailureNote(launchLog);
     // Read from the apk flutter run installed, not from the tree: the tree says
     // what a build would produce, the apk says what is on the device.
-    const installed = await this.builtApkPackageId(readLaunchLog(outcome.logPath));
+    const installed = await this.builtApkPackageId(launchLog);
     const identity = installed.ok ? await this.deviceIdentity(device) : undefined;
     if (installed.ok && identity) {
       recordDeployedPackage({
@@ -1015,7 +1048,7 @@ export class AndroidAdapter implements PlatformAdapter {
           (installed.ok ? `${device} did not say what device it is.` : installed.reason)
       );
     }
-    return outcome;
+    return recoveredInstallFailure ? { ...outcome, recoveredInstallFailure } : outcome;
   }
 
   /**

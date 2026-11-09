@@ -639,6 +639,7 @@ export class CommandCore {
         deviceClaim: adapter.deviceClaim?.(),
         launchMode: outcome.launchMode,
         launchModeCaveat: outcome.launchModeCaveat,
+        recoveredInstallFailure: outcome.recoveredInstallFailure,
         noVmServiceReason: outcome.noVmServiceReason,
         marionetteReady: marionette.marionetteReady,
         marionetteHint,
