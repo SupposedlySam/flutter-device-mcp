@@ -33,14 +33,18 @@ import {
   buildPtyCaptureCommand,
   launchAndCaptureUri as neutralLaunchAndCaptureUri,
 } from "../launchCapture.js";
+import { readRecords } from "../launchRegistry.js";
 import { logger } from "../logger.js";
 import { checkTizenRootstrap, RootstrapCheck } from "../tizenRootstrap.js";
-import {
-  diagnoseDeveloperMode,
-  fetchDeveloperModeFacts,
-  localIpForDevice,
-} from "../tizenDeveloperMode.js";
+import { localIpForDevice } from "../tizenDeveloperMode.js";
 import { hostFromSdbTarget } from "../input/samsungToken.js";
+import {
+  candidateHosts,
+  CandidateProbe,
+  describeProbes,
+  probeRest,
+  sdbConnectSucceeded,
+} from "../tizenReachability.js";
 import { TizenInputController } from "../input/tizenInputController.js";
 import {
   BuildMode,
@@ -163,6 +167,8 @@ export interface TizenAdapterConfig {
    * Defaults to `<appDir>/.tizen-target`.
    */
   targetFile?: string;
+  /** Launch registry to read recorded Tizen devices from; defaults to the shared one. */
+  launchRegistryPath?: string;
 }
 
 export class TizenAdapter implements PlatformAdapter {
@@ -594,39 +600,76 @@ export class TizenAdapter implements PlatformAdapter {
   }
 
   /**
-   * Diagnose the Samsung Developer Mode "Host PC IP" binding before connect.
+   * Diagnose why the TV cannot be used, before connect.
    *
-   * Resolves the device host, reads `developerMode`/`developerIP` from the
-   * device's `:8001/api/v2/` REST payload, and compares the bound Host PC IP to
-   * this Mac's LAN IP on the device's subnet. Returns an actionable diagnostic
-   * on a mismatch (or Developer Mode off), else `null`. Fully non-throwing —
-   * device discovery or REST failure resolves to `null` so a transient hiccup
-   * can never fail a deploy pre-check.
+   * A resolved device is one `sdb devices` lists as online, so sdb is already
+   * connected and there is nothing to diagnose: the REST `developerIP` can
+   * differ from this host's address on a TV that connects fine, and reporting
+   * that as a mismatch sent a successful deploy down a false trail. With none
+   * resolved (an unreachable TV is exactly why) each candidate address is
+   * probed instead: {@link probeCandidates}. Fully non-throwing, so a transient
+   * hiccup can never fail a deploy pre-check.
    */
   async environmentDiagnostic(
-    resolved?: DeviceResolution
+    resolved?: DeviceResolution,
+    opts: { deviceIp?: string } = {}
   ): Promise<string | null> {
+    if (resolved) return null;
     try {
-      // Reuse the caller's already-resolved device (deploy path) to avoid a
-      // redundant `sdb devices` + REST round-trip; self-discover otherwise.
-      const resolution = resolved ?? (await this.discoverDevice({ readOnly: true }));
-      const host = hostFromSdbTarget(resolution.target);
-      const facts = await fetchDeveloperModeFacts(host);
-      // With no facts at all the REST probe didn't answer — stay silent rather
-      // than emit a misleading "Developer Mode off" from an empty payload.
-      if (facts.developerMode === undefined && facts.developerIP === undefined) {
+      await this.discoverDevice({ readOnly: true });
+      return null;
+    } catch {
+      try {
+        return await this.probeCandidates(opts.deviceIp);
+      } catch (error) {
+        logger.warn("Tizen reachability diagnostic skipped", { error });
         return null;
       }
-      const localIp = localIpForDevice(host);
-      return diagnoseDeveloperMode(
-        facts.developerMode,
-        facts.developerIP,
-        localIp
-      );
-    } catch (error) {
-      logger.warn("Tizen developer-mode diagnostic skipped", { error });
-      return null;
     }
+  }
+
+  /**
+   * Try every address a Tizen device could be at: the call's `device_ip`, the
+   * configured device, `.tizen-target`, and the devices past launches
+   * recorded. The sdb connect attempt decides; see {@link describeProbes}.
+   */
+  private async probeCandidates(deviceIp?: string): Promise<string | null> {
+    const targetFile =
+      this.config.targetFile ?? path.join(this.config.appDir, ".tizen-target");
+    let fileTarget: string | undefined;
+    try {
+      fileTarget = parseTizenTargetFile(fs.readFileSync(targetFile, "utf8"));
+    } catch {
+      fileTarget = undefined;
+    }
+    const recorded = readRecords(this.config.launchRegistryPath)
+      .filter((record) => record.platform === "tizen")
+      .map((record) => record.device);
+    const hosts = candidateHosts([
+      deviceIp,
+      this.config.device,
+      fileTarget,
+      ...recorded,
+    ]);
+    const probes = await Promise.all(hosts.map((ip) => this.probeHost(ip)));
+    return describeProbes(probes, localIpForDevice);
+  }
+
+  private async probeHost(ip: string): Promise<CandidateProbe> {
+    const [rest, connect] = await Promise.all([
+      probeRest(ip),
+      runShell(`sdb connect ${quote(`${ip}:${DEFAULT_SDB_PORT}`)}`, {
+        timeoutMs: 20000,
+      }),
+    ]);
+    const output = connect.combined.trim();
+    return {
+      ip,
+      restAnswered: rest.answered,
+      restDeveloperIp: rest.developerIp,
+      connected: sdbConnectSucceeded(output),
+      connectOutput: output.split("\n").pop() ?? "",
+    };
   }
 
   /**

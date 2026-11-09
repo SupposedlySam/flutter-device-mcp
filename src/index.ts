@@ -122,7 +122,12 @@ class FlutterDeviceServer {
 
       switch (route.canonical) {
         case "flutter_info":
-          return this.json(await core.info(common));
+          return this.json(
+            await core.info({
+              ...common,
+              device_ip: args.device_ip as string | undefined,
+            })
+          );
         case "flutter_setup":
           return this.json(
             await core.setup({

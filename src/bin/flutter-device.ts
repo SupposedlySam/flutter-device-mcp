@@ -89,7 +89,8 @@ Usage:
   flutter-device <command> [--platform <ios|android|tizen|tvos|webos|macos>] [--app-dir <dir>] [flags]
 
 Commands:
-  info                Device + environment status and resolved config (with provenance)
+  info                Device + environment status and resolved config (with provenance;
+                      Tizen: --device-ip <host> adds an address to probe)
   setup               Prepare the device for development (--device-ip <host>)
   build               Build the app package (--mode release|profile|debug, --profile, --target, --install, --run)
   deploy              Install + launch, capture the VM Service URI (THE key command; --mode to match the built artifact)
@@ -163,7 +164,7 @@ async function run(): Promise<number> {
   switch (parsed.command) {
     case "info":
     case "doctor":
-      result = await core.info(common);
+      result = await core.info(merge({ device_ip: f.device_ip }));
       break;
     case "setup":
       result = await core.setup(merge({ device_ip: f.device_ip }));

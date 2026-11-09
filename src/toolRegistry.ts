@@ -112,10 +112,18 @@ function buildFlutterTools(): ToolDefinition[] {
     {
       name: "flutter_info",
       description:
-        "Run the platform info command and return device/environment status (flutter-tizen, sdb, Docker, connected devices, .tizen-target config, and the REST-sourced device summary). On iOS, `deviceClaim` names the simulator this server process has claimed for calls that name no device, if any. GUARDRAIL: sdb shell is never invoked (it is disabled/unreliable on Samsung devices); device facts come from the Samsung REST API on port 8001, which the CLI already handles.",
+        "Run the platform info command and return device/environment status (flutter-tizen, sdb, Docker, connected devices, .tizen-target config, and the REST-sourced device summary). On iOS, `deviceClaim` names the simulator this server process has claimed for calls that name no device, if any. TIZEN, when no device is reachable: `environmentDiagnostic` probes every candidate address (`device_ip`, FLUTTER_DEVICE_TIZEN_DEVICE, .tizen-target, devices past launches recorded) and reports, for each, whether :8001 answers and whether `sdb connect` succeeds. When connect fails it gives the TV-side fix: Apps → 12345 → Developer mode → set Host PC IP to this host's LAN IP → restart the TV. The connect attempt decides; the REST `developerIP` is shown only as a hint. GUARDRAIL: sdb shell is never invoked (it is disabled/unreliable on Samsung devices); device facts come from the Samsung REST API on port 8001, which the CLI already handles.",
       inputSchema: {
         type: "object",
-        properties: { ...platformProp, ...appDirProp },
+        properties: {
+          ...platformProp,
+          ...appDirProp,
+          device_ip: {
+            type: "string",
+            description:
+              "Tizen only: an extra address to probe when no device is reachable (bare host or host:26101), for a TV whose address is not in FLUTTER_DEVICE_TIZEN_DEVICE or .tizen-target.",
+          },
+        },
       },
     },
     {

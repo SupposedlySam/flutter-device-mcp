@@ -548,7 +548,10 @@ export interface PlatformAdapter {
    * pass it in to avoid a redundant discovery round-trip (`sdb devices` + REST);
    * when omitted, the implementation discovers the device itself (the info path).
    */
-  environmentDiagnostic?(resolved?: DeviceResolution): Promise<string | null>;
+  environmentDiagnostic?(
+    resolved?: DeviceResolution,
+    opts?: { deviceIp?: string }
+  ): Promise<string | null>;
 
   /**
    * OPTIONAL: why a VM-service `reloadSources` cannot work on `device`, or

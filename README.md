@@ -287,7 +287,7 @@ Commands:
 
 | Command | What it does |
 |---------|--------------|
-| `info` | Device + environment status and resolved config (with provenance) |
+| `info` | Device + environment status and resolved config (with provenance); Tizen: `--device-ip <host>` adds an address to probe |
 | `setup` | Prepare the device for development (`--device-ip <host>`) |
 | `build` | Build the app package (`--profile`, `--debug`, `--target`, `--install`, `--run`) |
 | `deploy` | Install + launch, capture the VM Service URI (**the key command**; `--allow-store-app-removal` to replace a copy somebody else installed) |
@@ -837,6 +837,22 @@ unresolvable link comes back as a failure naming the App Links /
 `Warning: Activity not started, intent has been delivered to currently running
 top-most instance.` is treated as **success** — it is just re-delivery to an
 already-foregrounded app, which is what firing several links in a row looks like.
+
+## Tizen: why a TV cannot be reached
+
+When no Tizen device resolves, `flutter_info` returns an `environmentDiagnostic`
+built by trying the TV rather than by reading its settings. It probes every
+candidate address once (the `device_ip` argument, `FLUTTER_DEVICE_TIZEN_DEVICE`,
+`.tizen-target`, and the Tizen devices recorded in
+`$TMPDIR/flutter-device-mcp-launches.json`) and reports, for each, whether `:8001`
+answers and whether `sdb connect` succeeds. When connect fails it gives the
+TV-side fix: Apps → 12345 → Developer mode → set Host PC IP to this host's LAN IP
+(named) → restart the TV.
+
+The connect attempt decides. The `developerIP` in the `:8001` payload is shown as
+a hint only, because it can differ from this host's address on a TV that connects
+fine. A device that resolves is already connected through sdb, so a resolved
+`flutter_deploy` carries no diagnostic.
 
 ## Per-platform prerequisites
 

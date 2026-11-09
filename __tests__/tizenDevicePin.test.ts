@@ -18,8 +18,6 @@ jest.unstable_mockModule("../src/cli.js", () => ({
 }));
 
 jest.unstable_mockModule("../src/tizenDeveloperMode.js", () => ({
-  diagnoseDeveloperMode: () => null,
-  fetchDeveloperModeFacts: async () => ({}),
   localIpForDevice: () => undefined,
 }));
 

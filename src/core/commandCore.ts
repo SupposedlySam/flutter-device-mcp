@@ -199,12 +199,14 @@ export class CommandCore {
   }
 
   // =========== info ==========
-  async info(args: CommonArgs): Promise<CommandOutput> {
+  async info(args: CommonArgs & { device_ip?: string }): Promise<CommandOutput> {
     const adapter = this.adapterFor(args);
     return this.guard("flutter_info", { platform: adapter.platform }, async () => {
       const result = await adapter.info();
       const environmentDiagnostic = adapter.environmentDiagnostic
-        ? (await adapter.environmentDiagnostic()) ?? undefined
+        ? (await adapter.environmentDiagnostic(undefined, {
+            deviceIp: args.device_ip,
+          })) ?? undefined
         : undefined;
       return {
         platform: adapter.platform,
