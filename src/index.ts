@@ -262,6 +262,7 @@ class FlutterDeviceServer {
               text: args.text as string | undefined,
               repeat: args.repeat as number | undefined,
               device_udid: args.device_udid as string | undefined,
+              target: args.target as "device" | "simulator" | undefined,
             })
           );
         case "flutter_geometry":

@@ -1403,6 +1403,7 @@ export class CommandCore {
       text?: string;
       repeat?: number;
       device_udid?: string;
+      target?: "device" | "simulator";
     }
   ): Promise<CommandOutput> {
     const adapter = this.adapterFor(args);
@@ -1423,7 +1424,7 @@ export class CommandCore {
               "(a string to type into the focused field)."
           );
         }
-        const input = adapter.input({ udid: args.device_udid });
+        const input = adapter.input({ udid: args.device_udid, kind: args.target });
 
         if (hasText) {
           // Text injection is an OPTIONAL controller capability (Android's

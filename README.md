@@ -673,6 +673,15 @@ reload and restart reach it.
   `FLUTTER_DEVICE_TVOS_ATV_ID` or else the device's name. Install it with
   `pipx install pyatv --python python3.12` and pair once with
   `atvremote --protocol companion pair`.
+  A key aimed at a simulator (by `device_udid` or `target: "simulator"`) returns
+  `{supported:false}`: a simulator has no remote channel. While a simulator is
+  booted, a key that names no target is refused rather than sent to the paired box,
+  so name the Apple TV with `device_udid` or `target: "device"`.
+- **The simulator's VM service URI comes from its log.** A tvOS simulator app
+  writes the VM-service line to the simulator's unified log, never to the console
+  `simctl launch --console-pty` relays. The deploy runs `xcrun simctl launch`, then
+  reads that launch's pid from `xcrun simctl spawn <udid> log show` until the line
+  appears or the timeout runs out.
 
 ## Local backend (`local_backend`)
 

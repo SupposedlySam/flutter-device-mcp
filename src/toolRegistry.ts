@@ -539,6 +539,12 @@ function buildFlutterTools(): ToolDefinition[] {
             description:
               "A string to TYPE into the currently-focused field (Android: `adb shell input text`; macOS: `cliclick t:`). Cannot carry newlines/tabs — send those as key events (KEYCODE_ENTER / KEYCODE_TAB). Platforms without an OS-level text channel return {supported:false}. Provide exactly one of `key` or `text`.",
           },
+          target: {
+            type: "string",
+            enum: ["device", "simulator"],
+            description:
+              "TVOS ONLY: which CLASS of target the key is for, resolved after any `device_udid`/pin and never served by the other class. 'simulator' returns {supported:false} (a simulator has no remote channel; drive it with Marionette). While a tvOS simulator is booted, a key naming no target is refused rather than sent to the paired Apple TV: pass the Apple TV's device_udid or 'device' to press on it. Ignored on other platforms.",
+          },
           ...deviceUdidProp(),
         },
       },

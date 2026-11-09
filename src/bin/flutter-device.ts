@@ -261,6 +261,7 @@ async function run(): Promise<number> {
         text: f.text as string | undefined,
         repeat: f.repeat as number | undefined,
         device_udid: devicePin,
+        target: f.target as "device" | "simulator" | undefined,
       });
       break;
     case "geometry":

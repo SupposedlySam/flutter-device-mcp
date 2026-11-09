@@ -34,7 +34,7 @@
  *  - profile / release, physical Apple TV: `flutter-tvos run -d <id> --<mode>`.
  *    Profile has a VM service, without hot reload or Marionette screenshots;
  *    release has no VM service. Both say so on the response.
- *  - simulator: `simctl launch --console-pty` of the debug build, the only build
+ *  - simulator: `simctl launch` of the debug build, the only build
  *    a tvOS simulator runs. A profile/release request there is answered in debug
  *    with a caveat saying so.
  * A requested mode is never swapped for another without the response naming
@@ -98,6 +98,7 @@ import { logger } from "../logger.js";
 import { parseAnnouncedVmServiceUri, parseVmServiceUri } from "../vmServiceUri.js";
 import { KILL_STALE_EXIT, killScopedLaunchDrivers } from "../killStaleScope.js";
 import { tvosDeviceSupportDiagnostic } from "../tvosDeviceSupport.js";
+import { buildSimVmServiceLogCommand, parseSimctlLaunchPid } from "../tvosSimulatorLog.js";
 import {
   parseDevicectlAppleTvs,
   parseTvosSimulators,
@@ -222,6 +223,8 @@ export interface TvosAdapterConfig {
   deviceSupportRoot?: string;
   /** Wait between checks that a terminated app has gone; injected for tests. */
   terminatePollMs?: number;
+  /** Wait between reads of a simulator's log for the VM-service line; injected for tests. */
+  simulatorLogPollMs?: number;
 }
 
 /**
@@ -260,6 +263,7 @@ export class TvosAdapter implements PlatformAdapter {
 
   /** Cached input controller so its selected mode survives across tool calls. */
   private inputController: InputController | undefined;
+  private inputPreference: DeviceTargetPreference = {};
 
   /**
    * The kind (device vs simulator) of the most recently resolved target. Cached
@@ -796,7 +800,7 @@ export class TvosAdapter implements PlatformAdapter {
    * A device launch always builds, so `dartDefine` is passed to the run and the
    * app that starts is compiled with it.
    *
-   * SIMULATOR: `simctl launch --console-pty` of the installed debug build, the
+   * SIMULATOR: `simctl launch` of the installed debug build, the
    * only build a tvOS simulator runs; a profile/release request there carries a
    * caveat naming both modes.
    */
@@ -948,40 +952,56 @@ export class TvosAdapter implements PlatformAdapter {
   }
 
   /**
-   * Simulator launch: `simctl launch --console-pty` prints the loopback VM
-   * service URI (the sim shares the Mac's loopback), captured with the neutral
-   * loopback parser.
+   * Simulator launch: `simctl launch`, then the simulator's unified log for the
+   * VM-service line of that launch, read until it appears or `timeoutMs` runs
+   * out. The simulator shares the Mac's loopback, so the URI it logs is the one
+   * to connect to.
    */
   private async launchSimulator(
     device: string,
     timeoutMs: number
   ): Promise<LaunchOutcome> {
-    // --terminate-running-process replaces a prior instance; --console-pty makes
-    // the app's stdout (incl. the "Dart VM Service … available at:" line) flow
-    // back. simctl launch returns promptly with the pid; the URI is printed by
-    // the app moments later, so bound the wait with the timeout.
+    const issuedAt = Date.now();
     const launch = await runShell(
-      `xcrun simctl launch --console-pty --terminate-running-process ${quote(device)} ${quote(this.appId)}`,
-      { timeoutMs }
+      `xcrun simctl launch --terminate-running-process ${quote(device)} ${quote(this.appId)}`,
+      { timeoutMs: SIMULATOR_LAUNCH_TIMEOUT_MS }
     );
-    const uri = parseVmServiceUri(launch.combined);
-    if (!uri) {
+    if (!launch.success) {
       return {
         failed: true,
-        reason:
-          "Launched on the tvOS simulator but did not observe a Dart VM Service " +
-          "URI. Ensure the installed simulator build is a DEBUG build (the sim is " +
-          "JIT-only and emits the loopback VM-service URI on launch).",
+        reason: `simctl launch of ${this.appId} failed on the tvOS simulator ${device}.`,
         logPath: "",
         pid: undefined,
         logTail: tailLines(launch.combined, 40),
       };
     }
+    const pid = parseSimctlLaunchPid(launch.combined, this.appId);
+    const pollMs = this.config.simulatorLogPollMs ?? SIMULATOR_LOG_POLL_MS;
+    const deadline = issuedAt + timeoutMs;
+    let logTail = "";
+    for (;;) {
+      const windowSeconds = (Date.now() - issuedAt) / 1000 + SIMULATOR_LOG_MARGIN_S;
+      const log = await runShell(buildSimVmServiceLogCommand(device, windowSeconds, pid), {
+        timeoutMs: SIMULATOR_LOG_READ_TIMEOUT_MS,
+      });
+      const uri = parseVmServiceUri(log.stdout);
+      if (uri) {
+        return { vmServiceUriWs: uri.ws, vmServiceUriHttp: uri.http, logPath: "", pid };
+      }
+      logTail = log.combined;
+      if (Date.now() + pollMs >= deadline) break;
+      await new Promise((resolve) => setTimeout(resolve, pollMs));
+    }
     return {
-      vmServiceUriWs: uri.ws,
-      vmServiceUriHttp: uri.http,
+      failed: true,
+      reason:
+        `Launched on the tvOS simulator${pid !== undefined ? ` (pid ${pid})` : ""} but its ` +
+        `log carried no Dart VM Service line within ${Math.round(timeoutMs / 1000)}s. ` +
+        "Ensure the installed simulator build is a DEBUG build: only a debug build " +
+        "starts the VM service on a simulator.",
       logPath: "",
-      pid: undefined,
+      pid,
+      logTail: tailLines(`${launch.combined}\n${logTail}`, 40),
     };
   }
 
@@ -1338,27 +1358,67 @@ export class TvosAdapter implements PlatformAdapter {
    * simulator, a missing install or a missing pairing each surface as
    * `{supported:false}` with the reason. There is no free cursor on tvOS.
    */
-  input(): InputController {
+  input(preference: DeviceTargetPreference = {}): InputController {
+    this.inputPreference = preference;
     if (!this.inputController) {
       this.inputController = new AtvRemoteInputController({
         binary: () => this.atvremoteBinary(),
-        target: () => this.inputTarget(),
+        target: () => this.inputTarget(this.inputPreference),
         run: (command) => runShell(command, { timeoutMs: 30000 }),
       });
     }
     return this.inputController;
   }
 
-  private async inputTarget(): Promise<AtvTarget | { unsupported: string }> {
-    if (this.config.atvId) return { id: this.config.atvId };
-    const resolution = await this.discoverDevice({ readOnly: true });
-    if (resolution.kind === "simulator") {
+  /**
+   * The Apple TV a key goes to, or why none may.
+   *
+   * atvremote reaches real hardware over the network, so a call aimed at a
+   * simulator must end here rather than fall through to the box: a call naming a
+   * simulator is unsupported, and an unnamed call while a simulator is booted is
+   * refused until it names the Apple TV, because the caller is likely driving
+   * the simulator and a key on the box would be reported as sent.
+   */
+  private async inputTarget(
+    preference: DeviceTargetPreference
+  ): Promise<AtvTarget | { unsupported: string }> {
+    if (preference.kind === "simulator") return { unsupported: SIMULATOR_HAS_NO_REMOTE };
+    const { physical, simulators } = await this.listTargets();
+    let resolution: TvosDeviceResolution | null;
+    try {
+      resolution = resolveTvosTarget(this.config.device, physical, simulators, {
+        udid: preference.udid,
+        kind: preference.kind,
+      });
+    } catch (error) {
+      // A sleeping Apple TV drops out of devicectl, yet atvremote can still wake
+      // it by its pyatv id.
+      if (this.config.atvId && !preference.udid && !this.config.device) {
+        return { id: this.config.atvId };
+      }
+      throw error;
+    }
+    if (!resolution) {
+      if (this.config.atvId && !preference.udid) return { id: this.config.atvId };
       return {
         unsupported:
-          "The resolved tvOS target is a simulator, which has no remote channel. Drive it " +
-          "with Marionette over the VM service, or use the Simulator's own remote window.",
+          "No Apple TV is paired with this Mac to send the key to. Pair one, or set " +
+          "FLUTTER_DEVICE_TVOS_ATV_ID (its pyatv id from `atvremote scan`).",
       };
     }
+    if (resolution.kind === "simulator") return { unsupported: SIMULATOR_HAS_NO_REMOTE };
+    const named = !!preference.udid?.trim() || preference.kind === "device" || resolution.source === "pin";
+    const bootedSimulator = simulators.find((d) => d.available);
+    if (!named && bootedSimulator) {
+      return {
+        unsupported:
+          `A tvOS simulator (${bootedSimulator.id}) is booted, so a key naming no target is not ` +
+          `sent to the Apple TV ${resolution.name ?? resolution.target}. To press on the Apple TV, ` +
+          `pass device_udid "${resolution.target}" or target "device". ` +
+          SIMULATOR_HAS_NO_REMOTE,
+      };
+    }
+    if (this.config.atvId) return { id: this.config.atvId };
     if (!resolution.name) {
       return {
         unsupported:
@@ -1369,6 +1429,16 @@ export class TvosAdapter implements PlatformAdapter {
     return { name: resolution.name };
   }
 }
+
+const SIMULATOR_HAS_NO_REMOTE =
+  "A tvOS simulator has no remote channel. Drive it with Marionette over the VM service, " +
+  "or use the Simulator's own remote window.";
+const SIMULATOR_LAUNCH_TIMEOUT_MS = 60000;
+const SIMULATOR_LOG_READ_TIMEOUT_MS = 30000;
+const SIMULATOR_LOG_POLL_MS = 2000;
+// log show's window ends at the newest entry and starts this long before the
+// launch, so clock skew between the launch and the log cannot cut the line off.
+const SIMULATOR_LOG_MARGIN_S = 30;
 
 const TERMINATE_POLL_ATTEMPTS = 5;
 const TERMINATE_POLL_MS = 1000;

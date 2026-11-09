@@ -711,18 +711,10 @@ describe("TvosAdapter.launchAndCaptureUri — physical device (flutter-tvos run 
   });
 
   it("answers a profile request on a simulator in debug and says so", async () => {
-    const adapter = tvos();
+    const adapter = tvos(undefined, { simulatorLogPollMs: 0 });
     mockDiscovery("simulator");
     await adapter.discoverDevice();
-    runShell.mockImplementation(async (cmd: string) =>
-      cmd.includes("simctl launch")
-        ? {
-            ...okResult,
-            combined:
-              "A Dart VM Service on Apple TV is available at: http://127.0.0.1:51182/tys47XX1iAw=/",
-          }
-        : okResult
-    );
+    mockSimulatorLaunch([SIM_VM_SERVICE_LOG_LINE]);
     const outcome = await adapter.launchAndCaptureUri(SIM_ID, 1000, "profile");
     expect(outcome).toMatchObject({ launchMode: "debug" });
     expect((outcome as { reloadNeedsOwningRun?: boolean }).reloadNeedsOwningRun).toBeUndefined();
@@ -801,50 +793,93 @@ describe("TvosAdapter.defaultLaunchTimeoutMs", () => {
   });
 });
 
-describe("TvosAdapter.launchAndCaptureUri — simulator (loopback URI)", () => {
-  it("captures the loopback VM-service URI simctl launch prints", async () => {
-    const adapter = tvos();
+const SIM_PID = 48213;
+const SIM_VM_SERVICE_LOG_LINE =
+  "2026-11-02 10:14:03.512 Df Runner[48213:1a2b3] [com.example.app:flutter] " +
+  "The Dart VM service is listening on http://127.0.0.1:51182/tys47XX1iAw=/";
+
+/**
+ * A simulator whose `simctl launch` prints only the pid, as it does, and whose
+ * `log show` answers each read with the next entry of `logReads` (the last one
+ * repeating).
+ */
+function mockSimulatorLaunch(logReads: string[], launchOk = true) {
+  let read = 0;
+  runShell.mockImplementation(async (cmd: string) => {
+    if (cmd.includes("simctl launch")) {
+      const pidLine = `${TVOS_APP_ID}: ${SIM_PID}\n`;
+      return launchOk
+        ? { ...okResult, stdout: pidLine, combined: pidLine }
+        : { ...okResult, success: false, code: 4, combined: "FBSOpenApplicationServiceErrorDomain" };
+    }
+    if (cmd.includes("log show")) {
+      const out = logReads[Math.min(read++, logReads.length - 1)] ?? "";
+      return { ...okResult, stdout: out, combined: out };
+    }
+    return okResult;
+  });
+}
+
+function simulatorCommands(fragment: string): string[] {
+  return runShell.mock.calls.map((c) => c[0] as string).filter((c) => c.includes(fragment));
+}
+
+describe("TvosAdapter.launchAndCaptureUri — simulator (URI from the simulator's log)", () => {
+  async function simulatorAdapter() {
+    const adapter = tvos(undefined, { simulatorLogPollMs: 0 });
     mockDiscovery("simulator");
     await adapter.discoverDevice();
-    runShell.mockImplementation(async (cmd: string) => {
-      if (cmd.includes("simctl launch")) {
-        return {
-          ...okResult,
-          combined:
-            "A Dart VM Service on Apple TV is available at: http://127.0.0.1:51182/tys47XX1iAw=/",
-        };
-      }
-      return okResult;
-    });
+    return adapter;
+  }
+
+  it("returns the ws URI the launched app logs, read from that pid's log in the simulator", async () => {
+    const adapter = await simulatorAdapter();
+    mockSimulatorLaunch([SIM_VM_SERVICE_LOG_LINE]);
     const outcome = await adapter.launchAndCaptureUri(SIM_ID, 5000);
-    expect("vmServiceUriWs" in outcome).toBe(true);
-    if ("vmServiceUriWs" in outcome) {
-      expect(outcome.vmServiceUriWs).toBe(
-        "ws://127.0.0.1:51182/tys47XX1iAw=/ws"
-      );
-    }
+    expect(outcome).toMatchObject({
+      vmServiceUriWs: "ws://127.0.0.1:51182/tys47XX1iAw=/ws",
+      vmServiceUriHttp: "http://127.0.0.1:51182/tys47XX1iAw=/",
+      pid: SIM_PID,
+    });
+    const [logRead] = simulatorCommands("log show");
+    expect(logRead).toContain(`xcrun simctl spawn '${SIM_ID}' log show`);
+    expect(logRead).toContain(`processID == ${SIM_PID}`);
   });
 
-  it("passes --console-pty so the app's stdout (incl. the VM-service URI) streams back", async () => {
-    const adapter = tvos();
-    mockDiscovery("simulator");
-    await adapter.discoverDevice();
-    runShell.mockImplementation(async (cmd: string) => {
-      if (cmd.includes("simctl launch")) {
-        return {
-          ...okResult,
-          combined:
-            "A Dart VM Service on Apple TV is available at: http://127.0.0.1:51182/tys47XX1iAw=/",
-        };
-      }
-      return okResult;
-    });
+  it("keeps reading the log until the VM-service line appears", async () => {
+    const adapter = await simulatorAdapter();
+    mockSimulatorLaunch(["", "", SIM_VM_SERVICE_LOG_LINE]);
+    const outcome = await adapter.launchAndCaptureUri(SIM_ID, 5000);
+    expect(outcome).toMatchObject({ vmServiceUriWs: "ws://127.0.0.1:51182/tys47XX1iAw=/ws" });
+    expect(simulatorCommands("log show")).toHaveLength(3);
+  });
+
+  it("launches without --console-pty, whose console never carries the URI and holds the call open", async () => {
+    const adapter = await simulatorAdapter();
+    mockSimulatorLaunch([SIM_VM_SERVICE_LOG_LINE]);
     await adapter.launchAndCaptureUri(SIM_ID, 5000);
-    const launchCall = runShell.mock.calls
-      .map((c) => c[0] as string)
-      .find((c) => c.includes("simctl launch"));
-    expect(launchCall).toBeDefined();
-    expect(launchCall).toContain("--console-pty");
+    expect(simulatorCommands("simctl launch")).toEqual([
+      `xcrun simctl launch --terminate-running-process '${SIM_ID}' '${TVOS_APP_ID}'`,
+    ]);
+  });
+
+  it("fails naming the pid and the wait when the log never carries the line", async () => {
+    const adapter = await simulatorAdapter();
+    mockSimulatorLaunch([""]);
+    const outcome = await adapter.launchAndCaptureUri(SIM_ID, 50);
+    expect(outcome).toMatchObject({ failed: true, pid: SIM_PID });
+    expect((outcome as { reason: string }).reason).toContain(
+      `(pid ${SIM_PID}) but its log carried no Dart VM Service line`
+    );
+  });
+
+  it("fails without reading the log when simctl launch fails", async () => {
+    const adapter = await simulatorAdapter();
+    mockSimulatorLaunch([SIM_VM_SERVICE_LOG_LINE], false);
+    const outcome = await adapter.launchAndCaptureUri(SIM_ID, 5000);
+    expect(outcome).toMatchObject({ failed: true });
+    expect((outcome as { reason: string }).reason).toContain(`simctl launch of ${TVOS_APP_ID} failed`);
+    expect(simulatorCommands("log show")).toHaveLength(0);
   });
 });
 
@@ -1289,6 +1324,60 @@ describe("TvosAdapter input — Siri Remote through atvremote", () => {
     mockDiscovery("simulator");
     await expect(adapter.input().key("UP")).rejects.toThrow(/simulator/);
     expect(lastRunShellContaining(ATV_BIN)).toBeUndefined();
+  });
+
+  it("refuses a key whose device_udid names the simulator, with an Apple TV paired too", async () => {
+    const adapter = tvos(undefined, { resolveAtvremote: () => ATV_BIN });
+    mockAppleTvAndSimulator(true);
+    await expect(adapter.input({ udid: SIM_ID }).key("UP")).rejects.toThrow(/no remote channel/);
+    expect(lastRunShellContaining(ATV_BIN)).toBeUndefined();
+  });
+
+  it("refuses a key for target simulator, with an Apple TV paired too", async () => {
+    const adapter = tvos(undefined, { resolveAtvremote: () => ATV_BIN, atvId: "pyatv-id" });
+    mockAppleTvAndSimulator(true);
+    await expect(adapter.input({ kind: "simulator" }).key("UP")).rejects.toThrow(
+      /no remote channel/
+    );
+    expect(lastRunShellContaining(ATV_BIN)).toBeUndefined();
+  });
+
+  it("refuses an unnamed key while a simulator is booted, naming the Apple TV's id to pass", async () => {
+    const adapter = tvos(undefined, { resolveAtvremote: () => ATV_BIN, atvId: "pyatv-id" });
+    mockAppleTvAndSimulator(true);
+    await expect(adapter.input().key("UP")).rejects.toThrow(
+      new RegExp(`simulator \\(${SIM_ID}\\) is booted.*device_udid "${ATV_ID}"`)
+    );
+    expect(lastRunShellContaining(ATV_BIN)).toBeUndefined();
+  });
+
+  it("presses on the Apple TV a key names by device_udid while a simulator is booted", async () => {
+    const adapter = tvos(undefined, { resolveAtvremote: () => ATV_BIN });
+    mockAppleTvAndSimulator(true);
+    await adapter.input({ udid: ATV_ID }).key("UP");
+    expect(lastRunShellContaining(" up")).toBe(`'${ATV_BIN}' -n '${ATV_NAME}' up`);
+  });
+
+  it("presses on the Apple TV for target device while a simulator is booted", async () => {
+    const adapter = tvos(undefined, { resolveAtvremote: () => ATV_BIN });
+    mockAppleTvAndSimulator(true);
+    await adapter.input({ kind: "device" }).key("DOWN");
+    expect(lastRunShellContaining(" down")).toBe(`'${ATV_BIN}' -n '${ATV_NAME}' down`);
+  });
+
+  it("presses on the Apple TV for an unnamed key when the simulator is shut down", async () => {
+    const adapter = tvos(undefined, { resolveAtvremote: () => ATV_BIN });
+    mockAppleTvAndSimulator(false);
+    await adapter.input().key("UP");
+    expect(lastRunShellContaining(" up")).toBe(`'${ATV_BIN}' -n '${ATV_NAME}' up`);
+  });
+
+  it("uses the target the latest call names, not the one an earlier call named", async () => {
+    const adapter = tvos(undefined, { resolveAtvremote: () => ATV_BIN });
+    mockAppleTvAndSimulator(true);
+    await adapter.input({ udid: ATV_ID }).key("UP");
+    await expect(adapter.input({ udid: SIM_ID }).key("DOWN")).rejects.toThrow(/no remote channel/);
+    expect(lastRunShellContaining(" down")).toBeUndefined();
   });
 
   it("turns an unpaired atvremote into the pairing steps", async () => {
