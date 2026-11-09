@@ -830,6 +830,12 @@ disambiguation chooser that an automated run cannot answer — the call then loo
 like a hang rather than a failure. Pass `package_or_bundle_id: ""` to go unscoped
 on purpose (what a real user tap does).
 
+**Quoted for both shells.** `adb shell` joins its arguments and hands them to the
+device's shell unescaped, so a link quoted only for the host would be split again
+on the device at its first `&` or space. The URL and package are quoted for the
+device's shell and again for the host's, so a multi-parameter query string or a
+link with a space reaches `am` whole.
+
 **`am` lies about success.** It reports a refused intent on STDOUT while still
 exiting 0, so the output is classified rather than trusting the exit code. An
 unresolvable link comes back as a failure naming the App Links /

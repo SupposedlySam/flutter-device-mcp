@@ -90,21 +90,28 @@ export function invalidOpenUrlReason(url: string): string | null {
  * claimed by more than one app raises a disambiguation chooser that no
  * automated run can answer, and the call appears to hang rather than fail.
  *
- * NOTE on encoding: the URL is single-quoted for the HOST shell, but `am` also
- * parses it on the device. A literal `&` inside a quoted argument reaches `am`
- * intact, so query strings with multiple parameters survive; percent-encoded
- * octets are passed through untouched and decoded by the receiving app.
+ * NOTE on encoding: the URL and package are parsed by two shells. `adb shell`
+ * joins its arguments with spaces and hands them to the device's `sh -c`
+ * unescaped, so a URL quoted only for the HOST shell is split again on the
+ * device, at its first `&` or space. Each is therefore quoted for the device
+ * shell and again for the host's. Percent-encoded octets pass through both
+ * untouched and are decoded by the receiving app.
  */
 export function buildAdbOpenUrlCommand(
   serial: string,
   url: string,
   packageName?: string
 ): string {
-  const pkg = packageName ? ` ${quote(packageName)}` : "";
+  const pkg = packageName ? ` ${adbShellArg(packageName)}` : "";
   return (
     `adb -s ${quote(serial)} shell am start ` +
-    `-a android.intent.action.VIEW -d ${quote(url)}${pkg}`
+    `-a android.intent.action.VIEW -d ${adbShellArg(url)}${pkg}`
   );
+}
+
+/** An argument that reaches the device's shell through `adb shell`: quoted for that shell, then for the host's. */
+function adbShellArg(arg: string): string {
+  return quote(quote(arg));
 }
 
 /**

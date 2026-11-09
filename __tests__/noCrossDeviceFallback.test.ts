@@ -647,7 +647,7 @@ describe("a checkout whose debug build is com.example.app.dev, on a phone that a
     expect(result.opened).toBe(true);
     expect(commands().filter((c) => c.includes("am start"))).toEqual([
       `adb -s '${PHONE}' shell am start -a android.intent.action.VIEW ` +
-        `-d 'https://example.com/create' '${DEV_ID}'`,
+        `-d ''\\''https://example.com/create'\\''' ''\\''${DEV_ID}'\\'''`,
     ]);
   });
 
@@ -724,7 +724,7 @@ describe("a checkout whose debug build is com.example.app.dev, on a phone that a
     const allowed = await open(true);
     expect(allowed.opened).toBe(true);
     expect(commands().filter((c) => c.includes("am start"))).toEqual([
-      `adb -s '${PHONE}' shell am start -a android.intent.action.VIEW -d 'exampleapp://create' '${DEV_ID}'`,
+      `adb -s '${PHONE}' shell am start -a android.intent.action.VIEW -d ''\\''exampleapp://create'\\''' ''\\''${DEV_ID}'\\'''`,
     ]);
   });
 

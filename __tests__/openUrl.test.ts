@@ -44,47 +44,61 @@ describe("buildAdbOpenUrlCommand", () => {
       buildAdbOpenUrlCommand("ABC123", "myapp://details?id=42", "com.example.app")
     ).toBe(
       "adb -s 'ABC123' shell am start -a android.intent.action.VIEW " +
-        "-d 'myapp://details?id=42' 'com.example.app'"
+        "-d ''\\''myapp://details?id=42'\\''' ''\\''com.example.app'\\'''"
     );
   });
 
-  it("omits the package when none is given, leaving the OS to disambiguate", () => {
-    const command = buildAdbOpenUrlCommand("ABC123", "https://example.com/x");
-    expect(command).toContain("-d 'https://example.com/x'");
-    expect(command.trimEnd().endsWith("'https://example.com/x'")).toBe(true);
-  });
-
-  // The safety claim is about SHELL TOKENIZATION, so these ask a real shell to
-  // split the built command and check the URL survives as ONE argument.
-  // Asserting on the substring instead would pass even if the quoting broke,
-  // since the dangerous text legitimately appears inside the quoted argument.
+  // The safety claim is about SHELL TOKENIZATION on both sides of adb, so
+  // these ask a real shell to split the built command as the host does, join
+  // the words after `shell` as adb does, and split that again as the device's
+  // shell does, then check the URL survives as ONE argument.
   function shellWords(command: string): string[] {
-    const args = command.replace(/^adb /, "");
     const out = execFileSync("/bin/sh", [
       "-c",
-      `printf '%s\\n' ${args}`,
+      `printf '%s\\n' ${command}`,
     ]).toString();
-    return out.split("\n").filter((line) => line.length > 0);
+    return out.split("\n").slice(0, -1);
   }
+
+  function deviceWords(command: string): string[] {
+    const host = shellWords(command);
+    return shellWords(host.slice(host.indexOf("shell") + 1).join(" "));
+  }
+
+  const VIEW = ["am", "start", "-a", "android.intent.action.VIEW", "-d"];
+
+  it("omits the package when none is given, leaving the OS to disambiguate", () => {
+    const command = buildAdbOpenUrlCommand("ABC123", "https://example.com/x");
+    expect(deviceWords(command)).toEqual([...VIEW, "https://example.com/x"]);
+  });
+
+  it("delivers a multi-parameter query string with a space to am whole", () => {
+    // An auth emulator's sign-in link is the ordinary case: the device's
+    // shell would end the command at the first '&' and split at the space.
+    const url =
+      "http://localhost:9099/emulator/action?continueUrl=example sign-in&mode=signIn&lang=en&oobCode=AbC123";
+    const command = buildAdbOpenUrlCommand("emulator-5554", url, "com.example.app");
+    expect(command).toBe(
+      "adb -s 'emulator-5554' shell am start -a android.intent.action.VIEW " +
+        "-d ''\\''http://localhost:9099/emulator/action?continueUrl=example sign-in&mode=signIn&lang=en&oobCode=AbC123'\\''' " +
+        "''\\''com.example.app'\\'''"
+    );
+    expect(deviceWords(command)).toEqual([...VIEW, url, "com.example.app"]);
+  });
 
   it("passes a URL with shell metacharacters through as a single argument", () => {
     const url = "https://example.com/x?a=1&b=2;echo pwned";
-    const words = shellWords(buildAdbOpenUrlCommand("serial", url));
-    expect(words).toContain(url);
-    expect(words).not.toContain("echo");
-    expect(words).not.toContain("pwned");
+    expect(deviceWords(buildAdbOpenUrlCommand("serial", url))).toEqual([...VIEW, url]);
   });
 
   it("survives an embedded single quote without terminating the argument", () => {
     const url = "myapp://x?q='; id #";
-    const words = shellWords(buildAdbOpenUrlCommand("serial", url));
-    expect(words).toContain(url);
-    expect(words).not.toContain("id");
+    expect(deviceWords(buildAdbOpenUrlCommand("serial", url))).toEqual([...VIEW, url]);
   });
 
   it("keeps percent-encoding untouched so the app decodes it, not the shell", () => {
     const url = "myapp://details?id=90%3A0%3A42";
-    expect(shellWords(buildAdbOpenUrlCommand("serial", url))).toContain(url);
+    expect(deviceWords(buildAdbOpenUrlCommand("serial", url))).toEqual([...VIEW, url]);
   });
 });
 
