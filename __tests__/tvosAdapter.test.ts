@@ -1490,7 +1490,11 @@ describe("TvosAdapter.install resolves the bundle that is actually on disk", () 
   }
 
   function adapterIn(dir: string) {
-    return new TvosAdapter({ appDir: dir, appId: TVOS_APP_ID });
+    return new TvosAdapter({
+      appDir: dir,
+      appId: TVOS_APP_ID,
+      locateFlutterTvos: () => FLUTTER_TVOS_ON_PATH,
+    });
   }
 
   function issued(sub: string): string {
