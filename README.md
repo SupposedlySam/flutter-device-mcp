@@ -75,51 +75,37 @@ only — real-app verification is welcome too.**
 
 ## Install
 
-Requires **Node.js 18+**.
-
-Run without installing:
+Requires **Node.js 18+**. flutter-device-mcp runs from a source checkout; it is
+not published to a package registry.
 
 ```bash
-npx flutter-device-mcp     # the MCP server (speaks MCP over stdio)
-npx flutter-device info    # the CLI
+git clone https://github.com/SupposedlySam/flutter-device-mcp.git
 ```
 
-Or install globally:
+The MCP server needs no build step. `scripts/run.mjs` is a **self-building
+launcher**: on first run it installs dependencies and compiles `dist/` if it is
+missing or stale (staleness is content-hashed, so a `git pull` or branch switch
+triggers a rebuild), then execs the server over stdio.
+
+The CLI (`flutter-device`) is not behind that launcher, so build it once and link
+it onto your PATH:
 
 ```bash
-npm i -g flutter-device-mcp
+cd flutter-device-mcp
+npm install && npm run build
+npm link                 # puts flutter-device (and flutter-device-mcp) on PATH
 flutter-device info
 ```
 
-### Running from source
-
-`scripts/run.mjs` is a **self-building launcher**: on first run it installs
-dependencies and compiles `dist/` if it is missing or stale (staleness is
-content-hashed, so a branch switch triggers a rebuild), then execs the server over
-stdio. A fresh checkout Just Works with no manual build step:
-
-```bash
-node scripts/run.mjs
-```
+`npm link` points at this checkout's `dist/`, so after a `git pull` run
+`npm run build` again for the CLI to pick it up. Without linking,
+`npm run cli -- info` runs the same CLI from the checkout.
 
 ## Connect your AI client
 
-Register `flutter-device-mcp` as an MCP server in your client's config. For Claude
-Code or Cursor, add a server entry (key `flutter`):
-
-```json
-{
-  "mcpServers": {
-    "flutter": {
-      "command": "npx",
-      "args": ["-y", "flutter-device-mcp"]
-    }
-  }
-}
-```
-
-To run from a source checkout instead, point it at `scripts/run.sh`, not
-`run.mjs` directly:
+Register the server in your client's config. For Claude Code or Cursor, add a
+server entry (key `flutter`) that points at `scripts/run.sh`, not `run.mjs`
+directly:
 
 ```json
 {

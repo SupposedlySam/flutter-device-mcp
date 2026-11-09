@@ -1,6 +1,7 @@
 {
   "name": "flutter-device-mcp",
   "version": "0.1.0",
+  "private": true,
   "description": "Model Context Protocol (MCP) server AND CLI that build, deploy, launch, and drive Flutter apps across iOS, Android, Tizen, tvOS, and webOS — capturing the Dart VM Service URI so a driver (e.g. Marionette) can connect.",
   "type": "module",
   "license": "MIT",
