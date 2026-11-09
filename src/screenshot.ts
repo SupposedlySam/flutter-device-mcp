@@ -68,6 +68,12 @@ export interface ScreenshotResult {
   deviceName?: string;
   /** Which class of target was captured — a simulator or real hardware. */
   deviceKind?: "device" | "simulator";
+  /**
+   * Android on a device with several displays: the `screencap -d` id that was
+   * captured, and why that one. Absent when the device has a single display.
+   */
+  display?: string;
+  displayChoice?: string;
   /** The capture path actually taken, so the routing decision is auditable. */
   via?: ScreenshotVia;
   /** Width of the saved PNG in pixels, read from its IHDR header. */
@@ -169,14 +175,19 @@ export function buildPymobiledevice3ScreenshotCommand(
 }
 
 /**
- * `adb -s <serial> exec-out screencap -p > <path>` — Android capture.
+ * `adb -s <serial> exec-out screencap [-d <display>] -p > <path>` — Android capture.
  *
  * `exec-out` (not `shell`) streams the raw PNG bytes with no CRLF translation,
  * so the redirected file is a valid PNG (a plain `adb shell screencap -p`
  * mangles the bytes on some hosts). The redirect target is quoted for the shell.
  */
-export function buildAdbScreencapCommand(serial: string, outPath: string): string {
-  return `adb -s ${quote(serial)} exec-out screencap -p > ${quote(outPath)}`;
+export function buildAdbScreencapCommand(
+  serial: string,
+  outPath: string,
+  displayId?: string
+): string {
+  const display = displayId ? ` -d ${quote(displayId)}` : "";
+  return `adb -s ${quote(serial)} exec-out screencap${display} -p > ${quote(outPath)}`;
 }
 
 /**

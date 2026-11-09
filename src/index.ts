@@ -233,6 +233,7 @@ class FlutterDeviceServer {
               include_base64: args.include_base64 as boolean | undefined,
               device_udid: args.device_udid as string | undefined,
               target: args.target as "simulator" | "device" | undefined,
+              display: args.display as string | undefined,
             })
           );
         case "flutter_record":

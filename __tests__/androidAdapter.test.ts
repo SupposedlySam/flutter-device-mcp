@@ -4,6 +4,11 @@ import os from "os";
 import path from "path";
 import { mockBuildPtyCaptureCommand } from "./support/mockBuildPtyCaptureCommand.js";
 import { androidAppTree, removeAndroidTrees } from "./support/androidTree.js";
+import {
+  FOLDABLE_DUMPSYS_DISPLAY,
+  MULTI_DISPLAY_WARNING,
+  pngOfSize,
+} from "./support/androidDisplayFixtures.js";
 
 // Mock the shell layer so we can assert exactly which adb/flutter commands the
 // AndroidAdapter issues, without spawning real processes. ESM mocking requires
@@ -1802,6 +1807,101 @@ describe("AndroidAdapter per-call device pin (device_udid)", () => {
       expect.stringContaining(`adb -s '${SERIAL}' exec-out screencap`),
       expect.anything()
     );
+  });
+
+  describe("screenshot on a multi-display device", () => {
+    const COVER_ID = "1234567890123456701";
+    const INNER_ID = "1234567890123456700";
+    let shot: string;
+
+    // One device online, `dumpsys display` answering with the foldable, and
+    // screencap writing a PNG of the size of the panel it was asked for.
+    function mockFoldable(dumpsys = FOLDABLE_DUMPSYS_DISPLAY) {
+      runShell.mockImplementation(async (cmd: string) => {
+        if (cmd.includes("adb devices")) {
+          return {
+            ...okResult,
+            stdout: `List of devices attached\n${SERIAL}  device product:fold model:Example_Fold\n`,
+          };
+        }
+        if (cmd.includes("dumpsys display")) return { ...okResult, stdout: dumpsys };
+        if (cmd.includes("screencap")) {
+          const inner = cmd.includes(`-d '${INNER_ID}'`);
+          const png = inner ? pngOfSize(1768, 2208) : pngOfSize(832, 2268);
+          fs.writeFileSync(shot, Buffer.concat([Buffer.from(MULTI_DISPLAY_WARNING), png]));
+        }
+        return okResult;
+      });
+    }
+
+    beforeEach(() => {
+      shot = path.join(os.tmpdir(), `flutter-device-mcp-foldable-${process.pid}-${Date.now()}.png`);
+    });
+    afterEach(() => {
+      fs.rmSync(shot, { force: true });
+    });
+
+    it("captures the lit cover panel by id and reports the display, device, via and pixel size", async () => {
+      mockFoldable();
+      const result = await android().screenshot!({ outPath: shot });
+      expect(runShell).toHaveBeenCalledWith(
+        `adb -s '${SERIAL}' exec-out screencap -d '${COVER_ID}' -p > '${shot}'`,
+        expect.anything()
+      );
+      expect(result).toMatchObject({
+        captured: true,
+        device: SERIAL,
+        via: "adb",
+        display: COVER_ID,
+        displayChoice: "only display that is on",
+        pixelWidth: 832,
+        pixelHeight: 2268,
+      });
+    });
+
+    it("captures the dark inner panel when it is asked for by id", async () => {
+      mockFoldable();
+      const result = await android().screenshot!({ outPath: shot, display: INNER_ID });
+      expect(runShell).toHaveBeenCalledWith(
+        expect.stringContaining(`screencap -d '${INNER_ID}' -p`),
+        expect.anything()
+      );
+      expect(result).toMatchObject({
+        captured: true,
+        display: INNER_ID,
+        displayChoice: "requested",
+        pixelWidth: 1768,
+        pixelHeight: 2208,
+      });
+    });
+
+    it("refuses an unknown display, lists the real ones and captures nothing", async () => {
+      mockFoldable();
+      const result = await android().screenshot!({ outPath: shot, display: "9" });
+      expect(result).toMatchObject({ captured: false, device: SERIAL, via: "adb" });
+      expect((result as { reason: string }).reason).toContain(
+        `${COVER_ID} (832x2268, ON, default); ${INNER_ID} (1768x2208, OFF)`
+      );
+      expect(runShell).not.toHaveBeenCalledWith(
+        expect.stringContaining("screencap"),
+        expect.anything()
+      );
+    });
+
+    it("passes no -d on a device with a single display", async () => {
+      mockFoldable(
+        FOLDABLE_DUMPSYS_DISPLAY.split("\n")
+          .filter((line) => !line.includes(INNER_ID))
+          .join("\n")
+      );
+      const result = await android().screenshot!({ outPath: shot });
+      expect(runShell).toHaveBeenCalledWith(
+        `adb -s '${SERIAL}' exec-out screencap -p > '${shot}'`,
+        expect.anything()
+      );
+      expect(result).toMatchObject({ captured: true, pixelWidth: 832, pixelHeight: 2268 });
+      expect((result as { display?: string }).display).toBeUndefined();
+    });
   });
 
   it("record runs the recorder against the pinned device", async () => {

@@ -1253,6 +1253,7 @@ export class CommandCore {
       include_base64?: boolean;
       device_udid?: string;
       target?: "device" | "simulator";
+      display?: string;
     }
   ): Promise<CommandOutput> {
     const adapter = this.adapterFor(args);
@@ -1273,6 +1274,7 @@ export class CommandCore {
           includeBase64: args.include_base64,
           deviceUdid: args.device_udid,
           target: args.target,
+          display: args.display,
         });
         return { platform: adapter.platform, ...result };
       }

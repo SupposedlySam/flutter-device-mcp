@@ -107,7 +107,8 @@ Commands:
   hot-reload          Real hot reload on the running app (--device, --timeout-ms)
   hot-restart         Hot restart (re-run main()) on the running app
   diagnose            Name any known runtime crash in the launch log (--log-path)
-  screenshot          Capture the screen to a PNG (--output-path, --include-base64, --target device|simulator)
+  screenshot          Capture the screen to a PNG (--output-path, --include-base64, --target device|simulator,
+                      --display <id> for one display of a multi-display Android device)
   record              Record a bounded screen clip (--duration-s, --fps, --format mp4|gif, --target device|simulator)
   set-input-mode      Select the input plane (--mode dpad|pointer) — TV
   key                 Send a remote/navigation key (--key UP|DOWN|ENTER|…) or type text (--text "hi"); --repeat N presses it N times

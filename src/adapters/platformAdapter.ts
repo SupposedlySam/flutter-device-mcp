@@ -603,6 +603,11 @@ export interface PlatformAdapter {
      * class.
      */
     target?: "device" | "simulator";
+    /**
+     * Android with several displays (a foldable): the `screencap -d` id to
+     * capture, honoured even when that display is off. Ignored elsewhere.
+     */
+    display?: string;
   }): Promise<ScreenshotResult>;
 
   /**

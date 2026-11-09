@@ -78,10 +78,12 @@ import {
   DeviceGeometryReading,
   parseWmDensity,
 } from "../deviceGeometry.js";
+import { chooseAndroidDisplay, parseAndroidDisplays } from "../androidDisplays.js";
 import {
   buildAdbScreencapCommand,
   extractPng,
   defaultScreenshotPath,
+  readPngDimensions,
   ScreenshotResult,
 } from "../screenshot.js";
 import {
@@ -1284,24 +1286,30 @@ export class AndroidAdapter implements PlatformAdapter {
    * CRLF byte-mangling that corrupts a `shell screencap -p` redirect. Resolves
    * the device the normal way (per-call pin > env pin > discovery) so the
    * capture follows the same target as deploy/lifecycle — including the target a
-   * caller pinned for this one call.
+   * caller pinned for this one call. A device with several displays is captured
+   * on the one chosen by {@link chooseAndroidDisplay}.
    */
   async screenshot(opts: {
     outPath?: string;
     includeBase64?: boolean;
     deviceUdid?: string;
     target?: "device" | "simulator";
+    display?: string;
   }): Promise<ScreenshotResult> {
     const resolution = await this.discoverDevice({
       udid: opts.deviceUdid,
       kind: opts.target,
     });
     const outPath = opts.outPath ?? defaultScreenshotPath("android");
+    const displays = await this.readDisplays(resolution.target);
+    const choice = chooseAndroidDisplay(displays, opts.display);
+    if (!choice.ok) {
+      return { captured: false, device: resolution.target, via: "adb", reason: choice.reason };
+    }
     // A multi-display phone prints a warning ahead of the PNG; extractPng
-    // drops it. No `-d`: SurfaceFlinger's first id is screencap's own default,
-    // and nothing in `--display-id` says which display is lit.
+    // drops it.
     const result = await runShell(
-      buildAdbScreencapCommand(resolution.target, outPath),
+      buildAdbScreencapCommand(resolution.target, outPath, choice.display?.id),
       { timeoutMs: 30000 }
     );
     const captured = fs.existsSync(outPath)
@@ -1311,6 +1319,8 @@ export class AndroidAdapter implements PlatformAdapter {
     if (!png) {
       return {
         captured: false,
+        device: resolution.target,
+        via: "adb",
         reason: `adb screencap failed on ${resolution.target}: ${tail(
           result.combined || captured?.toString("latin1", 0, 300) || "",
           20
@@ -1318,13 +1328,25 @@ export class AndroidAdapter implements PlatformAdapter {
       };
     }
     fs.writeFileSync(outPath, png);
+    const dimensions = readPngDimensions(png);
     return {
       captured: true,
       savedPath: outPath,
-      base64: opts.includeBase64
-        ? fs.readFileSync(outPath).toString("base64")
-        : undefined,
+      base64: opts.includeBase64 ? png.toString("base64") : undefined,
+      device: resolution.target,
+      via: "adb",
+      pixelWidth: dimensions?.width,
+      pixelHeight: dimensions?.height,
+      ...(choice.display && { display: choice.display.id, displayChoice: choice.why }),
     };
+  }
+
+  /** The device's physical displays, empty when `dumpsys display` could not be read. */
+  private async readDisplays(serial: string) {
+    const out = await runShell(`adb -s ${quote(serial)} shell dumpsys display`, {
+      timeoutMs: 15000,
+    });
+    return out.success ? parseAndroidDisplays(out.stdout) : [];
   }
 
   /**

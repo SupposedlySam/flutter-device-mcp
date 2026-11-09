@@ -299,7 +299,7 @@ Commands:
 | `foreground` | Bring the app back to the foreground (mobile; `--allow-store-app` as for `terminate`) |
 | `hot-reload` | Real hot reload on the running app |
 | `hot-restart` | Hot restart (re-run `main()`) on the running app |
-| `screenshot` | Capture the screen to a PNG (`--output-path`, `--include-base64`) |
+| `screenshot` | Capture the screen to a PNG (`--output-path`, `--include-base64`, `--display <id>` on a multi-display Android device) |
 | `record` | Record a bounded screen clip (`--duration-s`, `--fps`, `--format mp4\|gif`) |
 | `set-input-mode` | Select the input plane (`--mode dpad\|pointer`) — TV |
 | `key` | Send a remote/navigation key (`--key UP\|DOWN\|ENTER\|VOLUME_UP\|…`, `--repeat <n>`) — TV, Android, iOS volume |
@@ -590,6 +590,20 @@ A failed `pm list packages` is refused rather than read as "not installed". A co
 adb did not install (a store, a tester distribution, a sideloaded apk) is refused
 unless `allow_store_app` (lifecycle) or `allow_store_app_removal` (deploy and
 uninstall) is passed. `flutter_background` needs no package: it sends HOME.
+
+## Android screenshots on a multi-display device
+
+A foldable has one display device per panel, and `screencap` with no `-d`
+captures SurfaceFlinger's first one, which can be the inner panel even while the
+cover screen is the one in use: a black PNG reported as a capture.
+`flutter_screenshot` reads `dumpsys display` and passes `screencap -d <id>`,
+choosing the only display that is ON, otherwise the default display (the one
+backing logical display 0). A single-display device, or one whose displays could
+not be read, gets no `-d`. The `display` argument names a panel explicitly (the
+number after `local:`, either form accepted) and is honoured even when that panel
+is off; an unknown id is refused with the list of displays. The result reports
+`device`, `via`, `pixelWidth`/`pixelHeight`, and `display` with `displayChoice`
+(why that panel) when one was chosen.
 
 ## Parallel iOS simulators
 
